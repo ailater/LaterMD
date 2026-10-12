@@ -2887,11 +2887,14 @@ impl State {
             self.layout.right = false;
             let tab = self.tabs.current_mut();
             // 切入 Live 先进入浏览态：打开/切换文档不自动抢焦点，用户
-            // 点击内容或按 Enter 后才进入块级写作。
+            // 只有双击内容后才进入块级写作。
             tab.live.browse_only = true;
             tab.live.browse_enabled = true;
+            tab.live.active = None;
+            tab.live.pending_caret = None;
+            tab.live.pending_range = None;
             let byte = tab.cursor.byte;
-            // 小文档立即定位可编辑块；大文档把解析留给 Live 首帧，避免
+            // 小文档立即建立块表；大文档把解析留给 Live 首帧，避免
             // 状态归约与模式动画同帧阻塞 UI。
             if tab.editor.text().len() <= 64 * 1024 {
                 tab.live.sync(&tab.editor, byte);

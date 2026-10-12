@@ -6389,8 +6389,10 @@ mod tests {
             .current_mut()
             .editor
             .replace_all("甲乙丙\n\n后文");
-        // 光标在第 0 字节:live.sync 把块 0 定位成活动块
+        // 测试明确进入写作态；浏览态不会再因源码光标自动抢出 TextEdit。
         app.state.tabs.current_mut().cursor.byte = Some(0);
+        app.state.tabs.current_mut().live.browse_only = false;
+        app.state.tabs.current_mut().live.active = Some(0);
         let block_id =
             crate::ui::editor::tab_editor_id(app.state.tabs.current().id).with(("live-block", 0));
 

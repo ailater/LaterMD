@@ -118,6 +118,9 @@ impl TabState {
     /// 以初始内容建标签(`TabsState` 的唯一入口,`next_id` 在外层统一发)。
     fn new(id: u64, path: Option<PathBuf>, text: &str) -> Self {
         let editor = EditorBuffer::new(text);
+        let mut live = LiveState::default();
+        live.browse_only = true;
+        live.browse_enabled = true;
         Self {
             id,
             alias: None,
@@ -132,7 +135,7 @@ impl TabState {
             autosave: TabAutosave::default(),
             selection: None,
             pending_selection: None,
-            live: LiveState::default(),
+            live,
             editor,
         }
     }

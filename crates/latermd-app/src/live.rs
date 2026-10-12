@@ -97,7 +97,7 @@ pub struct LiveState {
     /// 正在以源码编辑的块序号;`None` = 没有块获得焦点。
     pub active: Option<usize>,
     /// 打开文档后的浏览态。浏览态只绘制富文本，不自动抢占编辑焦点；
-    /// 点击块或按 Enter 才进入写作态。
+    /// 左键双击块才进入写作态。
     pub browse_only: bool,
     /// 是否启用打开文档时的浏览态交互。默认关闭以保持无头测试夹具和
     /// 直接构造 LiveState 的既有语义；真实切入 Live 时由 State 打开。
@@ -140,14 +140,17 @@ pub struct LiveState {
 impl LiveState {
     /// 同步块表:修订号变了才重解析。
     ///
-    /// 重算后**按光标字节重新定位活动块** —— 敲回车会分裂块、删空行会合并
-    /// 块,按序号记忆必然错位(在第 2 块开头敲回车后,原来的第 3 块变成第 4 块)。
+    /// 写作态重算后**按光标字节重新定位活动块** —— 敲回车会分裂块、删空行
+    /// 会合并块,按序号记忆必然错位(在第 2 块开头敲回车后,原来的第 3 块变成
+    /// 第 4 块)。浏览态保留空活动块,不因源码光标自动进入写作。
     pub fn sync(&mut self, editor: &EditorBuffer, cursor_byte: Option<usize>) {
         let rev = editor.revision();
         if self.synced_rev == Some(rev) {
-            // 块表没变但还没有活动块(首次进入 Live 模式):按光标补定位,
+            // 写作态块表没变但还没有活动块(首次进入 Live 模式):按光标补定位,
             // 不必等下一次编辑 —— 否则要「先敲一个字」才出现可编辑的块。
-            if self.active.is_none() {
+            // 浏览态没有编辑意图，不能因为源码模式遗留的光标而自动抢
+            // 出 TextEdit；进入写作只由双击或明确的程序跳转触发。
+            if self.active.is_none() && !self.browse_only {
                 self.active = cursor_byte.and_then(|byte| self.block_containing(byte));
             }
             return;
@@ -159,9 +162,15 @@ impl LiveState {
             .map(|range| source_hash(&editor.text()[range.clone()]))
             .collect();
         self.synced_rev = Some(rev);
-        self.active = cursor_byte
-            .and_then(|byte| self.block_containing(byte))
-            .or_else(|| self.active.filter(|index| *index < self.blocks.len()));
+        self.active = if self.browse_only {
+            // 保留归约侧预先指定的活动块(例如格式动作与大纲跳转);
+            // 普通浏览态的活动块本来就是 None，因此不会被光标复活。
+            self.active.filter(|index| *index < self.blocks.len())
+        } else {
+            cursor_byte
+                .and_then(|byte| self.block_containing(byte))
+                .or_else(|| self.active.filter(|index| *index < self.blocks.len()))
+        };
     }
 
     /// 富渲染块的链接改写(#63 checkbox + #65 高亮):缓存命中直取,未命中
@@ -612,34 +621,11 @@ pub fn ui(
 ) -> egui::Response {
     live.sync(editor, cursor.byte);
 
-    // 打开文档默认是浏览态。Enter 是明确的编辑意图：把光标落到当前
-    // 光标所在块（没有光标时取首块），下一帧再创建 TextEdit，避免打开
-    // 文件就自动进入插入模式。
-    if live.browse_enabled
-        && live.browse_only
-        && panel
-            .ctx()
-            .input(|input| input.key_pressed(egui::Key::Enter))
-    {
-        if let Some(index) = cursor
-            .byte
-            .and_then(|byte| live.block_containing(byte))
-            .or_else(|| (!live.blocks.is_empty()).then_some(0))
-        {
-            let local = cursor
-                .byte
-                .map(|byte| {
-                    editor.byte_to_char(byte.min(live.blocks[index].end))
-                        - editor.byte_to_char(live.blocks[index].start)
-                })
-                .unwrap_or(0)
-                .min(live.block_char_len(editor, index));
-            live.browse_only = false;
-            live.active = Some(index);
-            live.pending_caret = Some((index, local));
-            live.pending_range = None;
-            live.caret_follow = false;
-        }
+    // 归约侧的大纲跳转、格式动作和测试/恢复路径可以预先指定活动块；
+    // 这类明确的程序动作应直接进入编辑态。普通打开文档时活动块为空，
+    // 仍保持浏览态，等待左键双击。
+    if live.browse_only && live.active.is_some() {
+        live.browse_only = false;
     }
 
     // 格式工具条的选区镜像(2026-10-10,live 格式动作的前半段):先按
@@ -684,6 +670,7 @@ pub fn ui(
         if let Some(block) = live.block_containing(byte) {
             let local = editor.byte_to_char(byte) - editor.byte_to_char(live.blocks[block].start);
             live.active = Some(block);
+            live.browse_only = false;
             live.pending_caret = Some((block, local));
             live.pending_range = None;
             live.caret_follow = true;
@@ -717,27 +704,41 @@ pub fn ui(
             // 上,归零让前距成为唯一间距源。
             ui.spacing_mut().item_spacing.y = 0.0;
             if block_count == 0 {
-                // 空文档也必须有真实 TextEdit，才能在写作模式直接获得
-                // 光标并接收首个字符；使用同一 EditorBuffer，不另建镜像。
-                let mut buffer = BlockBuffer {
-                    buffer: editor,
-                    range: 0..0,
-                };
-                let response_id = editor_id.with("live-empty");
-                let output = egui::TextEdit::multiline(&mut buffer)
-                    .id(response_id)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(1)
-                    .hint_text("从这里开始写作")
-                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)))
-                    .show(ui);
-                cursor.byte = output
-                    .state
-                    .cursor
-                    .char_range()
-                    .map(|range| editor.char_to_byte(range.primary.index.0));
-                active_response = Some(output.response.response);
+                if live.browse_only {
+                    // 空文档的浏览态没有可渲染块，只显示非编辑提示。双击
+                    // 提示后下一帧才创建 TextEdit，避免打开新文档就抢焦点。
+                    let response = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("双击此处开始写作")
+                                .color(ui.visuals().weak_text_color()),
+                        )
+                        .sense(egui::Sense::click()),
+                    );
+                    if response.double_clicked() {
+                        live.browse_only = false;
+                    }
+                } else {
+                    // 写作态使用共享缓冲，不另建镜像。
+                    let mut buffer = BlockBuffer {
+                        buffer: editor,
+                        range: 0..0,
+                    };
+                    let response_id = editor_id.with("live-empty");
+                    let output = egui::TextEdit::multiline(&mut buffer)
+                        .id(response_id)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(1)
+                        .hint_text("从这里开始写作")
+                        .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)))
+                        .show(ui);
+                    cursor.byte = output
+                        .state
+                        .cursor
+                        .char_range()
+                        .map(|range| editor.char_to_byte(range.primary.index.0));
+                    active_response = Some(output.response.response);
+                }
             }
             // 前一块的分类(首块无前距:vendored `had_content` 同语义,
             // 文档顶贴顶不悬空)。
@@ -1143,30 +1144,35 @@ pub fn ui(
                     // 经两张改写映射逆穿回块源码字节;文本 galley 之外回退
                     // 最近子块起点,全落空(块被剔除等)保持旧行为落块尾。
                     // 落点不滚动跟随:指针刚把视口定位到点击处。
-                    // 浏览态只响应滚动和 Enter，不因鼠标点按抢入插入模式；
-                    // 已经进入写作态后，点击其他块才切换活动编辑块。
-                    if !live.browse_only {
-                        if let Some(pos) = clicked_for_edit(ui, rect, editor_id) {
-                            let label_id = editor_id.with(("live-render", index));
-                            let block_source = BlockBuffer::slice(editor.text(), &range);
-                            let local = LiveState::click_caret_local(
-                                ui,
-                                label_id,
-                                pos,
-                                block_rendered.as_ref(),
-                                offset_map.as_ref(),
-                                highlight_map.as_ref(),
-                                emoji_map.as_ref(),
-                                task_map.as_ref(),
-                                block_source.len(),
-                            )
-                            .map(|byte| {
-                                editor.byte_to_char(range.start + byte)
-                                    - editor.byte_to_char(range.start)
-                            })
-                            .unwrap_or_else(|| live.block_char_len(editor, index));
-                            activate = Some((index, local));
-                        }
+                    // 浏览态只响应滚动和左键双击，不因单击抢入插入模式；
+                    // 已经进入写作态后，单击其他块才切换活动编辑块。
+                    let edit_pos = if live.browse_only {
+                        live.browse_enabled
+                            .then(|| clicked_for_edit(ui, rect, editor_id, true))
+                            .flatten()
+                    } else {
+                        clicked_for_edit(ui, rect, editor_id, false)
+                    };
+                    if let Some(pos) = edit_pos {
+                        let label_id = editor_id.with(("live-render", index));
+                        let block_source = BlockBuffer::slice(editor.text(), &range);
+                        let local = LiveState::click_caret_local(
+                            ui,
+                            label_id,
+                            pos,
+                            block_rendered.as_ref(),
+                            offset_map.as_ref(),
+                            highlight_map.as_ref(),
+                            emoji_map.as_ref(),
+                            task_map.as_ref(),
+                            block_source.len(),
+                        )
+                        .map(|byte| {
+                            editor.byte_to_char(range.start + byte)
+                                - editor.byte_to_char(range.start)
+                        })
+                        .unwrap_or_else(|| live.block_char_len(editor, index));
+                        activate = Some((index, local));
                     }
                 }
             }
@@ -1305,8 +1311,22 @@ pub fn ui(
 /// 点击距离」判定,残余歧义最多块边界 max_click_dist 一线。
 ///
 /// 命中时返回抬起点(点击点):进编辑的光标落点换算(#170)以它为输入。
-fn clicked_for_edit(ui: &egui::Ui, rect: egui::Rect, editor_id: egui::Id) -> Option<egui::Pos2> {
-    if !ui.input(|input| input.pointer.primary_clicked()) {
+fn clicked_for_edit(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    editor_id: egui::Id,
+    double_click: bool,
+) -> Option<egui::Pos2> {
+    let clicked = ui.input(|input| {
+        if double_click {
+            input
+                .pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        } else {
+            input.pointer.primary_clicked()
+        }
+    });
+    if !clicked {
         return None;
     }
     let pos = ui.input(|input| input.pointer.interact_pos())?;
@@ -1471,6 +1491,23 @@ mod tests {
         editor.insert_chars(0, "x");
         live.sync(&editor, None);
         assert_ne!(live.blocks, before, "编辑后重算");
+    }
+
+    /// 浏览态同步块表时不能把源码光标复活成活动块，否则打开文档会
+    /// 立即显示 TextEdit；活动块只能由双击或明确的程序跳转设置。
+    #[test]
+    fn browse_sync_does_not_activate_cursor_block() {
+        let editor = EditorBuffer::new("第一段\n\n第二段\n");
+        let mut live = LiveState {
+            browse_only: true,
+            browse_enabled: true,
+            ..LiveState::default()
+        };
+
+        live.sync(&editor, Some(0));
+
+        assert!(live.active.is_none(), "浏览态不应因源码光标显示插入框");
+        assert!(!live.blocks.is_empty(), "浏览态仍需建立富渲染块表");
     }
 
     /// 编辑前块序号发生漂移时，源码未变化的块仍复用富渲染结果。
