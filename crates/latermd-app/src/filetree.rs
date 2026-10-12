@@ -27,6 +27,13 @@ const SETTINGS_FILE: &str = "file_tree.json";
 /// 里的扩展名,补别的后缀等于建一个树里看不见的文件。
 const DEFAULT_MD_EXT: &str = "md";
 
+/// 「刷新」反馈窗口的最短时长(spinner 至少转这么久才退回图标)。
+///
+/// 取 450ms:比一次眨眼略长、又能被感知为「刚刚发生」而不是「卡住了」。
+/// **它不是超时上限** —— 超了也照常转,直到重扫真正做完(见
+/// [`FileTreeState::begin_refresh`] 里为什么需要它)。
+pub const REFRESH_FEEDBACK_MIN: std::time::Duration = std::time::Duration::from_millis(450);
+
 /// 单个目录在树里的直接子项显示上限(大目录保护:遍历整层收集计数,但
 /// UI 只渲染前这么多项,剩余进截断提示行)。
 pub const MAX_CHILDREN: usize = 500;
@@ -49,6 +56,8 @@ pub struct FileTreeState {
     pub children: HashMap<PathBuf, DirChildren>,
     /// 新建文件浮窗的输入状态;`Some` 时 UI 显示浮窗。同一时间至多一个。
     pub new_file: Option<NewFileDraft>,
+    /// 「刷新」按钮的反馈窗口起点(见 [`FileTreeState::begin_refresh`])。
+    pub refresh_started: Option<std::time::Instant>,
 }
 
 /// 新建文件浮窗的输入状态(#see `Message::FileTreeNewFileRequested` 的
@@ -107,15 +116,33 @@ impl FileTreeState {
         self.children.remove(dir);
     }
 
-    /// 丢弃全部子项缓存:下一次 [`Self::ensure_loaded`] 重扫「根 + 展开中」
-    /// 的每一项(外部增删改文件、`.gitignore` 变化后手动刷新走这里)。
+    /// 丢掉缓存并开一段反馈窗口(点「刷新」的归约落点)。
     ///
-    /// 清空整个 map 就是精确的「全部可见项」—— `children` 的键**只可能**
+    /// 清空 `children` 就是精确的「重扫全部可见项」—— 它的键**只可能**
     /// 是根与 `expanded` 里为真的目录(唯一的写入口是
     /// [`Self::ensure_loaded`],`invalidate` 只做删除),不存在需要保留
-    /// 的不可见项。
-    pub fn refresh(&mut self) {
+    /// 的不可见项;下一次 [`Self::ensure_loaded`] 即按这几项重列。
+    ///
+    /// **为什么要一段人为的最短时长**:重扫是同步的,且发生在
+    /// `App::logic` 的 `end_of_logic` 里 —— 也就是**绘制之前**。小目录
+    /// 重扫只有几毫秒,若 spinner 的显示与否直接绑「有没有 IO 在飞」,
+    /// 它会同帧生灭:用户点了、屏幕动都不动,等于没反馈。故把窗口下限
+    /// 拉到 [`REFRESH_FEEDBACK_MIN`],让「点了确实在动」这件事可见。
+    ///
+    /// `now` 参数化(同 [`crate::state`] 的 `autosave_pass` 口径):单测
+    /// 注入时刻,不真等。
+    pub fn begin_refresh(&mut self, now: std::time::Instant) {
         self.children.clear();
+        self.refresh_started = Some(now);
+    }
+
+    /// 是否处于刷新反馈窗口内(UI 据此在图标与 spinner 之间切换)。
+    ///
+    /// 纯函数且**接受时刻**:窗口是否过期由调用方的时钟说了算,本方法
+    /// 不读系统时钟 —— 否则单测没法构造「刚好在窗口内」这一档。
+    pub fn refreshing(&self, now: std::time::Instant) -> bool {
+        self.refresh_started
+            .is_some_and(|start| now.duration_since(start) < REFRESH_FEEDBACK_MIN)
     }
 
     /// 补齐「根目录 + 展开中目录」的子项缓存。每帧归约末尾调用:键缺席才
