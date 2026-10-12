@@ -92,8 +92,6 @@ pub const RAIL_ITEM: f32 = TOOLBAR_H;
 /// rail 内相邻两枚按钮的纵向间隙。比 `item_spacing.y`(3px)松一档,
 /// 让上下两组之外还能读出「同一组内」的节奏。
 pub const RAIL_GAP: f32 = 4.0;
-/// rail 上下两组之间分隔线的厚度(上组五视图 / 下组六文件动作)。
-pub const RAIL_DIVIDER_H: f32 = 1.0;
 /// 左栏(导航)宽度下限(docs/ui-shell-redesign.md §11,R4):三栏旧下限
 /// 160 是二分栏时代的数字,塞进四行视图导航后不够。
 pub const SIDEBAR_MIN_W: f32 = 180.0;
