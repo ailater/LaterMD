@@ -96,6 +96,12 @@ pub struct LiveState {
     block_hashes: Vec<u64>,
     /// 正在以源码编辑的块序号;`None` = 没有块获得焦点。
     pub active: Option<usize>,
+    /// 打开文档后的浏览态。浏览态只绘制富文本，不自动抢占编辑焦点；
+    /// 点击块或按 Enter 才进入写作态。
+    pub browse_only: bool,
+    /// 是否启用打开文档时的浏览态交互。默认关闭以保持无头测试夹具和
+    /// 直接构造 LiveState 的既有语义；真实切入 Live 时由 State 打开。
+    pub(crate) browse_enabled: bool,
     /// 下一帧要落到(块, 块内字符偏移)的光标:跨块 caret 路由的交接点。
     pub pending_caret: Option<(usize, usize)>,
     /// pending_caret 落地时的块内选区(主, 副)。`None` = 塌缩成
@@ -278,6 +284,8 @@ impl LiveState {
     pub fn reset(&mut self) {
         self.blocks.clear();
         self.active = None;
+        self.browse_only = true;
+        self.browse_enabled = true;
         self.pending_caret = None;
         self.pending_range = None;
         self.synced_rev = None;
@@ -604,6 +612,36 @@ pub fn ui(
 ) -> egui::Response {
     live.sync(editor, cursor.byte);
 
+    // 打开文档默认是浏览态。Enter 是明确的编辑意图：把光标落到当前
+    // 光标所在块（没有光标时取首块），下一帧再创建 TextEdit，避免打开
+    // 文件就自动进入插入模式。
+    if live.browse_enabled
+        && live.browse_only
+        && panel
+            .ctx()
+            .input(|input| input.key_pressed(egui::Key::Enter))
+    {
+        if let Some(index) = cursor
+            .byte
+            .and_then(|byte| live.block_containing(byte))
+            .or_else(|| (!live.blocks.is_empty()).then_some(0))
+        {
+            let local = cursor
+                .byte
+                .map(|byte| {
+                    editor.byte_to_char(byte.min(live.blocks[index].end))
+                        - editor.byte_to_char(live.blocks[index].start)
+                })
+                .unwrap_or(0)
+                .min(live.block_char_len(editor, index));
+            live.browse_only = false;
+            live.active = Some(index);
+            live.pending_caret = Some((index, local));
+            live.pending_range = None;
+            live.caret_follow = false;
+        }
+    }
+
     // 格式工具条的选区镜像(2026-10-10,live 格式动作的前半段):先按
     // 「无选区」起底,活动块分支内回填。起底防的是陈旧值 —— `tab.selection`
     // 是两种模式的共用槽,live 下不回填就会留着源码模式的旧值,归约侧
@@ -655,6 +693,7 @@ pub fn ui(
 
     let mut active_response: Option<egui::Response> = None;
     let mut activate: Option<(usize, usize)> = None;
+    let mut finish_editing = false;
     let mut route: Option<(usize, usize)> = None;
     // 选区 AI 浮标(#61 M1)的锚点素材:活动块持久选区(**文档坐标**字符
     // 区对,块内捕获时换算)与尾端光标条屏幕矩形,活动块分支内捕获、
@@ -718,7 +757,7 @@ pub fn ui(
                     ));
                 }
                 prev_kind = Some(kind);
-                if live.active == Some(index) {
+                if !live.browse_only && live.active == Some(index) {
                     let char_len = live.block_char_len(editor, index);
                     let lines = block_text.lines().count().max(1);
                     let mut buffer = BlockBuffer {
@@ -744,6 +783,18 @@ pub fn ui(
                         .cursor
                         .char_range()
                         .map(|range| range.primary.index.0);
+                    // Live 写作以空行结束当前块：第一次 Enter 仍是普通换行，
+                    // 第二次 Enter 形成空行后立即回到浏览态，下一帧显示富预览。
+                    if live.browse_enabled && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        if let Some(local) = caret {
+                            let global_char = buffer.buffer.byte_to_char(range.start) + local;
+                            let caret_byte = buffer.buffer.char_to_byte(global_char);
+                            if buffer.buffer.text()[..caret_byte].ends_with("\n\n") {
+                                finish_editing = true;
+                            }
+                        }
+                    }
                     // 跨块 caret 路由:块首按 ↑ 去上一块末尾;块尾按 ↓ 去下一块开头
                     if output.response.response.has_focus() {
                         let at_start = caret == Some(0);
@@ -1092,36 +1143,49 @@ pub fn ui(
                     // 经两张改写映射逆穿回块源码字节;文本 galley 之外回退
                     // 最近子块起点,全落空(块被剔除等)保持旧行为落块尾。
                     // 落点不滚动跟随:指针刚把视口定位到点击处。
-                    if let Some(pos) = clicked_for_edit(ui, rect, editor_id) {
-                        let label_id = editor_id.with(("live-render", index));
-                        let block_source = BlockBuffer::slice(editor.text(), &range);
-                        let local = LiveState::click_caret_local(
-                            ui,
-                            label_id,
-                            pos,
-                            block_rendered.as_ref(),
-                            offset_map.as_ref(),
-                            highlight_map.as_ref(),
-                            emoji_map.as_ref(),
-                            task_map.as_ref(),
-                            block_source.len(),
-                        )
-                        .map(|byte| {
-                            editor.byte_to_char(range.start + byte)
-                                - editor.byte_to_char(range.start)
-                        })
-                        .unwrap_or_else(|| live.block_char_len(editor, index));
-                        activate = Some((index, local));
+                    // 浏览态只响应滚动和 Enter，不因鼠标点按抢入插入模式；
+                    // 已经进入写作态后，点击其他块才切换活动编辑块。
+                    if !live.browse_only {
+                        if let Some(pos) = clicked_for_edit(ui, rect, editor_id) {
+                            let label_id = editor_id.with(("live-render", index));
+                            let block_source = BlockBuffer::slice(editor.text(), &range);
+                            let local = LiveState::click_caret_local(
+                                ui,
+                                label_id,
+                                pos,
+                                block_rendered.as_ref(),
+                                offset_map.as_ref(),
+                                highlight_map.as_ref(),
+                                emoji_map.as_ref(),
+                                task_map.as_ref(),
+                                block_source.len(),
+                            )
+                            .map(|byte| {
+                                editor.byte_to_char(range.start + byte)
+                                    - editor.byte_to_char(range.start)
+                            })
+                            .unwrap_or_else(|| live.block_char_len(editor, index));
+                            activate = Some((index, local));
+                        }
                     }
                 }
             }
         });
 
     if let Some((index, local)) = activate {
+        live.browse_only = false;
         live.active = Some(index);
         live.pending_caret = Some((index, local));
         live.pending_range = None;
         // 点击进编辑不跟随:指针刚把视口定位到点击处(decisions-pending #83)
+        live.caret_follow = false;
+        live.drag_anchor = None;
+    }
+    if finish_editing {
+        live.browse_only = true;
+        live.active = None;
+        live.pending_caret = None;
+        live.pending_range = None;
         live.caret_follow = false;
         live.drag_anchor = None;
     }
@@ -1152,6 +1216,7 @@ pub fn ui(
             .data_mut(|d| d.insert_temp(crate::ui::typewriter::live_memory_id(editor_id), tw));
     }
     if let Some(route) = route {
+        live.browse_only = false;
         live.active = Some(route.0);
         live.pending_caret = Some(route);
         live.pending_range = None;
