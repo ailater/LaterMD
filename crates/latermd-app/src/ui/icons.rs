@@ -55,6 +55,9 @@ pub enum Icon {
     PanelRight,
     /// 禅定:同心圆。
     Zen,
+    /// 菜单:三条横线(Zed 同款汉堡按钮,2026-10-12)。不是任何 Command
+    /// 的图标 —— 它是标题栏 chrome 按钮,不进 `Command::icon()` 共享白名单。
+    Hamburger,
     /// 最小化:一条横线。
     Minimize,
     /// 最大化:方框。
@@ -411,6 +414,11 @@ impl Icon {
             }
             Self::Minimize => {
                 seg((-0.30, 0.0), (0.30, 0.0));
+            }
+            Self::Hamburger => {
+                seg((-0.30, -0.20), (0.30, -0.20));
+                seg((-0.30, 0.0), (0.30, 0.0));
+                seg((-0.30, 0.20), (0.30, 0.20));
             }
             Self::Maximize => {
                 frame((-0.28, -0.28), (0.28, 0.28));

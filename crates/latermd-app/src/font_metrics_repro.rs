@@ -572,24 +572,36 @@ fn mixed_script_galley_metrics_forensics() {
         ("Inter-SemiBold 族(UI)", &semibold_font, &native_inter),
     ] {
         let head = probe(font, 'H');
-        let cjk = probe(font, '中');
         assert_approx(
             head.ascent,
             styled_metrics(BODY_SIZE, head_tables).ascent,
             FORENSIC_EPSILON,
             &format!("{family_name} 链头表值与预期不符"),
         );
-        assert_approx(
-            cjk.row_height,
-            noto_probe.row_height,
-            FORENSIC_EPSILON,
-            &format!("{family_name} 汉字应回落 Noto(链尾 CJK 生效)"),
-        );
         assert!(
             ctx.fonts_mut(|f| f.has_glyphs(font, "中文标题")),
             "{family_name} 的 CJK 回退链不完整(方块风险,PR #52 同类)"
         );
     }
+    // CJK 回退的行 metrics(#43 M2 的 UI 推广,2026-10-12,两族方向相反):
+    // 预览侧 bold 族链尾仍是原生表值 Noto(其链头 = CJK 表值副本);UI
+    // SemiBold 族链尾换成「链头对齐 CJK 副本」,行 metrics 与链头全等 ——
+    // 旧断言在这里钉的是修复前的错位现状,随 UI 推广反转为等值断言。
+    let bold_cjk = probe(&bold_font, '中');
+    assert_approx(
+        bold_cjk.row_height,
+        noto_probe.row_height,
+        FORENSIC_EPSILON,
+        "bold 别名族(预览)汉字应回落 Noto(链尾原生 CJK 生效)",
+    );
+    let ui_cjk = probe(&semibold_font, '中');
+    let ui_head = probe(&semibold_font, 'H');
+    assert_approx(
+        ui_cjk.row_height,
+        ui_head.row_height,
+        FORENSIC_EPSILON,
+        "Inter-SemiBold 族(UI) 汉字行 metrics 应与链头全等(链头对齐副本)",
+    );
     let mono_font = FontId::new(BODY_SIZE, FontFamily::Monospace);
     let mono_cjk = probe(&mono_font, '中');
     assert_approx(

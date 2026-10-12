@@ -81,8 +81,8 @@ pub const TITLE_CMD_MAX_W: f32 =
 /// 但那个 10px 在**工具栏里两侧都是内容、语义是「间隔」**;rail 的一侧
 /// 是内容、另一侧是**窗口边界**,语义该是「贴边距」。沿用间隔的量会与
 /// egui panel 默认 8px `inner_margin` 双层累加,实测图标距窗缘达 23px
-/// (VS Code Activity Bar 约 12px)。故收至 40 —— 单侧留白 6px,配合
-/// nav panel 左 margin 归零,图标最终距窗缘约 12px。
+/// (VS Code Activity Bar 约 12px)。故收至 40;按钮改定宽内缩
+/// [`SPACE_XS`](2026-10-12 坤哥「再往左一点」,见 `rail_item_rect`)。
 ///
 /// 取偶数便于图标在栏内 2px 级居中。
 pub const RAIL_W: f32 = 40.0;
@@ -92,6 +92,9 @@ pub const RAIL_ITEM: f32 = TOOLBAR_H;
 /// rail 内相邻两枚按钮的纵向间隙。比 `item_spacing.y`(3px)松一档,
 /// 让上下两组之外还能读出「同一组内」的节奏。
 pub const RAIL_GAP: f32 = 4.0;
+/// rail 图标边长。比视图 tab 的 `NAV_TAB_ICON`(16) 大一档 —— rail 是
+/// 纯图标导航,图标即全部内容(2026-10-12 坤哥反馈「再稍微大一点」)。
+pub const RAIL_ICON: f32 = 18.0;
 /// 左栏(导航)宽度下限(docs/ui-shell-redesign.md §11,R4):三栏旧下限
 /// 160 是二分栏时代的数字,塞进四行视图导航后不够。
 pub const SIDEBAR_MIN_W: f32 = 180.0;
