@@ -316,6 +316,7 @@ impl LaterMdApp {
             // 更细,低分屏下与原值一致。
             egui::Panel::top("workbench-header")
                 .exact_size(crate::ui::workbench::HEADER_H)
+                .show_separator_line(false)
                 .frame(egui::Frame::NONE.fill(crate::theme::shell(ui).chrome))
                 .show(ui, |ui| {
                     crate::ui::workbench::header(ui, &mut self.state, &mut self.outbox)
@@ -323,6 +324,7 @@ impl LaterMdApp {
         } else if self.frameless {
             egui::Panel::top("titlebar")
                 .exact_size(crate::ui::tokens::TITLEBAR_H)
+                .show_separator_line(false)
                 .frame(
                     egui::Frame::default()
                         .inner_margin(egui::Margin::ZERO)
@@ -337,9 +339,11 @@ impl LaterMdApp {
         // 勾选态从 state 取真值,#67 M2)
         let workbench = cfg!(target_os = "macos") && !self.frameless;
         if !workbench {
-            egui::Panel::top("menubar").show(ui, |ui| {
-                crate::ui::menubar::ui(ui, &self.state.keymap, &self.state, &mut self.outbox);
-            });
+            egui::Panel::top("menubar")
+                .show_separator_line(false)
+                .show(ui, |ui| {
+                    crate::ui::menubar::ui(ui, &self.state.keymap, &self.state, &mut self.outbox);
+                });
         }
 
         // ② 底部状态栏:散落在工具栏/侧边栏边缘的只读信息收成一行
@@ -349,6 +353,7 @@ impl LaterMdApp {
         // 若放在 nav/preview 之后,它就只在中央残余区里横跨,左右栏脚下
         // 各缺一截(2026-09-27 用户实测反馈的第二条)。
         egui::Panel::bottom("statusbar")
+            .show_separator_line(false)
             .frame(
                 egui::Frame::NONE
                     .fill(crate::theme::shell(ui).chrome)
@@ -378,6 +383,7 @@ impl LaterMdApp {
         let active_tab = &mut layout.left_view;
         egui::Panel::left("nav")
             .resizable(true)
+            .show_separator_line(false)
             .default_size(240.0)
             .size_range(crate::ui::tokens::SIDEBAR_MIN_W..=sidebar_max)
             // 2026-10-09:只把**左** margin 归零,其余照 egui 默认
@@ -435,6 +441,7 @@ impl LaterMdApp {
         let right = &mut self.state.layout.right;
         egui::Panel::right("preview")
             .resizable(true)
+            .show_separator_line(false)
             .default_size(if workbench {
                 ((ui.available_width() - 32.0) * 0.5).max(crate::ui::tokens::PREVIEW_MIN_W)
             } else {
@@ -848,6 +855,7 @@ impl LaterMdApp {
         if cfg!(target_os = "macos") && !self.frameless {
             egui::Panel::top("workbench-header")
                 .exact_size(crate::ui::workbench::HEADER_H)
+                .show_separator_line(false)
                 .frame(egui::Frame::NONE.fill(crate::theme::shell(ui).chrome))
                 .show(ui, |ui| {
                     crate::ui::workbench::header(ui, &mut self.state, &mut self.outbox)
@@ -855,6 +863,7 @@ impl LaterMdApp {
         } else if self.frameless {
             egui::Panel::top("titlebar")
                 .exact_size(crate::ui::tokens::TITLEBAR_H)
+                .show_separator_line(false)
                 .frame(
                     egui::Frame::default()
                         .inner_margin(egui::Margin::ZERO)
