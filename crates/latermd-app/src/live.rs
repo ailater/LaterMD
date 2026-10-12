@@ -26,7 +26,11 @@
 //! **同帧**发生,不出现「光标写了但视图没跟」的帧。滚动偏移与跟随标志
 //! 都在 UI 侧,不进 State 归约。
 
-use std::{ops::Range, sync::Arc};
+use std::{
+    hash::{Hash, Hasher},
+    ops::Range,
+    sync::Arc,
+};
 
 use eframe::egui;
 use egui_markdown::{LinkHandler, LinkStyle, MarkdownLabel};
@@ -50,6 +54,12 @@ type RichBlock = (
     Arc<latermd_md::OffsetMap>,
     Arc<latermd_md::OffsetMap>,
 );
+
+fn source_hash(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// 编辑器的渲染模式(P3 的那**一个标志**)。
 ///
@@ -81,6 +91,9 @@ impl RenderMode {
 pub struct LiveState {
     /// 块的字节区间,连续覆盖全文(`latermd_md::blocks`)。
     pub blocks: Vec<Range<usize>>,
+    /// 与 `blocks` 一一对应的源码指纹。编辑后只重建指纹发生变化的块，
+    /// 让后方未修改块继续复用富渲染缓存。
+    block_hashes: Vec<u64>,
     /// 正在以源码编辑的块序号;`None` = 没有块获得焦点。
     pub active: Option<usize>,
     /// 下一帧要落到(块, 块内字符偏移)的光标:跨块 caret 路由的交接点。
@@ -111,12 +124,10 @@ pub struct LiveState {
     /// (live 归约)也置假 —— 选区是用户刚框出来的,无需拽视口。
     pub caret_follow: bool,
     /// 富渲染块链接改写的块级缓存(#63;#65 M2 起高亮层并入同一条缓存):
-    /// 块序号 → (修订号, 改写后块文本, 高亮层映射, 任务层映射)。富渲染
-    /// 块每帧渲染,改写要解析块文本,稳态帧不该重付(与 `marks` 缓存同一
-    /// 纪律,只是富渲染块逐块都要,不是单槽)。修订号前进时整表清空(块
-    /// 序号随编辑漂移,旧条目不可信)。两张映射随渲染文本同源缓存:点击
-    /// 进编辑的落点换算要把渲染文本偏移**逆穿**回块源码坐标,点击时重算
-    /// 映射等于把改写解析重做一遍。
+    /// 块序号 → (源码指纹, 改写后块文本, 高亮层映射, 任务层映射)。
+    /// 修订号前进时保留未变化块的条目，只让源码指纹变化的块重新改写，
+    /// 避免在大文档中输入一个字符就清空整篇缓存。两张映射随渲染文本
+    /// 同源缓存:点击进编辑的落点换算要把渲染文本偏移**逆穿**回块源码坐标。
     rich_cache: std::collections::HashMap<usize, RichCacheEntry>,
 }
 
@@ -136,8 +147,12 @@ impl LiveState {
             return;
         }
         self.blocks = latermd_md::blocks(editor.text());
+        self.block_hashes = self
+            .blocks
+            .iter()
+            .map(|range| source_hash(&editor.text()[range.clone()]))
+            .collect();
         self.synced_rev = Some(rev);
-        self.rich_cache.clear();
         self.active = cursor_byte
             .and_then(|byte| self.block_containing(byte))
             .or_else(|| self.active.filter(|index| *index < self.blocks.len()));
@@ -148,11 +163,12 @@ impl LiveState {
     /// 层坐标):层序与预览四层链一致(高亮在任务之前,生产顺序 wikilink →
     /// 高亮 → emoji → 任务的 Live 子集);两层各有「无目标字符不启动解析」
     /// 的快路径,两层快路径直接恒等返回。
-    fn rich_block(&mut self, index: usize, rev: u64, block_text: &str) -> RichBlock {
-        if let Some((seen_rev, rendered, offset_map, highlight_map, emoji_map, task_map)) =
+    fn rich_block(&mut self, index: usize, _rev: u64, block_text: &str) -> RichBlock {
+        let hash = self.block_hashes.get(index).copied();
+        if let Some((seen_hash, rendered, offset_map, highlight_map, emoji_map, task_map)) =
             self.rich_cache.get(&index)
         {
-            if *seen_rev == rev {
+            if Some(*seen_hash) == hash {
                 return (
                     Arc::clone(rendered),
                     Arc::clone(offset_map),
@@ -177,7 +193,7 @@ impl LiveState {
         self.rich_cache.insert(
             index,
             (
-                rev,
+                hash.unwrap_or_else(|| source_hash(block_text)),
                 Arc::clone(&rendered),
                 Arc::clone(&offset_map),
                 Arc::clone(&highlight_map),
@@ -269,6 +285,7 @@ impl LiveState {
         self.drag_anchor = None;
         self.caret_follow = false;
         self.rich_cache.clear();
+        self.block_hashes.clear();
     }
 }
 
@@ -1020,7 +1037,7 @@ pub fn ui(
                     // 编辑」的命中不走 egui widget,理由见 [`clicked_for_edit`]。
                     let top = ui.cursor().top();
                     // 链接改写(#63 checkbox + #65 高亮):块文本先过改写层
-                    // (缓存键是修订号 + 块序号,稳态帧零解析),`task://`
+                    // (缓存键是源码指纹 + 块序号,稳态帧零解析),`task://`
                     // 链接由本块专属 handler 画成自绘 checkbox、`hl://` 画
                     // 成底色段 —— 探针坐标域带块首,点击切换由 `ui` 帧末的
                     // 探针命中判定统一发出。无目标字符的块改写恒等,渲染
@@ -1389,6 +1406,29 @@ mod tests {
         editor.insert_chars(0, "x");
         live.sync(&editor, None);
         assert_ne!(live.blocks, before, "编辑后重算");
+    }
+
+    /// 编辑前块序号发生漂移时，源码未变化的块仍复用富渲染结果。
+    #[test]
+    fn sync_keeps_rich_cache_for_unchanged_blocks() {
+        let (mut editor, mut live, _) = state_with("第一段 **a**\n\n第二段 **b**\n");
+        let first_rev = editor.revision();
+        for (index, range) in live.blocks.clone().into_iter().enumerate() {
+            let text = &editor.text()[range];
+            live.rich_block(index, first_rev, text);
+        }
+        let cached = live
+            .rich_cache
+            .get(&1)
+            .map(|entry| Arc::clone(&entry.1))
+            .expect("第二块已建立缓存");
+
+        editor.insert_chars(0, "前缀 ");
+        live.sync(&editor, None);
+
+        let second = live.blocks[1].clone();
+        let rendered = live.rich_block(1, editor.revision(), &editor.text()[second]);
+        assert!(Arc::ptr_eq(&cached, &rendered.0), "未变化块不应重新改写");
     }
 
     /// 活动块按光标字节定位:在第 2 块开头敲回车后,活动块跟着光标而不是
