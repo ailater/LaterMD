@@ -2847,6 +2847,10 @@ impl State {
             self.layout.pre_live_right = Some(self.layout.right);
             self.layout.right = false;
             let tab = self.tabs.current_mut();
+            // 切入 Live 先进入浏览态：打开/切换文档不自动抢焦点，用户
+            // 点击内容或按 Enter 后才进入块级写作。
+            tab.live.browse_only = true;
+            tab.live.browse_enabled = true;
             let byte = tab.cursor.byte;
             // 小文档立即定位可编辑块；大文档把解析留给 Live 首帧，避免
             // 状态归约与模式动画同帧阻塞 UI。
@@ -5689,6 +5693,10 @@ mod tests {
         assert_eq!(state.tabs.current().editor.revision(), rev);
         assert!(!state.tabs.current().editor.is_dirty());
         assert!(state.tabs.current().live.blocks.len() > 1, "块表已建");
+        assert!(
+            state.tabs.current().live.browse_only,
+            "切入 Live 默认浏览态"
+        );
 
         state.apply(Message::ToggleLivePreview);
         assert_eq!(state.render_mode, RenderMode::Source);
