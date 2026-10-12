@@ -568,6 +568,18 @@ impl LaterMdApp {
                 } else {
                     None
                 };
+                // 查找卡打开时,把全部命中的字符区间克隆给编辑器侧做
+                // 「页面级高亮」(VS Code 的 find match 橙色底):当前条
+                // 由 pending_selection 的选区承担,其余命中画浅底。克隆是
+                // 借用边界所需 —— 下面 editor::ui 拿的是 &mut TabState。
+                let find_marks: Vec<std::ops::Range<usize>> = if state.find.open
+                    && state.render_mode == crate::live::RenderMode::Source
+                    && !state.find.hits.is_empty()
+                {
+                    state.find.hits.clone()
+                } else {
+                    Vec::new()
+                };
                 let keep_find_focus = state.find.open
                     && state.render_mode == crate::live::RenderMode::Source
                     && pending_selection.is_some()
@@ -613,6 +625,7 @@ impl LaterMdApp {
                     // 关闭 = 现状零变化)。
                     state.theme.show_focus_mode,
                     outbox,
+                    &find_marks,
                 );
                 // 命中回填沿用编辑器的选区/滚动通道,但不能终止查找框的连续输入。
                 if keep_find_focus {
@@ -2376,6 +2389,78 @@ mod tests {
         );
         find_test_frame(&mut app, &ctx, screen, 0.4, Vec::new());
         assert_eq!(app.state.find.query, "n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 页面级命中高亮:查找卡打开后,编辑器区域应出现命中数对应的浅底
+    /// 矩形(选区底色 45% 透明);当前条仍由选区高亮承担。关闭查找卡后
+    /// 高亮消失。
+    #[test]
+    fn find_marks_paint_for_all_hits_and_clear_on_close() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1500.0, 850.0));
+        let (mut app, dir) = find_test_app("paint-marks");
+        // 生产高亮色 = ui.visuals().selection.bg_fill × 0.45;theme.apply
+        // 在 reduce 里跑,先跑一帧让主题落定,再取期望色(与生产同源,
+        // 硬编码会因主题差异误报)。
+        let mut shapes = find_test_frame(&mut app, &ctx, screen, 0.0, Vec::new());
+        // 期望色与生产同源:绘制帧的 visuals.selection.bg_fill × 0.45。
+        // 主题投影(theme.apply)按帧推进,首帧是 egui 默认蓝、次帧起
+        // 才是皮肤浅色 —— 所以期望色在**打开查找卡的首个绘制帧后**取。
+        let selection_fill = {
+            app.state.apply(Message::FindBarToggled(true));
+            app.state
+                .apply(Message::FindQueryChanged("needle".to_owned()));
+            let _ = find_test_frame(&mut app, &ctx, screen, 1.0, Vec::new());
+            ctx.global_style()
+                .visuals
+                .selection
+                .bg_fill
+                .gamma_multiply(0.45)
+        };
+        let count_marks = |shapes: &[egui::epaint::ClippedShape]| -> usize {
+            // fill 精确相等:期望色取自同一绘制帧的 visuals,同源无舍入差。
+            // (之前 ±2 的宽容把另一个相近浅底误计为命中。)
+            shapes
+                .iter()
+                .filter(|clipped| {
+                    matches!(
+                        &clipped.shape,
+                        egui::epaint::Shape::Rect(rect) if rect.fill == selection_fill
+                    )
+                })
+                .count()
+        };
+        assert_eq!(count_marks(&shapes), 0, "查找卡未开时无命中高亮");
+        shapes.clear();
+
+        app.state.apply(Message::FindBarToggled(true));
+        app.state
+            .apply(Message::FindQueryChanged("needle".to_owned()));
+        for step in 0..4 {
+            shapes = find_test_frame(
+                &mut app,
+                &ctx,
+                screen,
+                f64::from(step) * 0.1 + 1.0,
+                Vec::new(),
+            );
+            let marks = count_marks(&shapes);
+            // 文本含 3 个 needle;当前条由选区高亮(不同色),全部命中各
+            // 一块浅底 —— 数量应为 3(当前条也在,选区只是叠在其上)
+            assert_eq!(marks, 3, "三个命中都应有浅底高亮");
+        }
+
+        // Esc 关闭:高亮随之消失
+        find_test_frame(
+            &mut app,
+            &ctx,
+            screen,
+            2.0,
+            find_key(Key::Escape, Modifiers::NONE),
+        );
+        let shapes = find_test_frame(&mut app, &ctx, screen, 2.1, Vec::new());
+        assert_eq!(count_marks(&shapes), 0, "关闭查找卡后高亮消失");
         let _ = std::fs::remove_dir_all(dir);
     }
 

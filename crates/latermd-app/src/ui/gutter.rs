@@ -138,6 +138,7 @@ mod tests {
                     false,
                     false,
                     &mut Vec::new(),
+                    &[],
                 );
             },
         );
