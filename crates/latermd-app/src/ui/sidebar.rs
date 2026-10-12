@@ -23,6 +23,7 @@ use crate::git_split_diff::{inline_segments, line_no_text, split_rows, SplitRow,
 use crate::keymap::Keymap;
 use crate::search::{SearchResult, SearchState, SearchStatus, MAX_HITS};
 use crate::state::{Message, SidebarTab};
+use crate::ui::icons::Icon;
 use crate::ui::tokens::{self, RADIUS_SM, SPACE_XS};
 use latermd_git::{CommitInfo, DiffHunk, DiffLine, DiffLineKind, FileDiff, FileStatus, StatusKind};
 use latermd_md::OutlineItem;
@@ -685,11 +686,21 @@ fn search_panel(
     search_results(panel, search, root, outbox);
 }
 
+/// `search_controls` 渲染出的控件句柄:`row` 是搜索行五件套(箭头/输入/
+/// 三模式片),`replace_all` 是展开替换行时才在场的「全部替换」图标按钮。
+/// 生产路径只渲染不读回;字段供无头测试按句柄定位/点击(自绘图标按钮无
+/// 文本 shape 可找),allow 而非拆函数 —— 拆出去测试就得复刻一份布局。
+#[allow(dead_code)]
+pub struct SearchControlsHandles {
+    pub row: [egui::Response; 5],
+    pub replace_all: Option<egui::Response>,
+}
+
 fn search_controls(
     panel: &mut egui::Ui,
     search: &mut SearchState,
     outbox: &mut Vec<Message>,
-) -> [egui::Response; 5] {
+) -> SearchControlsHandles {
     // 行高必须**自适应**:按钮自然高随字体行高变(真机 CJK 比 egui 内置
     // 字体高 ~4px),任何写死的高度都会让固定尺寸分配溢出居中、控件逐个
     // 阶梯下移(真机截图回归:「不在一条线上」)。horizontal 自带交叉轴
@@ -705,6 +716,7 @@ fn search_controls(
     // 布局稳定后一帧收敛,与 egui 折叠动画同思路)。
     let row_h = ui_row_height(panel);
     let mut row: [Option<egui::Response>; 5] = [const { None }; 5];
+    let mut replace_all: Option<egui::Response> = None;
     let rows_h_id = egui::Id::new("latermd-search-rows-h");
     let rows_h = panel
         .ctx()
@@ -799,8 +811,9 @@ fn search_controls(
             // 请求,确认浮窗在归约侧;零命中/搜索未完禁用。
             if search.replace_open {
                 ui.horizontal(|ui| {
-                    // 预估「全部替换」占位(4 字 CJK + 内边距),避免框吃满
-                    let all_w = 84.0;
+                    // 图标按钮占位按 row_h 预留(VS Code 同款 replace-all
+                    // 图标,宽度只占一格,语义靠 tooltip)
+                    let all_w = row_h + 2.0;
                     let box_w = (ui.available_width() - all_w).max(1.0);
                     if egui::TextEdit::singleline(&mut search.replace_with)
                         .id_salt("search-replace-input")
@@ -820,17 +833,33 @@ fn search_controls(
                         search.confirm_replace = None;
                     }
                     let replace_enabled = search.can_replace_all();
-                    let button = ui.add_enabled(
-                        replace_enabled,
-                        egui::Button::new("全部替换").min_size(egui::vec2(0.0, row_h)),
-                    );
-                    if button.clicked() {
-                        outbox.push(Message::SearchReplaceAllRequested);
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(row_h, row_h), egui::Sense::click());
+                    let painter = ui.painter();
+                    if resp.hovered() && replace_enabled {
+                        painter.rect_filled(rect, RADIUS_SM, ui.visuals().widgets.hovered.bg_fill);
                     }
-                    button.on_hover_text(format!(
-                        "对当前 {} 条命中的所在文件执行替换(有确认浮窗)",
+                    let color = if replace_enabled {
+                        ui.visuals().text_color()
+                    } else {
+                        ui.visuals().weak_text_color()
+                    };
+                    Icon::ReplaceAll.draw(painter, rect.center(), tokens::ICON, color);
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            replace_enabled,
+                            "全部替换",
+                        )
+                    });
+                    let resp = resp.on_hover_text(format!(
+                        "全部替换:对当前 {} 条命中的所在文件执行(有确认浮窗)",
                         search.hits.len()
                     ));
+                    if resp.clicked() && replace_enabled {
+                        outbox.push(Message::SearchReplaceAllRequested);
+                    }
+                    replace_all = Some(resp);
                 });
             }
         });
@@ -838,7 +867,10 @@ fn search_controls(
         ui.ctx()
             .memory_mut(|m| m.data.insert_temp(rows_h_id, rows_h));
     });
-    row.map(|slot| slot.expect("搜索行控件必须全部渲染"))
+    SearchControlsHandles {
+        row: row.map(|slot| slot.expect("搜索行控件必须全部渲染")),
+        replace_all,
+    }
 }
 
 /// 搜索行内控件的统一高度:字体行高 + 按钮上下内边距 + 边框余量,再以
@@ -2306,7 +2338,8 @@ mod tests {
     }
 
     /// 侧栏搜索页一次完整渲染包含 VS Code 对齐的三个模式片、替换输入与
-    ///「全部替换」动作入口;交互消息的归约链路由 state 测试覆盖。
+    ///「全部替换」图标入口(图标无文字,由句柄测试断言);交互消息的归约
+    /// 链路由 state 测试覆盖。
     #[test]
     fn search_panel_renders_modes_and_replace_controls() {
         let ctx = egui::Context::default();
@@ -2324,13 +2357,16 @@ mod tests {
             ..SearchState::default()
         };
         let mut outbox = Vec::new();
+        let mut replace_all_present = false;
         let output = ctx.run_ui(RawInput::default(), |ui| {
-            search_panel(ui, &mut search, Some(&root), &mut outbox);
+            let handles = search_controls(ui, &mut search, &mut outbox);
+            replace_all_present = handles.replace_all.is_some();
         });
         let texts = shape_texts(&output);
         output.drop_without_applying_deltas();
         assert!(outbox.is_empty(), "仅渲染不产生消息");
-        for expected in ["needle", "Aa", "ab", ".*", "pin", "全部替换"] {
+        assert!(replace_all_present, "展开替换时应有「全部替换」图标按钮");
+        for expected in ["needle", "Aa", "ab", ".*", "pin"] {
             assert!(
                 texts.iter().any(|text| text.contains(expected)),
                 "搜索页应渲染 {expected:?}, 实际文本:{texts:?}"
@@ -2381,6 +2417,7 @@ mod tests {
                         |ui| {
                             let mut content = ui.new_child(egui::UiBuilder::new().max_rect(bounds));
                             rects = search_controls(&mut content, &mut search, &mut outbox)
+                                .row
                                 .map(|response| response.rect);
                         },
                     );
@@ -2448,11 +2485,13 @@ mod tests {
         };
         let mut outbox = Vec::new();
         let mut arrow_y = None;
+        let mut all_rect = None;
         let mut text_y: Vec<(String, f32)> = Vec::new();
         for _ in 0..2 {
             let output = ctx.run_ui(RawInput::default(), |ui| {
-                let responses = search_controls(ui, &mut search, &mut outbox);
-                arrow_y = Some(responses[0].rect.center().y);
+                let handles = search_controls(ui, &mut search, &mut outbox);
+                arrow_y = Some(handles.row[0].rect.center().y);
+                all_rect = handles.replace_all.map(|response| response.rect);
             });
             text_y = output
                 .shapes
@@ -2460,7 +2499,7 @@ mod tests {
                 .filter_map(|shape| match &shape.shape {
                     egui::epaint::Shape::Text(text) => {
                         let label = text.galley.job.text.as_str();
-                        matches!(label, "搜索…" | "替换为…" | "全部替换")
+                        matches!(label, "搜索…" | "替换为…")
                             .then(|| (label.to_owned(), text.visual_bounding_rect().center().y))
                     }
                     _ => None,
@@ -2478,10 +2517,18 @@ mod tests {
         };
         let search_y = y_of("搜索…");
         let replace_y = y_of("替换为…");
-        let all_y = y_of("全部替换");
+        // 「全部替换」已是图标(无文字):断言图标按钮存在、与替换框同一行、
+        // 且宽度是一格图标而非宽文字钮
+        let all_rect = all_rect.expect("全部替换图标按钮应可见");
         assert!(
-            (all_y - replace_y).abs() < 1.5,
-            "「全部替换」应与替换框同一行: 按钮 y={all_y}, 框 y={replace_y}"
+            (all_rect.center().y - replace_y).abs() < 1.5,
+            "全部替换图标应与替换框同一行: 图标 y={}, 框 y={replace_y}",
+            all_rect.center().y
+        );
+        assert!(
+            all_rect.width() <= 30.0,
+            "全部替换应为窄图标按钮而非宽文字钮: 宽 {}",
+            all_rect.width()
         );
         assert!(
             (arrow_y - (search_y + replace_y) / 2.0).abs() <= 2.5,
@@ -2499,7 +2546,7 @@ mod tests {
         let mut center = egui::Pos2::ZERO;
         for expected in [true, false] {
             ctx.run_ui(RawInput::default(), |ui| {
-                center = search_controls(ui, &mut search, &mut outbox)[0]
+                center = search_controls(ui, &mut search, &mut outbox).row[0]
                     .rect
                     .center();
             })
@@ -2639,7 +2686,8 @@ mod tests {
         };
         let mut outbox = Vec::new();
         let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 600.0));
-        for label in ["Aa", "ab", ".*", "全部替换"] {
+        // 全部替换已是图标按钮(无文字),单独立按返回句柄点击;其余按文本定位
+        for target in ["Aa", "ab", ".*", "replace-all-icon"] {
             let mut center = None;
             for _ in 0..3 {
                 let output = ctx.run_ui(
@@ -2648,18 +2696,26 @@ mod tests {
                         ..Default::default()
                     },
                     |ui| {
-                        search_panel(ui, &mut search, Some(&root), &mut outbox);
+                        let handles = search_controls(ui, &mut search, &mut outbox);
+                        if target == "replace-all-icon" {
+                            center = handles
+                                .replace_all
+                                .as_ref()
+                                .map(|response| response.rect.center());
+                        }
                     },
                 );
-                center = output.shapes.iter().find_map(|shape| match &shape.shape {
-                    egui::epaint::Shape::Text(text) if text.galley.job.text == label => {
-                        Some(text.visual_bounding_rect().center())
-                    }
-                    _ => None,
-                });
+                if target != "replace-all-icon" {
+                    center = output.shapes.iter().find_map(|shape| match &shape.shape {
+                        egui::epaint::Shape::Text(text) if text.galley.job.text == target => {
+                            Some(text.visual_bounding_rect().center())
+                        }
+                        _ => None,
+                    });
+                }
                 output.drop_without_applying_deltas();
             }
-            let center = center.expect("按钮文本可见");
+            let center = center.expect("按钮可点击位置");
             let events = vec![
                 Event::PointerMoved(center),
                 Event::PointerButton {
@@ -2682,13 +2738,13 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    search_panel(ui, &mut search, Some(&root), &mut outbox);
+                    search_controls(ui, &mut search, &mut outbox);
                 },
             )
             .drop_without_applying_deltas();
             assert_eq!(
                 outbox,
-                vec![if label == "全部替换" {
+                vec![if target == "replace-all-icon" {
                     Message::SearchReplaceAllRequested
                 } else {
                     Message::SearchQueryChanged
