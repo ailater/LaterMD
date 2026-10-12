@@ -357,7 +357,8 @@ impl LaterMdApp {
             .frame(
                 egui::Frame::NONE
                     .fill(crate::theme::shell(ui).chrome)
-                    .stroke(crate::ui::workbench::separator(ui)),
+                    // 面板边界由拖动时的交互线提示；空闲时不再画横线。
+                    .stroke(egui::Stroke::NONE),
             )
             .show(ui, |ui| {
                 status_bar(ui, &self.state);
@@ -400,7 +401,8 @@ impl LaterMdApp {
                         right: if workbench { 12 } else { 8 },
                         ..egui::Margin::symmetric(8, 2)
                     })
-                    .stroke(crate::ui::workbench::separator(ui)),
+                    // 侧栏与编辑区共享底色，边界只保留可拖动命中区。
+                    .stroke(egui::Stroke::NONE),
             )
             .show_collapsible(ui, left, |ui| {
                 let sidebar = if workbench {
@@ -456,7 +458,7 @@ impl LaterMdApp {
                     // 保留字面量(设计系统 T2b 判例;inset::MD 另有 OVERLAY_MARGIN 消费)。
                     .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
                     .fill(crate::theme::shell(ui).content)
-                    .stroke(crate::ui::workbench::separator(ui)),
+                    .stroke(egui::Stroke::NONE),
             )
             .show_collapsible(ui, right, |ui| {
                 crate::ui::workbench::pane_heading(ui, "对照预览", "只读");
@@ -508,7 +510,7 @@ impl LaterMdApp {
                 egui::Frame::default()
                     .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
                     .fill(crate::theme::shell(ui).content)
-                    .stroke(crate::ui::workbench::separator(ui)),
+                    .stroke(egui::Stroke::NONE),
             )
             .show(ui, |ui| {
                 // 提示行(存在才显示;原文件工具栏的能力,工具栏退役后迁此,
