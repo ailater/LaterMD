@@ -91,6 +91,24 @@ pub(crate) const DRAFT_SUFFIX: &str = ".latermd-draft";
 /// 没有落盘身份就没有同目录锚点,状态目录是唯一确定归属的地方。
 const DRAFTS_DIR: &str = "drafts";
 
+/// 文件栏「新建」草稿的基础名(不带扩展名;预填时按盘上现状让开撞名)。
+const NEW_FILE_BASE_NAME: &str = "新建文档";
+
+/// 预填名让开撞名:`新建文档.md` → `新建文档-1.md` …… 与
+/// [`crate::filetree::create_markdown`] 的让开算法同款,只是这里**只算
+/// 名字不建文件** —— 真正建文件时它会再让开一次(浮窗开着期间用户自己
+/// 抢先把那个名字建了),两道闸各管各的,不会互相失效。
+fn unique_draft(dir: &Path, base: &str) -> String {
+    let wanted = format!("{base}.md");
+    let mut candidate = wanted.clone();
+    let mut seq: u32 = 0;
+    while dir.join(&candidate).exists() {
+        seq += 1;
+        candidate = format!("{base}-{seq}.md");
+    }
+    candidate
+}
+
 /// key 闸门拦下时的状态栏文案:指路设置菜单 → AI Provider 浮窗。
 const AI_KEY_MISSING_NOTICE: &str = "未配置 API key(设置 → AI Provider)";
 
@@ -730,6 +748,18 @@ pub enum Message {
     FileTreeRootPick,
     /// 把文件树根目录切到最近列表中的某一项(不经对话框)。
     FileTreeRootSelected(PathBuf),
+    /// 文件栏「新建」按钮:挂起新建浮窗,载荷是**目标目录**(当前文档所在
+    /// 目录,无已落盘文档时回落文件树根)。无根目录时不发此消息。
+    FileTreeNewFileRequested(PathBuf),
+    /// 新建浮窗「确定」:在 [`Self::FileTreeNewFileRequested`] 给的目录里
+    /// 建空 Markdown 文件、失效该目录树缓存、开新标签打开。失败只落提示行。
+    FileTreeNewFileConfirmed,
+    /// 新建浮窗「取消」。
+    FileTreeNewFileCancelled,
+    /// 文件栏「刷新」按钮:重扫**根 + 当前展开中的全部目录**(树是懒加载
+    /// 缓存,外部增删改文件在 UI 层看不出来),并按新状态刷新 Git 角标 ——
+    /// 外部 `git add/commit` 后角标同样滞后。归约里同步做完,UI 无状态。
+    FileTreeRefreshRequested,
     /// 点击文件树目录行,载荷为目录路径。
     FileTreeToggled(PathBuf),
     /// 点击文件树文件行,载荷为文件路径。
@@ -1136,6 +1166,10 @@ impl State {
             Message::BedTestUploadRequested { profile_id } => self.test_bed_upload(profile_id),
             Message::FileTreeRootPick => self.pick_file_tree_root(),
             Message::FileTreeRootSelected(dir) => self.change_file_tree_root(dir),
+            Message::FileTreeNewFileRequested(dir) => self.request_new_file(dir),
+            Message::FileTreeNewFileConfirmed => self.confirm_new_file(),
+            Message::FileTreeNewFileCancelled => self.file_tree.new_file = None,
+            Message::FileTreeRefreshRequested => self.refresh_file_tree(),
             Message::FileTreeToggled(dir) => self.file_tree.toggle(&dir),
             Message::FileSelected(path) => {
                 self.open_path(&path);
@@ -3682,6 +3716,57 @@ impl State {
         }
     }
 
+    /// 挂起新建文件浮窗(`Message::FileTreeNewFileRequested` 的归约):
+    /// 目标目录取消息里的路径 —— **当前文档所在目录**,这样「在 docs 里
+    /// 看着文件树,新建的也在 docs」;目录不存在(文档已被外部删/移)时
+    /// 回落文件树根,再没有根就只落提示行,不挂浮窗。
+    ///
+    /// 草稿预填一个**当下不撞名**的名字(`新建文档.md` / `新建文档-1.md`):
+    /// 预填空串等于每次都要手打,预填固定串则每次都要先删一遍。
+    fn request_new_file(&mut self, dir: PathBuf) {
+        let Some(dir) = dir
+            .is_dir()
+            .then_some(dir)
+            .or_else(|| self.file_tree.root.clone())
+        else {
+            self.tabs.current_mut().document.notice =
+                Some("先在文件栏选择一个文件夹,再新建文档".to_owned());
+            return;
+        };
+        let draft = unique_draft(&dir, NEW_FILE_BASE_NAME);
+        self.file_tree.new_file = Some(crate::filetree::NewFileDraft { dir, draft });
+    }
+
+    /// 确认新建:落盘空 Markdown → 失效该目录树缓存(否则本会话看不见)→
+    /// 展开祖先并开新标签打开。失败只落提示行,浮窗保留可改名重试
+    /// (目标目录被外部删掉这类错误重试无意义,但文案统一带路径,用户
+    /// 自己判断)。无浮窗时 no-op。
+    fn confirm_new_file(&mut self) {
+        let Some(new_file) = self.file_tree.new_file.clone() else {
+            return;
+        };
+        match crate::filetree::create_markdown(&new_file.dir, &new_file.draft) {
+            Ok(path) => {
+                self.file_tree.new_file = None;
+                self.file_tree.invalidate(&new_file.dir);
+                self.open_in_tab(&path);
+            }
+            Err(error) => {
+                self.tabs.current_mut().document.notice = Some(error.to_string());
+            }
+        }
+    }
+
+    /// 重扫文件树(`Message::FileTreeRefreshRequested` 的归约):丢全部子项
+    /// 缓存,下一帧归约的 `ensure_loaded` 即按「根 + 展开中」重列。
+    ///
+    /// Git 角标一并刷新 —— 外部 `git add` / `commit` 之后角标同样滞后,
+    /// 只刷树不刷角标会让用户以为刷新没生效。
+    fn refresh_file_tree(&mut self) {
+        self.file_tree.refresh();
+        self.refresh_git();
+    }
+
     /// 换根并持久化(对话框与最近列表两个入口共用);落盘失败只落提示行,
     /// 本次会话的文件树照常可用。搜索一并复位:旧根的结果在新根下相对
     /// 路径失真,留着只会误导。Git 状态立即按新根刷新(角标与 Git 页
@@ -5921,6 +6006,179 @@ mod tests {
             state.tabs.current().document.path.as_deref(),
             Some(dir.join("top.md").as_path()),
             "当前切到新标签"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&settings_dir);
+    }
+
+    /// 文件栏「新建」全链路:请求挂浮窗(预填名让开盘上撞名)→ 确认落盘
+    /// 空 md → **该目录树缓存失效后帧末即列出新文件** → 开新标签打开,
+    /// 且目录是**当前文档所在目录**而不是树根。
+    ///
+    /// 「树里看得见」这一条是本测试的重点:缓存不失效的话整条功能在用户
+    /// 眼里就是「文件建出来了但树上没有」,而落盘与开标签都照样成功 ——
+    /// 只断言「文件存在」会漏掉这个缺陷。
+    #[test]
+    fn new_file_creates_in_current_dir_and_shows_in_tree() {
+        let dir = temp_path("new-file");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        let settings_dir = temp_path("new-file-settings");
+        let mut state = State {
+            settings_dir: Some(settings_dir.clone()),
+            ..State::default()
+        };
+        state.apply(Message::FileTreeRootSelected(dir.clone()));
+        state.end_of_logic();
+        let existing = dir.join("docs/笔记.md");
+        std::fs::write(&existing, "# 已有\n").unwrap();
+        // 当前文档落在 docs/ 下 → 新建也该落在这里
+        state.apply(Message::FileSelected(existing.clone()));
+        state.end_of_logic();
+
+        state.apply(Message::FileTreeNewFileRequested(dir.join("docs")));
+        let pending = state.file_tree.new_file.clone().expect("浮窗已挂起");
+        assert_eq!(pending.dir, dir.join("docs"), "目标是当前文档所在目录");
+
+        // 改成确定的名字再确认
+        if let Some(new_file) = state.file_tree.new_file.as_mut() {
+            new_file.draft = "新文档".to_owned();
+        }
+        state.apply(Message::FileTreeNewFileConfirmed);
+        assert_eq!(state.file_tree.new_file, None, "成功后关浮窗");
+
+        let created = dir.join("docs/新文档.md");
+        assert!(created.is_file(), "空 md 落盘:{}", created.display());
+        assert_eq!(
+            state.tabs.current().document.path.as_deref(),
+            Some(created.as_path()),
+            "开新标签打开"
+        );
+        assert_eq!(
+            state.file_tree.expanded.get(dir.join("docs").as_path()),
+            Some(&true),
+            "祖先展开 → 新文件在树里高亮可见"
+        );
+
+        state.end_of_logic();
+        let docs = state
+            .file_tree
+            .children
+            .get(dir.join("docs").as_path())
+            .expect("帧末已重列");
+        let names: Vec<&str> = docs.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"新文档.md"),
+            "新文件在本会话的树里可见(缓存失效生效):{names:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&settings_dir);
+    }
+
+    /// 预填名让开盘上撞名:已有 `新建文档.md` 时预填带 `-1` 的那个(而不是
+    /// 让用户每次先删一遍预填名)。
+    #[test]
+    fn new_file_prefill_yields_to_existing_name() {
+        let dir = temp_path("new-file-prefill");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("新建文档.md"), "x").unwrap();
+        let mut state = State::default();
+        state.apply(Message::FileTreeRootSelected(dir.clone()));
+
+        state.apply(Message::FileTreeNewFileRequested(dir.clone()));
+        assert_eq!(
+            state.file_tree.new_file.as_ref().unwrap().draft,
+            "新建文档-1.md",
+            "预填名让开既有文件"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 新建的两条失败路径都不落文件:空名 → 浮窗保留(可改名重试);目标目录
+    /// 被外部删掉 → 提示带路径。
+    #[test]
+    fn new_file_rejects_blank_name_and_missing_dir() {
+        let dir = temp_path("new-file-bad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = State::default();
+        state.apply(Message::FileTreeRootSelected(dir.clone()));
+
+        // 空名:浮窗保留,不落文件
+        state.apply(Message::FileTreeNewFileRequested(dir.clone()));
+        state.file_tree.new_file.as_mut().unwrap().draft = "   ".to_owned();
+        state.apply(Message::FileTreeNewFileConfirmed);
+        assert!(state.file_tree.new_file.is_some(), "空名保留浮窗供改名重试");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "空名一个文件都没落"
+        );
+
+        // 目录已被外部删掉:确认时提示带路径
+        let gone = dir.join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        state.file_tree.new_file = Some(crate::filetree::NewFileDraft {
+            dir: gone.clone(),
+            draft: "x".to_owned(),
+        });
+        std::fs::remove_dir_all(&gone).unwrap();
+        state.apply(Message::FileTreeNewFileConfirmed);
+        let notice = state.tabs.current().document.notice.as_deref().unwrap();
+        assert!(notice.contains("新建失败"), "{notice}");
+        assert!(notice.contains("x.md"), "提示带实际落点:{notice}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 「刷新」重扫根 + 展开中目录:外部新建的文件随即出现在树里,未展开
+    /// 的兄弟目录不重扫(懒加载语义不被破坏)。
+    #[test]
+    fn refresh_rescans_visible_dirs_only() {
+        let dir = temp_path("tree-refresh");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("open")).unwrap();
+        std::fs::create_dir_all(dir.join("shut")).unwrap();
+        let settings_dir = temp_path("tree-refresh-settings");
+        let mut state = State {
+            settings_dir: Some(settings_dir.clone()),
+            ..State::default()
+        };
+        state.apply(Message::FileTreeRootSelected(dir.clone()));
+        state.apply(Message::FileTreeToggled(dir.join("open")));
+        state.end_of_logic();
+        let root_before = state.file_tree.children[&dir].entries.len();
+
+        // 外部(别的程序/终端)在三处各建一个文件
+        std::fs::write(dir.join("外部根.md"), "x").unwrap();
+        std::fs::write(dir.join("open/外部子.md"), "x").unwrap();
+        std::fs::write(dir.join("shut/外部藏.md"), "x").unwrap();
+        assert_eq!(
+            state.file_tree.children[&dir].entries.len(),
+            root_before,
+            "刷新前缓存不动(这正是需要刷新的原因)"
+        );
+
+        state.apply(Message::FileTreeRefreshRequested);
+        state.end_of_logic();
+        let root_names: Vec<&str> = state.file_tree.children[&dir]
+            .entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(root_names.contains(&"外部根.md"), "{root_names:?}");
+        let open_names: Vec<&str> = state.file_tree.children[&dir.join("open")]
+            .entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(open_names.contains(&"外部子.md"), "{open_names:?}");
+        assert!(
+            !state.file_tree.children.contains_key(&dir.join("shut")),
+            "未展开目录不因刷新被拉进内存(懒加载不被破坏)"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
