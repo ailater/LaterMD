@@ -294,14 +294,24 @@ impl Icon {
             }
             Self::Reset => {
                 // 3/4 圆弧 + 末端箭头:260° → -40°(顺时针收口)
+                //
+                // **半径 0.455 是实测标定出来的,不是随手取的**:圆环的
+                // 固有直径只有同排满幅方形图标的 ~0.75 —— 原始 0.32 实测
+                // 视觉宽 11.5px,而 `Open` 是 16.1px,并排时右边那枚看着
+                // 缩了一号。按实测放大到 0.455 后视觉宽 15.8px,与满幅
+                // 方形同档(差 0.3px)。标定值钉在
+                // `icons::tests::icons_in_a_row_share_optical_size`,
+                // 改半径而不同步那条断言会当场红。
                 let end = arc(
                     (0.0, 0.0),
-                    0.32,
+                    0.455,
                     std::f32::consts::PI * 1.45,
                     std::f32::consts::PI * 3.05,
                 );
-                seg(end, (end.0 + 0.02, end.1 + 0.20));
-                seg(end, (end.0 + 0.20, end.1 - 0.04));
+                // 箭头按同比例放大,否则圆变大了、箭头还是原来的大小,
+                // 收口处会显得头重脚轻。
+                seg(end, (end.0 + 0.03, end.1 + 0.285));
+                seg(end, (end.0 + 0.285, end.1 - 0.06));
             }
             Self::PanelRight => {
                 frame((-0.44, -0.36), (0.44, 0.36));
@@ -469,16 +479,34 @@ pub fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip_text: &str) -> egui::R
     })
 }
 
-/// 「忙碌中」的图标按钮:图形换成 egui 内置 [`egui::Spinner`]。
+/// 窄一档的图标按钮(默认档 `ICON + 2 * SPACE_SM`,见 [`button_shell`] 里
+/// 生成的矩形):给**宽度紧张的容器**用 —— 如文件栏根目录行,那一行还要
+/// 挤一个目录名,三枚默认档按钮在 192px 侧栏里要占 50%,把目录名压到
+/// 放不下常用文案(实测「未选择根目录」被截成「未…」)。
+///
+/// 高度不变(仍是 `TOOLBAR_H`),故只收横向留白;命中矩形随之变窄,
+/// 调用方**必须同步更新自己的宽度预算**,否则会预留错。
+pub fn narrow_icon_button(ui: &mut egui::Ui, icon: Icon, tooltip_text: &str) -> egui::Response {
+    button_shell_narrow(ui, tooltip_text, |_, painter, rect, color| {
+        icon.draw(painter, rect.center(), ICON, color);
+    })
+}
+
+/// 「忙碌中」的图标按钮:图形换成 egui 内置 [`egui::Spinner`],转满一段
+/// 窗口再落回原图标(见 [`crate::filetree::FileTreeState::begin_refresh`]
+/// 里为什么需要那个窗口)。
 ///
 /// **为什么用 egui 自带的 spinner 而不是自绘**:它带
 /// `ui.request_repaint()` —— 动画自己在要帧,空闲时也能持续转;自绘的
 /// 旋转弧得由调用方额外驱动重绘,漏一处就转半圈卡住。
 ///
-/// `busy` 只换图形,**不禁用**:刷新途中再点是合理的(用户想再刷一次),
+/// **窄档**:给宽度紧张的容器(文件栏根目录行)用,见 [`narrow_icon_button`]
+/// —— 那里的三枚按钮必须同档,故刷新按钮与选文件夹/新建走同一入口。
+///
+/// `busy` 只换图形,**不禁用**:忙碌中再点是合理的(用户想再刷一次),
 /// 禁用会让按钮灰掉像坏了。语义标签同步改成「正在…」,辅助技术读到的
 /// 也是当前状态而不是永远「刷新」。
-pub fn busy_icon_button(
+pub fn narrow_busy_icon_button(
     ui: &mut egui::Ui,
     icon: Icon,
     busy: bool,
@@ -486,7 +514,7 @@ pub fn busy_icon_button(
     idle_text: &str,
 ) -> egui::Response {
     let tooltip_text = if busy { busy_text } else { idle_text };
-    button_shell(ui, tooltip_text, |ui, painter, rect, color| {
+    button_shell_narrow(ui, tooltip_text, |ui, painter, rect, color| {
         if busy {
             egui::Spinner::new()
                 .size(ICON)
@@ -501,7 +529,7 @@ pub fn busy_icon_button(
 /// 图标按钮的共同外壳:占位、hover 底、前景/禁用色、辅助技术标签与
 /// tooltip。图形部分交给 `paint`。
 ///
-/// `icon_button` 与 [`busy_icon_button`] 拆出这一层,是为了让两者的
+/// `icon_button` 与 [`narrow_busy_icon_button`] 拆出这一层,是为了让两者的
 /// 命中矩形与配色**保证同一份** —— 分两处写的话,改 hover 底时容易只改
 /// 一边,表现为「忙碌态的按钮手感不一样」。
 fn button_shell(
@@ -509,7 +537,36 @@ fn button_shell(
     tooltip_text: &str,
     paint: impl FnOnce(&egui::Ui, &egui::Painter, egui::Rect, Color32),
 ) -> egui::Response {
-    let size = egui::vec2(ICON + 2.0 * SPACE_SM, TOOLBAR_H);
+    button_shell_with(ui, ICON + 2.0 * SPACE_SM, tooltip_text, paint)
+}
+
+/// [`narrow_icon_button`] 的外壳:横向留白收到 `SPACE_XS`,与默认档
+/// **共用同一段实现** —— 两档的差异只由宽度参数承担,hover 底、配色、
+/// 辅助技术标签都走同一处,不会出现「窄档手感与默认档不一致」。
+fn button_shell_narrow(
+    ui: &mut egui::Ui,
+    tooltip_text: &str,
+    paint: impl FnOnce(&egui::Ui, &egui::Painter, egui::Rect, Color32),
+) -> egui::Response {
+    button_shell_with(
+        ui,
+        ICON + 2.0 * crate::ui::tokens::SPACE_XS,
+        tooltip_text,
+        paint,
+    )
+}
+
+/// 真正干活的外壳(见 [`button_shell`]):`width` 由调用方给定。
+///
+/// **窄档与默认档拆成两个入口而不是加布尔参数**:布尔开关会让调用点
+/// 变成 `icon_button(ui, icon, tip, true)` 这种读不出含义的写法。
+fn button_shell_with(
+    ui: &mut egui::Ui,
+    width: f32,
+    tooltip_text: &str,
+    paint: impl FnOnce(&egui::Ui, &egui::Painter, egui::Rect, Color32),
+) -> egui::Response {
+    let size = egui::vec2(width, TOOLBAR_H);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let enabled = ui.is_enabled();
     if ui.is_rect_visible(rect) {
@@ -707,6 +764,64 @@ mod tests {
         output.drop_without_applying_deltas();
     }
 
+    /// 一排里并排的图标,视觉尺寸须落在同一档 —— 坤哥反馈「选择文件夹和
+    /// 新建文件按钮弄好看点,最好能看起来等宽」的那一条守门。
+    ///
+    /// **量的是墨迹包围盒,不是画布**:画布永远都是 `size` 见方,量它
+    /// 等于量「我有没有按 size 画」,恒真。圆环类图标的固有直径天然小于
+    /// 满幅方形(`Reset` 原为 11.5px vs `Open` 16.1px,肉眼明显缩一号),
+    /// 故靠放大半径做视觉补偿。
+    ///
+    /// 上界 **1.2px** 是实测标定出来的:`Open` 16.11 / `New` 15.76 /
+    /// `Reset` 15.83,三档最大差 0.35px。放宽到 2px 也能过,但那正是
+    /// 「看得出大小不一」的水位 —— 定 1.2 是给标定值留余量又不放弃
+    /// 守门。**这个上界独立于被测实现**:它不引用任何参与造坐标的常数,
+    /// 只把 `Icon::draw` 的输出量出来比,所以改半径会真红。
+    #[test]
+    fn icons_in_a_row_share_optical_size() {
+        /// 图标墨迹的包围盒宽(px)。
+        fn ink_width(icon: Icon) -> f32 {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                icon.draw(ui.painter(), egui::pos2(50.0, 50.0), ICON, Color32::WHITE);
+            });
+            output.textures_delta.clear();
+            let (mut min, mut max) = (f32::MAX, f32::MIN);
+            for clipped in &output.shapes {
+                let rect = clipped.shape.visual_bounding_rect();
+                min = min.min(rect.left());
+                max = max.max(rect.right());
+            }
+            max - min
+        }
+
+        // 根目录行三枚 + 设置页「恢复默认」(同一枚 Reset),外加 rail 的
+        // Files 页签作满幅方形的基准参照。
+        let row = [
+            ("Open", Icon::Open),
+            ("New", Icon::New),
+            ("Reset", Icon::Reset),
+        ];
+        let widths: Vec<f32> = row.iter().map(|(_, icon)| ink_width(*icon)).collect();
+        let (min, max) = (
+            widths.iter().cloned().fold(f32::MAX, f32::min),
+            widths.iter().cloned().fold(f32::MIN, f32::max),
+        );
+        const TOLERANCE: f32 = 1.2;
+        assert!(
+            max - min <= TOLERANCE,
+            "并排图标视觉宽度须同档(实测 {row:?} = {widths:?},差 {:.2} > {TOLERANCE})",
+            max - min
+        );
+        // 基准参照本身也别缩得太小:满幅方形应当真的画满了画布的大半,
+        // 否则「三枚都偏小」也会一起过关(补偿过头是另一种难看)。
+        let reference = ink_width(Icon::Files);
+        assert!(
+            reference >= ICON * 0.9,
+            "满幅方形基准 {reference:.2} 应接近画布 {ICON},否则同档断言失去意义"
+        );
+    }
+
     /// 忙碌态:图形换成 spinner,且 spinner 是**矢量折线**不是文本字符。
     ///
     /// 命中矩形两态全等这条由 `sidebar::tests` 的几何测试负责(那里拿得到
@@ -717,11 +832,11 @@ mod tests {
     /// ②忙碌态是折线、零文本 —— spinner 一旦回退成 `…` 之类的字体字符,
     /// 缺字环境下渲染成方框(同 `Copy`/`Check` 的考法)。
     #[test]
-    fn busy_icon_button_swaps_graphic_with_a_vector_spinner() {
+    fn narrow_busy_icon_button_swaps_graphic_with_a_vector_spinner() {
         let render = |busy: bool| {
             let ctx = egui::Context::default();
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                busy_icon_button(ui, Icon::Reset, busy, "正在刷新目录树…", "刷新目录树");
+                narrow_busy_icon_button(ui, Icon::Reset, busy, "正在刷新目录树…", "刷新目录树");
             });
             // 本测试要读 shape,故不能一丢了之;`clear` 是
             // `drop_without_applying_deltas` 的同一件事,只是把「丢掉」
