@@ -3765,8 +3765,12 @@ impl State {
     ///
     /// Git 角标一并刷新 —— 外部 `git add` / `commit` 之后角标同样滞后,
     /// 只刷树不刷角标会让用户以为刷新没生效。
+    ///
+    /// 时刻取自本函数(同 `autosave_pass` 口径在 `end_of_logic` 取时):
+    /// 单测不靠真等反馈窗口,只断言起点已置位,窗口边界由
+    /// [`crate::filetree::FileTreeState::refreshing`] 注入时刻来验。
     fn refresh_file_tree(&mut self) {
-        self.file_tree.refresh();
+        self.file_tree.begin_refresh(std::time::Instant::now());
         self.refresh_git();
     }
 
@@ -6166,6 +6170,17 @@ mod tests {
         );
 
         state.apply(Message::FileTreeRefreshRequested);
+        // 反馈窗口起点已置:即便重扫在同一帧就做完,spinner 也有
+        // `REFRESH_FEEDBACK_MIN` 的时长可转(坤哥反馈「点了没个动态」)。
+        let started = state.file_tree.refresh_started.expect("刷新必须开反馈窗口");
+        assert!(state.file_tree.refreshing(started), "刚点的这一刻在窗口内");
+        assert!(
+            !state
+                .file_tree
+                .refreshing(started + crate::filetree::REFRESH_FEEDBACK_MIN),
+            "窗口下限一到即退出(否则 spinner 永不落回图标)"
+        );
+
         state.end_of_logic();
         let root_names: Vec<&str> = state.file_tree.children[&dir]
             .entries

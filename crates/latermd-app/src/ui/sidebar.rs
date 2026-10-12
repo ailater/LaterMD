@@ -1206,7 +1206,13 @@ fn root_row(
                 outbox.push(Message::FileTreeNewFileRequested(dir));
             }
         }
-        let refresh = crate::ui::icons::icon_button(ui, Icon::Reset, "刷新目录树");
+        let refresh = crate::ui::icons::busy_icon_button(
+            ui,
+            Icon::Reset,
+            tree.refreshing(std::time::Instant::now()),
+            "正在刷新目录树…",
+            "刷新目录树",
+        );
         if refresh.clicked() {
             outbox.push(Message::FileTreeRefreshRequested);
         }
@@ -4423,6 +4429,111 @@ mod tests {
             "无落盘文档回落树根"
         );
         assert_eq!(new_file_target(None, None), None, "两者皆无则不发消息");
+    }
+
+    /// 刷新反馈窗口内:刷新按钮的**命中矩形与空闲态全等**(外壳拆得对),
+    /// 且**仍可点**(禁用会让按钮灰掉像坏了,而刷新途中再刷一次是合理诉求)。
+    ///
+    /// 矩形全等这条挡的是「忙碌态换了控件导致手感/占位都变了」:两处各写
+    /// 一遍外壳时,改 hover 底或尺寸很容易只改一边。
+    #[test]
+    fn refresh_button_keeps_geometry_and_stays_clickable_while_busy() {
+        let root = PathBuf::from("/vault");
+        let mut idle_tree = FileTreeState {
+            root: Some(root.clone()),
+            recents: vec![root.clone()],
+            ..FileTreeState::default()
+        };
+        idle_tree
+            .children
+            .insert(root.clone(), DirChildren::default());
+        // 反馈窗口刚开:与空闲态唯一的差别就是 `refresh_started`
+        let busy_tree = FileTreeState {
+            root: idle_tree.root.clone(),
+            recents: idle_tree.recents.clone(),
+            expanded: idle_tree.expanded.clone(),
+            children: idle_tree.children.clone(),
+            new_file: None,
+            refresh_started: Some(std::time::Instant::now()),
+        };
+
+        let bounds = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(240.0, 200.0));
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(280.0, 400.0));
+        let raw = |events: Vec<Event>| RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        // `screen_rect` 每一轮都给成同一个:它决定 `available_width`,
+        // 进而决定目录名区宽度与三枚按钮的 x。少给这一项,点击就落在
+        // 按钮之外,断言会以「按钮点不动」的假象红 —— 那是在测布局漂移。
+        let run = |ctx: &egui::Context,
+                   tree: &FileTreeState,
+                   outbox: &mut Vec<Message>,
+                   events: Vec<Event>,
+                   slot: &mut Rect| {
+            let mut out = ctx.run_ui(raw(events), |ui| {
+                let mut content = ui.new_child(egui::UiBuilder::new().max_rect(bounds));
+                *slot = root_row(&mut content, tree, None, outbox)
+                    .refresh
+                    .expect("刷新按钮在场")
+                    .rect;
+            });
+            // 要读下一轮的 rect,不能一丢了之;`clear` 是
+            // `drop_without_applying_deltas` 的同一件事(直接 drop 未应用
+            // 的 textures delta 会 panic)。
+            out.textures_delta.clear();
+        };
+
+        // **必须复用同一个 ctx**:egui 冷启动的首帧不处理交互,点击要到
+        // 下一帧才生效(既有 `root_row_icon_buttons_*` 测试同款)。
+        // 每轮都 `Context::default()` 的话,点的那帧就是冷首帧,断言会以
+        // 「按钮点不动」的假象红 —— 测的其实是 ctx 的预热,不是按钮。
+        let ctx = egui::Context::default();
+        let mut idle_rect = Rect::NOTHING;
+        run(
+            &ctx,
+            &idle_tree,
+            &mut Vec::new(),
+            Vec::new(),
+            &mut idle_rect,
+        );
+        let mut busy_rect = Rect::NOTHING;
+        run(
+            &ctx,
+            &busy_tree,
+            &mut Vec::new(),
+            Vec::new(),
+            &mut busy_rect,
+        );
+        assert_eq!(
+            idle_rect, busy_rect,
+            "忙碌态换图形不换占位:否则按钮在刷新时会跳一下"
+        );
+
+        // 忙碌态仍可点:点它仍发刷新消息(而不是被静默吞掉)
+        let center = busy_rect.center();
+        let click = |pressed| Event::PointerButton {
+            pos: center,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut outbox = Vec::new();
+        let mut clicked = Rect::NOTHING;
+        run(
+            &ctx,
+            &busy_tree,
+            &mut outbox,
+            vec![Event::PointerMoved(center), click(true), click(false)],
+            &mut clicked,
+        );
+        assert_eq!(clicked, busy_rect, "点击帧布局不得漂移");
+        assert_eq!(
+            outbox,
+            vec![Message::FileTreeRefreshRequested],
+            "刷新途中再点仍是刷新,不该被禁用吞掉"
+        );
     }
 
     /// rail 五枚视图 tab 在同一条纵带上排得下。

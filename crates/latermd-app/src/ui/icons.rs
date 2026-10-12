@@ -464,6 +464,51 @@ impl Icon {
 /// 纯图标按钮(左栏顶段动作、标题栏齿轮等):宽度只够一个图标,语义靠
 /// tooltip 补。
 pub fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip_text: &str) -> egui::Response {
+    button_shell(ui, tooltip_text, |_, painter, rect, color| {
+        icon.draw(painter, rect.center(), ICON, color);
+    })
+}
+
+/// 「忙碌中」的图标按钮:图形换成 egui 内置 [`egui::Spinner`]。
+///
+/// **为什么用 egui 自带的 spinner 而不是自绘**:它带
+/// `ui.request_repaint()` —— 动画自己在要帧,空闲时也能持续转;自绘的
+/// 旋转弧得由调用方额外驱动重绘,漏一处就转半圈卡住。
+///
+/// `busy` 只换图形,**不禁用**:刷新途中再点是合理的(用户想再刷一次),
+/// 禁用会让按钮灰掉像坏了。语义标签同步改成「正在…」,辅助技术读到的
+/// 也是当前状态而不是永远「刷新」。
+pub fn busy_icon_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    busy: bool,
+    busy_text: &str,
+    idle_text: &str,
+) -> egui::Response {
+    let tooltip_text = if busy { busy_text } else { idle_text };
+    button_shell(ui, tooltip_text, |ui, painter, rect, color| {
+        if busy {
+            egui::Spinner::new()
+                .size(ICON)
+                .color(color)
+                .paint_at(ui, rect);
+        } else {
+            icon.draw(painter, rect.center(), ICON, color);
+        }
+    })
+}
+
+/// 图标按钮的共同外壳:占位、hover 底、前景/禁用色、辅助技术标签与
+/// tooltip。图形部分交给 `paint`。
+///
+/// `icon_button` 与 [`busy_icon_button`] 拆出这一层,是为了让两者的
+/// 命中矩形与配色**保证同一份** —— 分两处写的话,改 hover 底时容易只改
+/// 一边,表现为「忙碌态的按钮手感不一样」。
+fn button_shell(
+    ui: &mut egui::Ui,
+    tooltip_text: &str,
+    paint: impl FnOnce(&egui::Ui, &egui::Painter, egui::Rect, Color32),
+) -> egui::Response {
     let size = egui::vec2(ICON + 2.0 * SPACE_SM, TOOLBAR_H);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let enabled = ui.is_enabled();
@@ -477,7 +522,7 @@ pub fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip_text: &str) -> egui::R
         } else {
             ui.visuals().weak_text_color()
         };
-        icon.draw(painter, rect.center(), ICON, color);
+        paint(ui, painter, rect, color);
     }
     // 自绘控件补辅助技术语义(mac 精修带回的口径,#166)
     response
@@ -660,6 +705,53 @@ mod tests {
             icon_button(ui, Icon::Settings, "设置");
         });
         output.drop_without_applying_deltas();
+    }
+
+    /// 忙碌态:图形换成 spinner,且 spinner 是**矢量折线**不是文本字符。
+    ///
+    /// 命中矩形两态全等这条由 `sidebar::tests` 的几何测试负责(那里拿得到
+    /// [`egui::Response::rect`]);本测试盯住图形本身,因为它对应坤哥反馈的
+    /// 原话「点了也没个动态」:
+    ///
+    /// ①两态 shape 数不同 —— 图形确实换了(按了有反应);
+    /// ②忙碌态是折线、零文本 —— spinner 一旦回退成 `…` 之类的字体字符,
+    /// 缺字环境下渲染成方框(同 `Copy`/`Check` 的考法)。
+    #[test]
+    fn busy_icon_button_swaps_graphic_with_a_vector_spinner() {
+        let render = |busy: bool| {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                busy_icon_button(ui, Icon::Reset, busy, "正在刷新目录树…", "刷新目录树");
+            });
+            // 本测试要读 shape,故不能一丢了之;`clear` 是
+            // `drop_without_applying_deltas` 的同一件事,只是把「丢掉」
+            // 换成「清空后照常返回」(直接 drop 未应用的 textures delta
+            // 会 panic)。
+            output.textures_delta.clear();
+            output
+        };
+        let (idle, busy) = (render(false), render(true));
+
+        let lines = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter(|shape| matches!(shape.shape, egui::Shape::LineSegment { .. }))
+                .count()
+        };
+        let texts = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter(|shape| matches!(shape.shape, egui::Shape::Text(_)))
+                .count()
+        };
+        assert_ne!(
+            lines(&busy),
+            lines(&idle),
+            "两态折线数必须不同(spinner 是多段弧,回环箭头是固定几段)"
+        );
+        assert_eq!(texts(&busy), 0, "忙碌态不得混入文本层:缺字环境会渲染成方框");
     }
 
     /// Copy 与 Check 是 Painter 画的矢量,不走 Unicode 字形(`⧉`/`✓` 在三平台
