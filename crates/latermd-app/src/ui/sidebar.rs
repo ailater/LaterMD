@@ -682,36 +682,6 @@ fn search_panel(
     };
 
     search_controls(panel, search, outbox);
-    // 替换行:替换词草稿不触发任何事,消费只在「全部替换」;零命中禁用
-    if search.replace_open {
-        panel.horizontal(|ui| {
-            if egui::TextEdit::singleline(&mut search.replace_with)
-                .id_salt("search-replace-input")
-                .hint_text(if search.regex {
-                    "替换为…($1 引用捕获组)"
-                } else {
-                    "替换为…"
-                })
-                .desired_width(f32::INFINITY)
-                .show(ui)
-                .response
-                .changed()
-            {
-                search.confirm_replace = None;
-            }
-        });
-        panel.horizontal(|ui| {
-            let replace_enabled = search.can_replace_all();
-            let button = ui.add_enabled(replace_enabled, egui::Button::new("全部替换"));
-            if button.clicked() {
-                outbox.push(Message::SearchReplaceAllRequested);
-            }
-            button.on_hover_text(format!(
-                "对当前 {} 条命中的所在文件执行替换(有确认浮窗)",
-                search.hits.len()
-            ));
-        });
-    }
     search_results(panel, search, root, outbox);
 }
 
@@ -720,89 +690,163 @@ fn search_controls(
     search: &mut SearchState,
     outbox: &mut Vec<Message>,
 ) -> [egui::Response; 5] {
-    // 不用 horizontal_centered：它占满父级全部高度,会把替换行和结果挤出
-    // 布局。这里只分配单行高度、交叉轴居中,控件中心线与输入框对齐。
-    let row_h = panel.spacing().interact_size.y.max(22.0);
-    panel
-        .allocate_ui_with_layout(
-            egui::vec2(panel.available_width(), row_h),
-            egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center),
-            |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.spacing_mut().button_padding.x = 2.0;
-                let mode_size = egui::vec2(24.0, ui.spacing().interact_size.y.max(22.0));
-                let (rect, chevron) =
-                    ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
-                if chevron.hovered() || chevron.has_focus() {
-                    ui.painter()
-                        .rect_filled(rect, RADIUS_SM, ui.visuals().widgets.hovered.bg_fill);
-                }
-                ui.painter().add(egui::Shape::convex_polygon(
-                    arrow_vertices(rect.center(), 3.5, search.replace_open).to_vec(),
-                    ui.visuals().text_color(),
-                    egui::Stroke::NONE,
-                ));
-                chevron.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "展开替换")
+    // 行高必须**自适应**:按钮自然高随字体行高变(真机 CJK 比 egui 内置
+    // 字体高 ~4px),任何写死的高度都会让固定尺寸分配溢出居中、控件逐个
+    // 阶梯下移(真机截图回归:「不在一条线上」)。horizontal 自带交叉轴
+    // 居中且行高取最高控件;别用 horizontal_centered,它会占满父级全部
+    // 高度,把替换行和结果列表挤出布局(渲染测试当场红)。
+    //
+    // 结构(VS Code 同款):箭头列在最左,右侧竖排「搜索行 + 可选替换行」
+    // —— 展开时行组变高,箭头居中到两行的正中。
+    //
+    // egui 水平布局的交叉轴居中参照随放置顺序漂移(行内控件自然高不同时
+    // 逐个下沉,真机截图回归),所以两处都对齐做**等高化**:行内控件统一
+    // min_size 高 = 字体行高 + 按钮内边距;箭头高度用上一帧行组高(帧内
+    // 布局稳定后一帧收敛,与 egui 折叠动画同思路)。
+    let row_h = ui_row_height(panel);
+    let mut row: [Option<egui::Response>; 5] = [const { None }; 5];
+    let rows_h_id = egui::Id::new("latermd-search-rows-h");
+    let rows_h = panel
+        .ctx()
+        .memory(|m| m.data.get_temp::<f32>(rows_h_id).unwrap_or(row_h));
+    panel.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().button_padding.x = 2.0;
+        ui.spacing_mut().item_spacing.y = 2.0;
+        let mode_w = 24.0;
+        let (rect, chevron) =
+            ui.allocate_exact_size(egui::vec2(22.0, rows_h.max(row_h)), egui::Sense::click());
+        if chevron.hovered() || chevron.has_focus() {
+            ui.painter()
+                .rect_filled(rect, RADIUS_SM, ui.visuals().widgets.hovered.bg_fill);
+        }
+        ui.painter().add(egui::Shape::convex_polygon(
+            arrow_vertices(rect.center(), 3.5, search.replace_open).to_vec(),
+            ui.visuals().text_color(),
+            egui::Stroke::NONE,
+        ));
+        chevron
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "展开替换"));
+        let chevron = chevron.on_hover_text(if search.replace_open {
+            "收起替换"
+        } else {
+            "展开替换"
+        });
+        if chevron.clicked() {
+            search.replace_open = !search.replace_open;
+        }
+        let right_rows_rect = ui.vertical(|ui| {
+            // 搜索行:输入框占剩余宽,为右侧三枚模式片预留;模式片只钉宽、
+            // 高度统一到 row_h(等高化,见 ui_row_height)。
+            row = ui
+                .horizontal(|ui| {
+                    let input_width = (ui.available_width() - 3.0 * (mode_w + 2.0)).max(1.0);
+                    let input = egui::TextEdit::singleline(&mut search.query)
+                        .id_salt("search-input")
+                        .hint_text(if search.regex {
+                            "正则表达式…"
+                        } else {
+                            "搜索…"
+                        })
+                        .desired_width(input_width)
+                        // 垂直 margin 归零 + vertical_align(Center):出厂
+                        // frame(上下各 2px)让文字**贴顶**排,渲染中心与按钮
+                        // 错开 —— 截图回归的「不在一条线上」。
+                        .margin(egui::Margin::symmetric(4, 0))
+                        .vertical_align(egui::Align::Center)
+                        .min_size(egui::vec2(0.0, row_h))
+                        .show(ui)
+                        .response
+                        .response;
+                    if input.changed() {
+                        outbox.push(Message::SearchQueryChanged);
+                    }
+                    let case = ui
+                        .add(
+                            egui::Button::selectable(!search.case_insensitive, "Aa")
+                                .min_size(egui::vec2(mode_w, row_h)),
+                        )
+                        .on_hover_text("区分大小写");
+                    if case.clicked() {
+                        search.case_insensitive = !search.case_insensitive;
+                        outbox.push(Message::SearchQueryChanged);
+                    }
+                    let word = ui
+                        .add(
+                            egui::Button::selectable(search.whole_word, "ab")
+                                .min_size(egui::vec2(mode_w, row_h)),
+                        )
+                        .on_hover_text("全字匹配");
+                    if word.clicked() {
+                        search.whole_word = !search.whole_word;
+                        outbox.push(Message::SearchQueryChanged);
+                    }
+                    let regex = ui
+                        .add(
+                            egui::Button::selectable(search.regex, ".*")
+                                .min_size(egui::vec2(mode_w, row_h)),
+                        )
+                        .on_hover_text("使用正则表达式");
+                    if regex.clicked() {
+                        search.regex = !search.regex;
+                        outbox.push(Message::SearchQueryChanged);
+                    }
+                    [chevron, input, case, word, regex]
+                })
+                .inner
+                .map(Some);
+            // 替换行:替换框与「全部替换」同一行(VS Code 同位),按钮只发
+            // 请求,确认浮窗在归约侧;零命中/搜索未完禁用。
+            if search.replace_open {
+                ui.horizontal(|ui| {
+                    // 预估「全部替换」占位(4 字 CJK + 内边距),避免框吃满
+                    let all_w = 84.0;
+                    let box_w = (ui.available_width() - all_w).max(1.0);
+                    if egui::TextEdit::singleline(&mut search.replace_with)
+                        .id_salt("search-replace-input")
+                        .hint_text(if search.regex {
+                            "替换为…($1 引用捕获组)"
+                        } else {
+                            "替换为…"
+                        })
+                        .desired_width(box_w)
+                        .margin(egui::Margin::symmetric(4, 0))
+                        .vertical_align(egui::Align::Center)
+                        .min_size(egui::vec2(0.0, row_h))
+                        .show(ui)
+                        .response
+                        .changed()
+                    {
+                        search.confirm_replace = None;
+                    }
+                    let replace_enabled = search.can_replace_all();
+                    let button = ui.add_enabled(
+                        replace_enabled,
+                        egui::Button::new("全部替换").min_size(egui::vec2(0.0, row_h)),
+                    );
+                    if button.clicked() {
+                        outbox.push(Message::SearchReplaceAllRequested);
+                    }
+                    button.on_hover_text(format!(
+                        "对当前 {} 条命中的所在文件执行替换(有确认浮窗)",
+                        search.hits.len()
+                    ));
                 });
-                let chevron = chevron.on_hover_text(if search.replace_open {
-                    "收起替换"
-                } else {
-                    "展开替换"
-                });
-                if chevron.clicked() {
-                    search.replace_open = !search.replace_open;
-                }
-                // 为右侧三枚按钮预留宽度，避免 TextEdit 吃满横向空间。
-                let input_width = (ui.available_width() - 3.0 * (mode_size.x + 2.0)).max(1.0);
-                let input = egui::TextEdit::singleline(&mut search.query)
-                    .id_salt("search-input")
-                    .hint_text(if search.regex {
-                        "正则表达式…"
-                    } else {
-                        "搜索…"
-                    })
-                    .desired_width(input_width)
-                    // 垂直 margin 归零 + vertical_align(Center):出厂 frame(上
-                    // 下各 2px)让输入框总高 26px 且文字**贴顶**排,渲染中心与
-                    // 22px 按钮错开 —— 截图回归的「不在一条线上」。
-                    .margin(egui::Margin::symmetric(4, 0))
-                    .vertical_align(egui::Align::Center)
-                    .min_size(egui::vec2(0.0, mode_size.y))
-                    .show(ui)
-                    .response
-                    .response;
-                if input.changed() {
-                    outbox.push(Message::SearchQueryChanged);
-                }
-                let case = ui
-                    .add_sized(
-                        mode_size,
-                        egui::Button::selectable(!search.case_insensitive, "Aa"),
-                    )
-                    .on_hover_text("区分大小写");
-                if case.clicked() {
-                    search.case_insensitive = !search.case_insensitive;
-                    outbox.push(Message::SearchQueryChanged);
-                }
-                let word = ui
-                    .add_sized(mode_size, egui::Button::selectable(search.whole_word, "ab"))
-                    .on_hover_text("全字匹配");
-                if word.clicked() {
-                    search.whole_word = !search.whole_word;
-                    outbox.push(Message::SearchQueryChanged);
-                }
-                let regex = ui
-                    .add_sized(mode_size, egui::Button::selectable(search.regex, ".*"))
-                    .on_hover_text("使用正则表达式");
-                if regex.clicked() {
-                    search.regex = !search.regex;
-                    outbox.push(Message::SearchQueryChanged);
-                }
-                [chevron, input, case, word, regex]
-            },
-        )
-        .inner
+            }
+        });
+        let rows_h = right_rows_rect.response.rect.height();
+        ui.ctx()
+            .memory_mut(|m| m.data.insert_temp(rows_h_id, rows_h));
+    });
+    row.map(|slot| slot.expect("搜索行控件必须全部渲染"))
+}
+
+/// 搜索行内控件的统一高度:字体行高 + 按钮上下内边距 + 边框余量,再以
+/// 22px 兜底。所有行内控件 min_size 到同一高度 —— egui 水平布局的交叉
+/// 轴居中参照会随放置顺序漂移,等高是唯一稳的同心线做法。
+fn ui_row_height(ui: &egui::Ui) -> f32 {
+    let font_row = ui.text_style_height(&egui::TextStyle::Body);
+    (font_row + 2.0 * ui.spacing().button_padding.y + 2.0).max(22.0)
 }
 
 fn search_results(
@@ -2391,6 +2435,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 展开替换后的两行布局(VS Code 同款):「全部替换」与替换框同一行,
+    /// 折叠箭头居中在两行的正中。箭头高度走上一帧记忆,跑两帧收敛。
+    #[test]
+    fn search_replace_row_inline_and_arrow_centered() {
+        let ctx = egui::Context::default();
+        let mut search = SearchState {
+            replace_open: true,
+            ..SearchState::default()
+        };
+        let mut outbox = Vec::new();
+        let mut arrow_y = None;
+        let mut text_y: Vec<(String, f32)> = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run_ui(RawInput::default(), |ui| {
+                let responses = search_controls(ui, &mut search, &mut outbox);
+                arrow_y = Some(responses[0].rect.center().y);
+            });
+            text_y = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) => {
+                        let label = text.galley.job.text.as_str();
+                        matches!(label, "搜索…" | "替换为…" | "全部替换")
+                            .then(|| (label.to_owned(), text.visual_bounding_rect().center().y))
+                    }
+                    _ => None,
+                })
+                .collect();
+            output.drop_without_applying_deltas();
+        }
+        let arrow_y = arrow_y.expect("箭头 rect");
+        let y_of = |label: &str| {
+            text_y
+                .iter()
+                .find(|(text, _)| text == label)
+                .map(|(_, y)| *y)
+                .unwrap_or_else(|| panic!("{label} 应可见"))
+        };
+        let search_y = y_of("搜索…");
+        let replace_y = y_of("替换为…");
+        let all_y = y_of("全部替换");
+        assert!(
+            (all_y - replace_y).abs() < 1.5,
+            "「全部替换」应与替换框同一行: 按钮 y={all_y}, 框 y={replace_y}"
+        );
+        assert!(
+            (arrow_y - (search_y + replace_y) / 2.0).abs() <= 2.5,
+            "箭头应居中于两行正中: 箭头 y={arrow_y}, 两行文字中点 {}",
+            (search_y + replace_y) / 2.0
+        );
+        assert!(outbox.is_empty());
     }
 
     #[test]
