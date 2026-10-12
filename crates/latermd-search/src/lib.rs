@@ -79,12 +79,17 @@ pub struct SearchQuery {
     pub literal: bool,
 }
 
-/// 一条命中:文件 + 1 起行号 + 剥掉行终止符的行文本。
+/// 一条命中:文件 + 1 起行号 + 剥掉行终止符的行文本 + 行内首个匹配的
+/// 字节区间(供 UI 高亮;严格不包括行终止符)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub path: PathBuf,
     pub line_no: usize,
     pub line_text: String,
+    /// 首个匹配在本行正文内的字节区间,落在 UTF-8 字符边界。区间相对
+    /// [`line_text`](Self::line_text) 计算,UI 可直接拿去做行内高亮。
+    /// 空匹配(如 `x*`)退化为 `n..n` 的零宽区间,UI 侧按无高亮处理。
+    pub match_span: std::ops::Range<usize>,
 }
 
 /// `try_recv` 产出的事件:`Hit` 持续流出;`Done` 表示当前代搜索自然结束
@@ -205,16 +210,21 @@ fn scan(
     walk_markdown(root, &stop, |path, haystack| {
         for (index, line) in LineIter::new(b'\n', haystack).enumerate() {
             let (body, _) = split_line_terminator(line);
-            if !regex.is_match(body) {
+            let Some(found) = regex.find(body) else {
                 continue;
-            }
+            };
             if stop() {
                 return false; // 取消,不算截断(truncated 保持 false)
             }
+            // lossy 会把非法字节换成 U+FFFD(3 字节),字节下标因此可能与
+            // 原文不符;逐段夹到最近的字符边界,UI 侧切片绝不 panic。
+            let line_text = trim_line_terminator(line);
             if !emit(SearchResult {
                 path: path.to_path_buf(),
                 line_no: index + 1,
-                line_text: trim_line_terminator(line),
+                match_span: clamp_to_char_boundary(&line_text, found.start())
+                    ..clamp_to_char_boundary(&line_text, found.end()),
+                line_text,
             }) {
                 truncated = true; // 调用方装满 = 截断
                 return false;
@@ -223,6 +233,25 @@ fn scan(
         true
     });
     truncated
+}
+
+/// 把字节下标夹到 `text` 内最近的 UTF-8 字符边界。
+///
+/// 行正文是 **lossy 转换**后的 `String`:非法字节 `\xff` 会变成 3 字节的
+/// U+FFFD,于是正则在**原始字节**上得出的下标与转换后的文本不再一一对应,
+/// 直接拿去切 `String` 会 panic。这里在 ±3 字节(JSON 替换的最大膨胀)窗口
+/// 内找最近的边界,找不到退化为 0 —— UI 宁可少高亮也不能崩。
+fn clamp_to_char_boundary(text: &str, byte: usize) -> usize {
+    let len = text.len();
+    if byte <= len && text.is_char_boundary(byte) {
+        return byte;
+    }
+    (0..=3)
+        .flat_map(|step| [byte.saturating_sub(step), byte + step])
+        .find(|candidate| *candidate <= len && text.is_char_boundary(*candidate))
+        // 越界输入(如 byte > len)在窗口内找不到边界,退到行尾:宁可
+        // 高亮贴到末尾也不 panic。
+        .unwrap_or(len)
 }
 
 /// 扩展名是否 Markdown。
@@ -650,7 +679,79 @@ pub fn backlinks(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// 每个测试唯一目录:并行测试共享同一 pid 目录会互相污染残留文件
+    /// (实测:零宽正则把别的测试留下的 a.md/c.md/i.md 全部命中)。
+    fn root() -> std::path::PathBuf {
+        let name = std::thread::current().name().unwrap_or("anon").to_owned();
+        let dir = std::env::temp_dir().join(format!(
+            "latermd-span-{}-{}",
+            std::process::id(),
+            name.replace("::", "-")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// ASCII 命中:span 精确落在词上;行号、文本不变。
+    #[test]
+    fn span_marks_first_match_in_ascii_line() {
+        let dir = root();
+        std::fs::write(dir.join("a.md"), "hello world hello\n").unwrap();
+        let hits = search_sync(&query(&dir, "hello", false), 10).unwrap().hits;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(&hits[0].line_text[hits[0].match_span.clone()], "hello");
+        assert_eq!(hits[0].match_span, 0..5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CJK 行:span 字节区间直接可切片,不 panic。
+    #[test]
+    fn span_is_char_boundary_on_cjk() {
+        let dir = root();
+        std::fs::write(dir.join("c.md"), "找到 rust 语言 rust 语言\n").unwrap();
+        let hits = search_sync(&query(&dir, "rust", false), 10).unwrap().hits;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].line_text.is_char_boundary(hits[0].match_span.start));
+        assert!(hits[0].line_text.is_char_boundary(hits[0].match_span.end));
+        assert_eq!(&hits[0].line_text[hits[0].match_span.clone()], "rust");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 大小写不敏感:span 覆盖实际出现在行里的那段。
+    #[test]
+    fn span_follows_case_insensitive_hit() {
+        let dir = root();
+        std::fs::write(dir.join("i.md"), "Say Foo twice: foo\n").unwrap();
+        let hits = search_sync(&query(&dir, "foo", true), 10).unwrap().hits;
+        assert_eq!(&hits[0].line_text[hits[0].match_span.clone()], "Foo");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空/零宽匹配:退化为 start == end,UI 判定无高亮,不 panic。
+    #[test]
+    fn zero_width_match_degrades_to_empty_span() {
+        let dir = root();
+        std::fs::write(dir.join("z.md"), "ab\n").unwrap();
+        let hits = search_sync(&query(&dir, "x*", false), 10).unwrap().hits;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].match_span.start <= hits[0].match_span.end);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// clamp 单测:非边界下标夹回最近的边界,越界钳到 len。
+    #[test]
+    fn clamp_finds_nearest_char_boundary() {
+        assert_eq!(clamp_to_char_boundary("rust 中文", 0), 0);
+        assert_eq!(clamp_to_char_boundary("rust 中文", 4), 4);
+        // “中” 起于字节 5;夹 6 → 5(前一边界)
+        assert_eq!(clamp_to_char_boundary("rust 中文", 6), 5);
+        // 越界钳到 len
+        assert_eq!(clamp_to_char_boundary("rust", 99), 4);
+    }
+
     use std::time::{Duration, Instant};
 
     /// 进程内唯一的临时目录;测试自删。

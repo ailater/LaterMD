@@ -967,24 +967,97 @@ fn hit_groups(hits: &[SearchResult]) -> Vec<(&Path, &[SearchResult])> {
 }
 
 /// 单条命中:「行号 + 命中行摘要」;路径与命中数在文件头(分组视图)。
-/// 整块一个 SelectableLabel,点击发消息(打开 + 跳行在 `logic` 归约)。
+/// 整块一个可选中标签,点击发消息(打开 + 跳行在 `logic` 归约)。
 /// 返回行响应,独立成函数便于点击测试定位。
+///
+/// 命中片段用**强调色浅底 + 下划线**的行内效果突出(VS Code 搜索列表
+/// 同款):`LayoutJob` 把行切成「行号 / 匹配前 / 匹配 / 匹配后」四段,
+/// 只有匹配段带背景色。`SelectableLabel` 接受 `LayoutJob`,无需自绘。
 fn search_row(ui: &mut egui::Ui, hit: &SearchResult, outbox: &mut Vec<Message>) -> egui::Response {
-    let text = format!("{}  {}", hit.line_no, snippet(&hit.line_text));
-    let response = ui.selectable_label(false, text);
+    let response = ui.add(search_row_widget(ui, hit));
     if response.clicked() {
         outbox.push(Message::SearchResultClicked(hit.path.clone(), hit.line_no));
     }
     response
 }
 
-/// 命中行摘要:按字符截断(不切断多字节序列),超长加省略号。
+/// 组装一行命中的 widget。选中态恒 false:命中列表没有「当前项」,
+/// 底色变化只由 hover 负责。
+fn search_row_widget(ui: &egui::Ui, hit: &SearchResult) -> impl egui::Widget + use<> {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let text = ui.visuals().text_color();
+    let dim = ui.visuals().weak_text_color();
+    // 强调色 22% 透明度做浅底:与选中底(selected_bg)同族但更轻,
+    // 不会与整行 hover 底混淆(那是中性灰)。
+    let accent = tokens::accent(ui);
+    let highlight_bg = accent.gamma_multiply(0.22);
+    let highlight_ul = egui::Stroke::new(1.0, accent.gamma_multiply(0.65));
+    let strong = ui.visuals().strong_text_color();
+    let hit = hit.clone();
+    move |ui: &mut egui::Ui| -> egui::Response {
+        let (line, span) = snippet_with_span(&hit.line_text, &hit.match_span);
+        let mut job = egui::text::LayoutJob::default();
+        let base = egui::TextFormat {
+            font_id: font_id.clone(),
+            color: text,
+            ..Default::default()
+        };
+        job.append(
+            &format!("{}  ", hit.line_no),
+            0.0,
+            egui::TextFormat {
+                color: dim,
+                ..base.clone()
+            },
+        );
+        // 零宽区间(空匹配)或快照截断导致区间越界时,整行退化为无高亮
+        let valid = !line.is_empty()
+            && span.start < span.end
+            && span.end <= line.len()
+            && line.is_char_boundary(span.start)
+            && line.is_char_boundary(span.end);
+        if valid {
+            job.append(&line[..span.start], 0.0, base.clone());
+            job.append(
+                &line[span.clone()],
+                0.0,
+                egui::TextFormat {
+                    background: highlight_bg,
+                    underline: highlight_ul,
+                    color: strong,
+                    ..base.clone()
+                },
+            );
+            job.append(&line[span.end..], 0.0, base);
+        } else {
+            job.append(&line, 0.0, base);
+        }
+        ui.add(egui::Button::selectable(false, job))
+    }
+}
+
+/// 命中行摘要(纯字符串版,backlinks 等无高亮场景用)。
 fn snippet(line: &str) -> String {
+    snippet_with_span(line, &(0..0)).0
+}
+
+/// 命中行摘要:按字符截断(不切断多字节序列),超长加省略号。
+/// 同时返回匹配区间在**截断后**文本里的字节区间:截断只发生在行尾,
+/// 起点在窗口内则区间原样保留,越界(匹配被截掉)返回 `0..0` 退化为
+/// 无高亮 —— 不能把高亮错位地画到省略号上。
+fn snippet_with_span(
+    line: &str,
+    span: &std::ops::Range<usize>,
+) -> (String, std::ops::Range<usize>) {
     if line.chars().count() <= SNIPPET_MAX_CHARS {
-        line.to_owned()
+        return (line.to_owned(), span.clone());
+    }
+    let cut: String = line.chars().take(SNIPPET_MAX_CHARS).collect();
+    let limit = cut.len();
+    if span.start < limit && span.end <= limit {
+        (format!("{cut}…"), span.clone())
     } else {
-        let cut: String = line.chars().take(SNIPPET_MAX_CHARS).collect();
-        format!("{cut}…")
+        (format!("{cut}…"), 0..0)
     }
 }
 
@@ -2279,6 +2352,7 @@ mod tests {
             path: root.join("docs/note.md"),
             line_no: 7,
             line_text: "命中这一行".to_owned(),
+            match_span: 0..0,
         };
         let mut outbox = Vec::new();
         let rect = Cell::new(Rect::NOTHING);
@@ -2323,6 +2397,7 @@ mod tests {
             path: path.to_path_buf(),
             line_no,
             line_text: String::new(),
+            match_span: 0..0,
         };
         let hits = vec![hit(&a, 1), hit(&a, 3), hit(&b, 2), hit(&a, 5)];
         let groups = hit_groups(&hits);
@@ -2352,6 +2427,7 @@ mod tests {
                 path: root.join("note.md"),
                 line_no: 1,
                 line_text: "needle".into(),
+                match_span: 0..0,
             }],
             status: SearchStatus::Finished,
             ..SearchState::default()
@@ -2580,10 +2656,49 @@ mod tests {
         }
     }
 
-    /// 直驱真实路径(Panel frame + sidebar::ui + ScrollArea)的搜索行守卫:
-    /// 几何测试的 bounds 是按 rail/边距/滚动条推算的,真机一旦多出哪怕几
-    /// px 消耗(新 margin、新角标),输入框就会把 `.*` 挤出可用区。这条测
-    /// 试走完整 sidebar::ui,从绘制层断言三枚按钮与输入框 hint 同一行。
+    /// 行内高亮(#199 追加):命中行渲染出「匹配段背景底」—— 帧的 shapes
+    /// 里应出现 accent 色系矩形(强调色 22% 透明度);非命中段无底色。
+    /// span 越界/零宽时整行退化无高亮,不 panic。
+    #[test]
+    fn search_row_paints_highlight_only_on_match() {
+        let hit = |span: std::ops::Range<usize>| SearchResult {
+            path: PathBuf::from("/vault/note.md"),
+            line_no: 3,
+            line_text: "找到 rust 语言".into(),
+            match_span: span,
+        };
+        for (name, span, expect_bg) in [
+            ("正常区间", 6..10, true),
+            ("零宽区间", 0..0, false),
+            ("越界区间", 999..1024, false),
+        ] {
+            let ctx = egui::Context::default();
+            let h = hit(span);
+            let output = ctx.run_ui(RawInput::default(), |ui| {
+                let mut outbox = Vec::new();
+                search_row(ui, &h, &mut outbox);
+            });
+            // 高亮底走 LayoutJob 的段 background(tessellate 前就在 Text
+            // shape 的 galley 里),按「某段 background 非透明」判定;零宽/
+            // 越界 span 的行没有任何带底段。
+            let has_bg = output.shapes.iter().any(|clipped| {
+                let egui::epaint::Shape::Text(text) = &clipped.shape else {
+                    return false;
+                };
+                text.galley
+                    .job
+                    .sections
+                    .iter()
+                    .any(|section| section.format.background != egui::Color32::TRANSPARENT)
+            });
+            output.drop_without_applying_deltas();
+            assert_eq!(
+                has_bg, expect_bg,
+                "{name}: 高亮底 {has_bg}, 期望 {expect_bg}"
+            );
+        }
+    }
+
     #[test]
     fn search_row_survives_the_real_sidebar_path() {
         for sidebar_width in [tokens::SIDEBAR_MIN_W, 240.0, 320.0] {
@@ -2680,6 +2795,7 @@ mod tests {
                 path: root.join("note.md"),
                 line_no: 1,
                 line_text: "needle".into(),
+                match_span: 0..0,
             }],
             status: SearchStatus::Finished,
             ..SearchState::default()
