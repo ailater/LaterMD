@@ -335,16 +335,12 @@ impl LaterMdApp {
                 });
         }
 
-        // ① 次外层:顶部菜单栏(全部命令的可发现性入口;开关类条目的
-        // 勾选态从 state 取真值,#67 M2)
+        // ① 顶部菜单栏已于 2026-10-12 退役(docs/ui-shell-redesign-v2.md
+        // §5.7):常驻「文件(F) 编辑(E) …」行整条撤掉,菜单入口收进标题栏
+        // 左缘的汉堡按钮(`ui::titlebar` → `menubar::hamburger_button_at`,
+        // Zed 同款形态,坤哥指定)。编辑区上沿净高 +26px;mac 原生装饰
+        // 路径(workbench-header)本就没有 in-app 菜单行,不受影响。
         let workbench = cfg!(target_os = "macos") && !self.frameless;
-        if !workbench {
-            egui::Panel::top("menubar")
-                .show_separator_line(false)
-                .show(ui, |ui| {
-                    crate::ui::menubar::ui(ui, &self.state.keymap, &self.state, &mut self.outbox);
-                });
-        }
 
         // ② 底部状态栏:散落在工具栏/侧边栏边缘的只读信息收成一行
         // (docs/ui-polish.md §4),工具栏得以只留动作。
@@ -6327,7 +6323,9 @@ mod tests {
     /// titlebar / menubar / statusbar / nav / preview + 中央编辑器。
     ///
     /// 三条取证分别对应三条反馈:
-    /// - 顺序:标题栏最顶、菜单栏次之、状态栏贴底(文本矩形自上而下);
+    /// - 顺序:标题栏最顶、状态栏贴底(文本矩形自上而下);**2026-10-12
+    ///   起常驻菜单行退役**(菜单收进标题栏左缘汉堡,docs/ui-shell-redesign-
+    ///   v2.md §5.7),「文件(F)」这类菜单文本在收起态**不再出现**;
     /// - 状态栏**横跨全窗底部**:它的文本落在左栏脚下(x < 左栏宽度)——
     ///   修复前 statusbar 画在左右栏之后,被夹在中央残余区,文本 x 必然
     ///   大于左栏宽度;
@@ -6345,18 +6343,23 @@ mod tests {
 
         let shapes = draw_shapes(&mut app, &ctx, screen);
         let title = topmost_text(&shapes, "LaterMD —");
-        let menubar = topmost_text(&shapes, "文件");
         let status = topmost_text(&shapes, "248 字");
         let nav = topmost_text(&shapes, "选择一个目录作为文件树根");
 
-        // 自上而下:标题栏 → 菜单栏(都在自己那条带里)
+        // 标题栏最顶;菜单行已退役,收起态不应有任何菜单标题文本
         assert!(
             title.top() < crate::ui::tokens::TITLEBAR_H,
             "标题栏最顶:{title:?}"
         );
+        let menu_text_rendered = shapes.iter().any(|clipped| {
+            let egui::epaint::Shape::Text(text) = &clipped.shape else {
+                return false;
+            };
+            text.galley.job.text.contains("文件(F)")
+        });
         assert!(
-            menubar.top() > crate::ui::tokens::TITLEBAR_H && menubar.top() < 100.0,
-            "菜单栏紧随标题栏:{menubar:?}"
+            !menu_text_rendered,
+            "常驻菜单行已退役:收起态不应渲染「文件(F)」"
         );
         // 状态栏贴底且横跨:文本 x 落在左栏宽度以内(左栏 default 240)
         assert!(
@@ -6373,7 +6376,7 @@ mod tests {
             "左栏在左侧:{nav:?}"
         );
 
-        // 无黑条:menubar 与 statusbar 之间的中央高度上,从左栏右缘到
+        // 无黑条:标题栏与状态栏之间的中央高度上,从左栏右缘到
         // 右栏内部连续被内容色覆盖。黑条回归时(编辑器窄 left panel 之右、
         // 预览之左)采样点会露背景色。
         let content = crate::theme::content_fill(true);

@@ -82,11 +82,12 @@ pub struct OutlineView<'a> {
 /// 算一遍,就把摆位规则抄成了两份 —— 改 GAP 时绘制与断言会一起漂移,
 /// 断言自我满足(docs/ui-shell-redesign-v2.md §2.1 的同款纪律)。
 ///
-/// index 自上而下、自 rail 顶缘起算;横向在场带宽内居中(宽自
-/// [`tokens::RAIL_W`] 读,不写死数字 —— 2026-10-09 由 48 收到 40)。
+/// index 自上而下、自 rail 顶缘起算;横向定宽内缩 4px(2026-10-12 坤哥
+/// 反馈「往左一点」,弃居中 —— 居中的 6px 内缩把图标推离窗缘,读起来
+/// 像缩进)。带宽仍读 [`tokens::RAIL_W`],不写死数字。
 fn rail_item_rect(rail: egui::Rect, index: usize) -> egui::Rect {
     let item = tokens::RAIL_ITEM;
-    let left = rail.left() + (rail.width() - item) * 0.5;
+    let left = rail.left() + tokens::SPACE_XS;
     let top = rail.top() + (item + tokens::RAIL_GAP) * index as f32;
     egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(item, item))
 }
@@ -157,7 +158,7 @@ fn paint_rail_item(
         visuals.text_color()
     };
     tab.icon()
-        .draw(painter, rect.center(), tokens::NAV_TAB_ICON, color);
+        .draw(painter, rect.center(), tokens::RAIL_ICON, color);
 }
 
 /// rail 带本身:占 sidebar 矩形左端 [`tokens::RAIL_W`] 宽、纵贯到底。

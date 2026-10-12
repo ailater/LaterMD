@@ -221,27 +221,48 @@ pub fn command_box_slot_rect(cbox: Rect, index: usize) -> Rect {
     )
 }
 
-/// 左段品牌标识的矩形:贴左缘、按 [`crate::ui::tokens::BRAND_LOGO`] 取边长、
-/// 垂直居中于标题栏。
-///
-/// 抽成纯函数是为了让单测在**无头环境**里也能钉住几何 —— `ui` 里的绘制
-/// 走的是绝对矩形(`painter` 而非布局游标),一旦这里改了偏移,只有这条
-/// 断言会发现标题名跟着标识一起漂了。
+/// 左段品牌标识的矩形:距左缘与距汉堡同为 [`SPACE_SM`](贴角会读成
+/// 「钉在角落」,2026-10-12 坤哥反馈),垂直居中于标题栏。
 pub fn brand_logo_rect(bar: Rect) -> Rect {
     let size = crate::ui::tokens::BRAND_LOGO;
-    let top_left = Pos2::new(bar.left() + SPACE_SM, bar.center().y - size / 2.0);
-    Rect::from_min_size(top_left, egui::vec2(size, size))
+    Rect::from_min_size(
+        Pos2::new(bar.left() + SPACE_SM, bar.center().y - size / 2.0),
+        egui::vec2(size, size),
+    )
 }
 
-/// 左段品牌标识的绘制矩形 + 标题文字起点。
-///
-/// 文字起点恒为「标识右缘 + [`SPACE_SM`]」—— 与旧实现(按紧凑图标尺寸
-/// 折半)相比,标识放大后文字**不会**被推离左缘,反而因为起点跟着标识右缘
-/// 走,两者间距恒定,不会出现「标识变大 → 文字右移」的视觉跳变。
+/// 标题栏菜单按钮的矩形:位于 logo 右侧,与品牌区保持统一间距。
+pub fn menu_button_rect(bar: Rect) -> Rect {
+    let size = crate::ui::tokens::WINDOW_BTN;
+    let logo = brand_logo_rect(bar);
+    Rect::from_min_size(
+        Pos2::new(logo.right() + SPACE_SM, bar.center().y - size.y / 2.0),
+        size,
+    )
+}
+
+/// logo 位于菜单按钮左侧,标题跟随菜单按钮右侧,品牌区只绘制一枚图片。
 fn brand_logo_and_title(bar: Rect) -> (Rect, Pos2) {
     let logo = brand_logo_rect(bar);
-    let text_pos = Pos2::new(logo.right() + SPACE_SM, bar.center().y);
+    let text_pos = Pos2::new(menu_button_rect(bar).right() + SPACE_SM, bar.center().y);
     (logo, text_pos)
+}
+
+/// 在给定矩形绘制品牌图片；素材不可用时回落到矢量图标。
+pub(crate) fn paint_brand_logo(ui: &mut egui::Ui, rect: Rect) {
+    ui.allocate_rect(rect, Sense::hover());
+    let painter = ui.painter();
+    match brand_logo_texture(ui.ctx()) {
+        Some(texture) => egui::Image::new(&texture)
+            .fit_to_exact_size(rect.size())
+            .paint_at(ui, rect),
+        None => Icon::Files.draw(
+            painter,
+            rect.center(),
+            rect.height(),
+            crate::ui::tokens::accent(ui),
+        ),
+    }
 }
 
 /// 取品牌标识纹理(带缓存)。
@@ -254,7 +275,7 @@ fn brand_logo_and_title(bar: Rect) -> (Rect, Pos2) {
 /// `Option<TextureHandle>` 读,类型不一致会**静默返回 `None`**(踩过一次:
 /// 存 `Option<usize>` 按 `usize` 读,每帧都判定「没缓存」)。这里存读
 /// 两侧逐字一致。
-fn brand_logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+pub(crate) fn brand_logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let key = egui::Id::new("latermd.brand_logo.texture");
     if let Some(cached) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(key)) {
         return cached;
@@ -288,36 +309,33 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
     }
 
-    // 左段:品牌标识(真 logo 贴图)+「LaterMD — 文档名*」。文案取
-    // `window_title()`,与原生窗口标题同一数据源,不另立一份状态。字重取
-    // Inter SemiBold (U1);未装 LaterMD 字体的无头测试回落
-    // Proportional,不 panic。
-    if ui.is_rect_visible(bar) {
-        let (logo_rect, text_pos) = brand_logo_and_title(bar);
-        //破坏A:用布局推进游标而非绝对矩形
-        ui.allocate_rect(logo_rect, Sense::hover());
-        let painter = ui.painter();
+    // 左缘固定为「logo + 汉堡」：展开菜单时也保留品牌标识，避免标题栏
+    // 左侧突然跳位。所有元素共用标题栏中心线。
+    let (logo_rect, text_pos) = brand_logo_and_title(bar);
+    let menu_rect = menu_button_rect(bar);
+    paint_brand_logo(ui, logo_rect);
+    crate::ui::menubar::hamburger_button_at(ui, menu_rect);
+
+    // 菜单标签行(2026-10-12,坤哥指定形态):汉堡点开后**长在标题栏
+    // 条内**(左中段),不弹浮层；展开期间标题/页签让位。
+    let row_open = crate::ui::menubar::menu_row_open(&ctx);
+    // 展开时保留左侧 logo 与汉堡；标签行从汉堡右侧开始，避免覆盖品牌区。
+    if row_open {
+        crate::ui::menubar::menu_row(
+            ui,
+            bar,
+            &state.keymap,
+            state,
+            outbox,
+            None::<fn(usize, egui::Id, Rect)>,
+        );
+    }
+
+    // 左段:「LaterMD — 文档名*」。文案取 `window_title()`,与原生窗口标题
+    // 同一数据源。展开菜单时只让出标题/页签区域。
+    if !row_open && ui.is_rect_visible(bar) {
         let mut font = egui::TextStyle::Button.resolve(ui.style());
         font.family = crate::fonts::semibold_family(&ctx);
-        // 纹理只 load 一次,之后每帧只画 —— 走 ctx.data 缓存(egui 的
-        // `TempStorage`,随 Context 生命周期,不含素材字节的拷贝)。
-        // 素材解码失败(assets::brand_logo_image 返回 None)时回落矢量
-        // `Icon::Files`,与旧实现同形,不留空白。
-        match brand_logo_texture(&ctx) {
-            Some(texture) => {
-                egui::Image::new(&texture)
-                    .fit_to_exact_size(logo_rect.size())
-                    .paint_at(ui, logo_rect);
-            }
-            None => {
-                Icon::Files.draw(
-                    painter,
-                    logo_rect.center(),
-                    logo_rect.height(),
-                    crate::ui::tokens::accent(ui),
-                );
-            }
-        }
         let right = if shows_command_box(bar) {
             command_box_rect(bar).left()
         } else {
@@ -356,7 +374,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
     }
 
     let rects = button_rects(bar);
-    if shows_command_box(bar) {
+    if !row_open && shows_command_box(bar) {
         command_box(ui, &ctx, state, command_box_rect(bar), outbox);
     }
     let toggle_shortcut = shortcut_of(state, &ctx, Command::ToggleSidebar);
@@ -711,46 +729,30 @@ mod tests {
         (outbox.contains(&Message::SidebarToggled), commands)
     }
 
-    /// 标识与标题文字不得重叠,且标识整块落在标题栏内。
-    ///
-    /// 这是「加 logo」最容易踩的一脚:文字起点若写成硬编码 `bar.left()+…`
-    /// 而不是跟着标识右缘走,标题就会压在标识上 —— 而文字用
-    /// `Align2::LEFT_CENTER` 画,压上去后**两边都照常显示**,肉眼看到的是
-    /// 「logo 好像有点糊」而不是「布局错了」,极难自查。
-    /// 上界 `BRAND_LOGO` 引自 token 而非就地写字面量,但同时钉了
-    /// `logo.right() < 中线`,token 被改成荒谬值时这条会红,断言不会随
-    /// 实现一起漂。
+    /// logo 位于菜单按钮左侧,标题跟随菜单按钮右侧,品牌区只绘制一枚图片。
     #[test]
-    fn brand_logo_sits_at_the_left_edge_and_pushes_title_right() {
+    fn brand_logo_sits_before_menu_and_pushes_title_right() {
         let bar = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, TITLEBAR_H));
         let (logo, text_pos) = super::brand_logo_and_title(bar);
 
-        assert_eq!(logo.left(), bar.left() + SPACE_SM, "标识贴左缘");
-        assert_eq!(
-            logo.width(),
-            crate::ui::tokens::BRAND_LOGO,
-            "边长取 BRAND_LOGO token"
-        );
-        assert_eq!(logo.height(), crate::ui::tokens::BRAND_LOGO, "正方形");
-        assert_eq!(logo.center().y, bar.center().y, "垂直居中");
-        assert!(bar.contains_rect(logo), "标识整块在标题栏内");
-        assert!(
-            logo.right() < bar.center().x,
-            "标识不得越过标题栏中线(左段只占左侧)"
-        );
-        assert_eq!(
-            text_pos.x,
-            logo.right() + SPACE_SM,
-            "标题起点跟随标识右缘,间距恒为 SPACE_SM"
-        );
-        assert!(
-            text_pos.x >= logo.right(),
-            "标题文字不得压在标识上(左对齐,重叠即视觉糊字)"
-        );
-        assert_eq!(text_pos.y, bar.center().y, "标题垂直居中");
+        assert_eq!(logo.left(), bar.left() + SPACE_SM);
+        assert_eq!(super::menu_button_rect(bar).left(), logo.right() + SPACE_SM);
+        assert!(bar.contains_rect(logo));
+        assert_eq!(text_pos.x, super::menu_button_rect(bar).right() + SPACE_SM);
+        assert!(text_pos.x >= super::menu_button_rect(bar).right());
+        assert_eq!(logo.center().y, bar.center().y);
     }
 
-    /// 品牌标识纹理真的被 load 并绘制:跑一帧后 `ctx` 里应留下纹理句柄。
+    /// 菜单行标签从汉堡右侧开始,避免覆盖 logo 和汉堡。
+    #[test]
+    fn menu_row_starts_after_brand_controls() {
+        let bar = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, TITLEBAR_H));
+        let logo = super::brand_logo_rect(bar);
+        let menu = super::menu_button_rect(bar);
+        assert_eq!(menu.left(), logo.right() + SPACE_SM);
+        assert_eq!(menu.center().y, bar.center().y);
+    }
+
     ///
     /// 这条钉的是「左上角画的是真 logo,不是那个通用文件夹矢量图标」。
     /// 回落路径(`brand_logo_image()` 返回 `None` →画`Icon::Files`)在这里

@@ -36,10 +36,17 @@
 //! 行 metrics 因此全等,基线公式残差精确归零;字形 atlas 不重复
 //! (`GlyphCacheKey` 不含 ascent/descent,副本与原生 face 共享缓存)。
 //!
-//! 副本只挂**预览专用族**(`Inter-Preview` 正文族 + `bold` 别名族链头),
-//! Proportional / SemiBold / Medium 原生族不动 —— UI 外壳的行高与现状
-//! 完全一致,预览排版的修复不外溢到界面密度。无 CJK 候选时不注册副本,
-//! 预览正文族回落 Proportional,行为与修复前一致。
+//! 副本最初只挂预览专用族(`Inter-Preview` 正文族 + `bold` 别名族链头)。
+//! **2026-10-12 UI 推广**(坤哥「标题栏/菜单里英文整体高于中文」):UI
+//! 四链(Proportional/Medium/SemiBold/`bold`)同样吃到基线修复,但方向
+//! 与 #50 同款 —— 改 **CJK fallback 副本**去就链头 Inter(链头表值
+//! 分毫不动,纯 ASCII 行盒/换行逐像素不变),而非把 UI 链头换成大行盒
+//! 副本(界面密度会全面变松)。代价是混排行的行盒从 CJK 的 1.448em 收
+//! 到链头的 1.21em(汉字墨高 ~1.0em 仍充足),混排与纯 ASCII 行高从此
+//! 一致。UI 链因此挂专属副本键(CJK 数据两套:UI 链 = CJK 就 Inter,
+//! 预览链 = 链头就 CJK,原生表值条目只服务预览链)。macOS 路径
+//! (`macos::install`)暂未跟进,菜单走原生 NSMenu、标题混排仍有残差。
+//! 无 CJK 候选时不注册副本,各回落族行为与修复前一致。
 //!
 //! 行高(「显示不全」:行盒不足以容纳 CJK face 的行高需求)由 vendored
 //! ①类修复承接:`MarkdownStyle::min_line_height_em` 行高下限,app 侧在
@@ -101,6 +108,12 @@ pub const FAMILY_EDITOR_MONO: &str = "editor-mono";
 /// 编辑器族 CJK 回退的 font_data 键(`FAMILY_EDITOR_MONO` 专属副本;
 /// 原生 `CJK_MONOSPACE` 不得入链,否则 CJK 先命中未修补的原生 face)。
 const CJK_MONOSPACE_EDITOR: &str = "latermd-cjk-monospace-editor";
+/// UI 四链(Proportional/Medium/SemiBold/`bold`)CJK 回退副本的
+/// font_data 键:行 metrics 改写为链头 Inter Regular 同款 em 值(#43 M2
+/// 的 UI 推广,2026-10-12;方向同 #50 —— 改 fallback 就链头,链头表值
+/// 分毫不动)。原生 `CJK_PROPORTIONAL` 不得入 UI 链,否则 CJK 先命中
+/// 未修补 face、override 白做。
+const CJK_PROPORTIONAL_UI: &str = "latermd-cjk-proportional-ui";
 
 /// sfnt 垂直排印相关的表值集合(font units,大端)。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -409,6 +422,35 @@ fn build_definitions(
         .get_mut(&FontFamily::Proportional)
         .expect("出厂 Proportional 族恒存在")
         .insert(0, NAME_REGULAR.to_owned());
+    // #43 M2 的 UI 推广(2026-10-12,坤哥「标题栏/菜单里英文整体高于
+    // 中文」):UI 四链(Proportional/Medium/SemiBold/bold)的中英混排
+    // 走同一套基线修复,方向与 #50 同款 —— CJK 副本的行 metrics 改写为
+    // 链头 Inter 同款 em 值(链头表值分毫不动,纯 ASCII 行盒/换行逐像素
+    // 不变),链头与 fallback 的 metrics 全等后基线公式残差精确归零。
+    // 预览链方向相反(链头副本就 CJK,行盒更大),故 CJK 数据分两套:
+    // UI 链挂这里的副本,预览/bold 预览链仍挂原生表值条目。改写失败
+    // (系统字体表结构异常)回落原生条目,行为与修复前一致。
+    let ui_cjk_name = if let Some((bytes, prop_idx, _, _)) = cjk {
+        let regular_target = parse_vertical_tables(INTER_REGULAR, 0)
+            .expect("嵌入 Inter-Regular 的垂直排印表结构恒可解析")
+            .vertical_metrics_em();
+        override_vertical_metrics(bytes, prop_idx, regular_target)
+            .map(|patched| {
+                defs.font_data.insert(
+                    CJK_PROPORTIONAL_UI.to_owned(),
+                    Arc::new(FontData {
+                        index: prop_idx,
+                        ..FontData::from_owned(patched)
+                    }),
+                );
+                CJK_PROPORTIONAL_UI
+            })
+            .unwrap_or(CJK_PROPORTIONAL)
+    } else {
+        CJK_PROPORTIONAL
+    };
+    // `bold` 族不在此处理:UI 链随后会被预览段整体覆写(该族的链头本就
+    // 是 CJK 表值的 SemiBold 副本,混排基线天然对齐,且无 UI 消费者)。
     // Medium/SemiBold 独立族:链头是对应字重,其余与 Proportional 同构 ——
     // emoji 链照旧,CJK 回退也挂尾(工具条/标题是中文,链尾无 CJK 会变方块)
     // `bold` 是 SemiBold 的别名族(vendored 渲染按字面量探测,decisions #48)
@@ -479,14 +521,14 @@ fn build_definitions(
         bold_chain.extend(fallback_tail.iter().cloned());
         defs.families
             .insert(FontFamily::Name(Arc::from(FAMILY_BOLD)), bold_chain);
+        // UI 三链挂「链头对齐 CJK 副本」(见函数前段);预览正文族与
+        // `bold` 族保持原生表值 CJK —— 它们的链头本来就是 CJK 表值副本
+        // (方向相反),`bold` 族无 UI 消费者、链由本段预览部分构建。
         for (family, name) in [
-            (FontFamily::Proportional, CJK_PROPORTIONAL),
+            (FontFamily::Proportional, ui_cjk_name),
             (FontFamily::Monospace, CJK_MONOSPACE),
-            (FontFamily::Name(Arc::from(FAMILY_MEDIUM)), CJK_PROPORTIONAL),
-            (
-                FontFamily::Name(Arc::from(FAMILY_SEMIBOLD)),
-                CJK_PROPORTIONAL,
-            ),
+            (FontFamily::Name(Arc::from(FAMILY_MEDIUM)), ui_cjk_name),
+            (FontFamily::Name(Arc::from(FAMILY_SEMIBOLD)), ui_cjk_name),
             // `bold` 别名族:预览标题(heading)与加粗文本经 vendored
             // apply_bold 切到它,链尾无 CJK 会整行变方块
             (FontFamily::Name(Arc::from(FAMILY_BOLD)), CJK_PROPORTIONAL),
@@ -902,8 +944,13 @@ mod tests {
             let prop = &f.definitions().families[&FontFamily::Proportional];
             assert_eq!(prop.first().map(String::as_str), Some(NAME_REGULAR));
             match cjk {
-                Some(_) => assert_eq!(prop.last().map(String::as_str), Some(CJK_PROPORTIONAL)),
-                None => assert!(prop.iter().all(|n| n != CJK_PROPORTIONAL)),
+                // 本机 CJK 命中时链尾是「链头对齐 CJK 副本」(#43 M2 的 UI
+                // 推广);原生表值条目只留在预览链。
+                Some(_) => {
+                    assert_eq!(prop.last().map(String::as_str), Some(CJK_PROPORTIONAL_UI));
+                    assert!(!prop.iter().any(|n| n == CJK_PROPORTIONAL));
+                }
+                None => assert!(prop.iter().all(|n| n != CJK_PROPORTIONAL_UI)),
             }
         });
         assert_eq!(
@@ -1177,6 +1224,92 @@ mod tests {
         );
     }
 
+    /// UI 混排基线对齐的端到端验收:install 后,Proportional 链行内
+    /// 「中文+拉丁」混排的逐字形基线原点必须全等(#43 M2 公式残差归零的
+    /// 直接可观测面 —— 坤哥 2026-10-12「LaterMD 与未命名不在一条线、
+    /// 英文比中文高」)。无 CJK 候选时跳过(与链顺序测试同一豁免口径)。
+    #[test]
+    fn ui_mixed_run_glyph_baselines_align() {
+        use eframe::egui::Color32;
+        let ctx = egui::Context::default();
+        let cjk = install(&ctx);
+        if cjk.is_none() {
+            eprintln!("本机无 CJK 候选字体,基线对齐断言跳过");
+            return;
+        }
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+        let mut ys = Vec::new();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let base = egui::TextStyle::Button.resolve(ui.style());
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                "文件",
+                0.0,
+                egui::text::TextFormat::simple(base.clone(), Color32::WHITE),
+            );
+            job.append(
+                "(F)",
+                0.0,
+                egui::text::TextFormat::simple(base, Color32::WHITE),
+            );
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            for glyph in &galley.rows[0].glyphs {
+                ys.push((glyph.chr, glyph.pos.y));
+            }
+        })
+        .drop_without_applying_deltas();
+        assert!(ys.len() >= 4, "混排行应有字形: {ys:?}");
+        let cjk_y = ys.iter().find(|(c, _)| *c == '文').expect("中文字形").1;
+        for (chr, y) in &ys {
+            assert_eq!(y, &cjk_y, "字形 '{chr}' 的基线与中文不一致");
+        }
+    }
+
+    /// #43 M2 的 UI 推广:UI 四链(Proportional/Medium/SemiBold/`bold`)
+    /// 链尾是「链头对齐 CJK 副本」,副本采纳表值 == 链头 Inter 采纳表值
+    /// (em),链内不残留原生表值 CJK 条目(否则先命中未修补 face、
+    /// override 白做);预览正文族方向相反,仍挂原生表值条目。纯 build
+    /// 层测试,用嵌入 Inter 字节充当 CJK 源字节(合法 sfnt,patch 必然
+    /// 成功,不依赖本机字体)。
+    #[test]
+    fn ui_chains_fallback_to_head_aligned_cjk_copy() {
+        let fake = VerticalMetricsEm {
+            ascent: 1.16,
+            descent: -0.288,
+            line_gap: 0.0,
+        };
+        let defs = build_definitions(Some((INTER_REGULAR, 0, 0, fake)), Some((INTER_REGULAR, 0)));
+        for family in [
+            FontFamily::Proportional,
+            FontFamily::Name(Arc::from(FAMILY_MEDIUM)),
+            FontFamily::Name(Arc::from(FAMILY_SEMIBOLD)),
+        ] {
+            let chain = &defs.families[&family];
+            assert_eq!(
+                chain.last().map(String::as_str),
+                Some(CJK_PROPORTIONAL_UI),
+                "{family:?} 链尾 = UI 对齐副本"
+            );
+            assert!(
+                !chain.iter().any(|n| n == CJK_PROPORTIONAL),
+                "{family:?} 链内不得残留原生表值 CJK 条目"
+            );
+        }
+        // UI 副本的采纳表值 == 链头 Inter 采纳表值(em),基线残差因此归零。
+        let head = parse_vertical_tables(INTER_REGULAR, 0)
+            .expect("Inter-Regular 表可解析")
+            .vertical_metrics_em();
+        let patched = &defs.font_data[CJK_PROPORTIONAL_UI];
+        let got = parse_vertical_tables(patched.font.as_ref(), patched.index)
+            .expect("patch 产物可解析")
+            .vertical_metrics_em();
+        assert_eq!(got, head, "UI 副本行 metrics == 链头 Inter");
+        // 预览正文族方向相反:链尾仍是原生表值条目。
+        let preview = &defs.families[&FontFamily::Name(Arc::from(FAMILY_PREVIEW_BODY))];
+        assert_eq!(preview.last().map(String::as_str), Some(CJK_PROPORTIONAL));
+    }
+
     /// #50 M1:编辑器专用等宽族的链结构与字节级正确性(纯 build 层,用
     /// 嵌入 Inter 字节充当 CJK 源字节 —— 它们是合法 sfnt,patch 必然成
     /// 功,不依赖本机字体)。链头 = 内置 Hack(与 `FontFamily::Monospace`
@@ -1398,14 +1531,18 @@ mod tests {
             "有 CJK 时预览正文族应为 override 副本族(不是 Proportional)"
         );
         ctx.fonts(|f| {
-            for family in [preview_family.clone(), FontFamily::Proportional] {
-                let chain = &f.definitions().families[&family];
-                assert_eq!(
-                    chain.last().map(String::as_str),
-                    Some(CJK_PROPORTIONAL),
-                    "{family:?}: CJK 回退仍在链尾"
-                );
-            }
+            let chain = &f.definitions().families[&preview_family];
+            assert_eq!(
+                chain.last().map(String::as_str),
+                Some(CJK_PROPORTIONAL),
+                "预览正文族: CJK 回退仍在链尾(原生表值)"
+            );
+            let prop = &f.definitions().families[&FontFamily::Proportional];
+            assert_eq!(
+                prop.last().map(String::as_str),
+                Some(CJK_PROPORTIONAL_UI),
+                "Proportional: CJK 回退仍在链尾(UI 对齐副本)"
+            );
         });
         ctx.fonts_mut(|f| {
             let preview = FontId::new(size, preview_family.clone());

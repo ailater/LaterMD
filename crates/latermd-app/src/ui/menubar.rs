@@ -1,36 +1,48 @@
-//! 顶部菜单栏:全部命令的可发现性入口(docs/roadmap.md P0「快捷键」;
+//! 菜单系统:全部命令的可发现性入口(docs/roadmap.md P0「快捷键」;
 //! 全量覆盖矩阵与豁免口径见 docs/menu-coverage.md)。
 //!
-//! 菜单结构是**常量清单**([`MENUS`]:标题 + 助记字母 + 分组段):绘制与
-//! 覆盖测试共用同一事实源,新命令忘进菜单时 `every_command_has_a_menu_entry`
-//! 红。分组规范:同类聚组、段与段之间分隔线、常用在前;菜单栏顺序
-//! 文件 → 编辑 → 格式 → 视图 → 导出 → AI → 设置 → 帮助(高频编辑动作
-//! 在前,派生动作在后,帮助居末位是桌面惯例)。键位文本取自 `keymap`(用户可改,与工具栏按钮 tooltip
-//! 的 decisions-pending #32 同源先例一致)—— 改键后两处同时变。
+//! **2026-10-12 改版(汉堡 + 标题栏内联标签行,坤哥指定)**:原顶部常驻
+//! 菜单行(`文件(F) 编辑(E) …` 一整条 TopPanel)退役,改为标题栏左缘一枚
+//! 汉堡按钮([`Icon::Hamburger`]);点击后**在标题栏条内**展开菜单组名
+//! 标签行(文件 / 编辑 / … / 帮助,不弹浮层),点组名才在其下方下拉该组
+//! 条目。双平台一致(macOS 的系统级 NSMenu 是平台惯例 + 标准编辑键的
+//! 载体,原样保留,见 `mac_menu`);常驻行撤掉后编辑区上沿净高 +26px。
 //!
-//! #62 M2 的 Alt 助记键:egui 0.36.2 **不支持** `&X` 助记语法(egui/epaint
-//! 全 crate `mnemonic` 零命中,`Button`/`MenuButton` 文本路径不解析 `&`,
-//! 核验记录见 decisions-pending #119),故在菜单层自建轻量助记:
-//! * 标题层:Alt+字母 打开对应菜单(`Popup::open_id` 驱动 egui 公开的
-//!   popup 记忆,严格匹配「仅 Alt」——Ctrl+Alt+R 等组合不误触);
-//! * 条目层:菜单展开时裸字母触发对应条目并收起(Windows 惯例);
-//! * 单击 Alt(按下→抬起,中间无其他输入)聚焦菜单栏首个菜单。
+//! 菜单结构仍是**常量清单**([`MENUS`]:标题 + 助记字母 + 分组段):绘制
+//! 与覆盖测试共用同一事实源,新命令忘进菜单时 `every_command_has_a_menu_
+//! entry` 红。分组规范:同类聚组、段与段之间分隔线、常用在前;顺序
+//! 文件 → 编辑 → 格式 → 视图 → 导出 → AI → 设置 → 帮助(高频编辑动作
+//! 在前,派生动作在后,帮助居末位是桌面惯例)。键位文本取自 `keymap`
+//! (用户可改,与工具栏按钮 tooltip 的 decisions-pending #32 同源先例
+//! 一致)—— 改键后两处同时变。
+//!
+//! #62 M2 的助记键在汉堡形态下的口径:egui 0.36.2 **不支持** `&X` 助记
+//! 语法(egui/epaint 全 crate `mnemonic` 零命中,`Button`/`MenuButton`
+//! 文本路径不解析 `&`,核验记录见 decisions-pending #119),故在菜单层
+//! 自建轻量助记:
+//! * 标题层:Alt+字母 打开标题栏标签行并落到对应菜单组(`Popup::open_id`
+//!   驱动 egui 公开的 popup 记忆,严格匹配「仅 Alt」——Ctrl+Alt+R 等
+//!   组合不误触);
+//! * 条目层:标签行展开时裸字母触发当前组的对应条目并收起(Windows 惯例);
+//!   单独按下或释放 Alt 不触发菜单，只有明确的 Alt+字母组合才打开。
 //!
 //! 助记字母与 keymap 的冲突审计由 `title_mnemonics_unique_and_clear_of_
 //! keymap_alt_bindings` 遍历断言零冲突;macOS 无 Alt 助记惯例,整个
 //! 助记层(显示后缀 + 键盘触发)在 mac 编译目标下关闭。
 //!
 //! 点击只产出 [`Message`],执行在 `App::logic` 归约 —— 与快捷键入口
-//! (`crate::command::poll_shortcuts`)殊途同归。外层 top panel 在 `ui::layout`。
+//! (`crate::command::poll_shortcuts`)殊途同归。宿主在 `ui::titlebar`
+//! (自绘标题栏左缘)。
 
 use crate::command::Command;
 use crate::keymap::Keymap;
 use crate::live::RenderMode;
 use crate::settings::SettingsTab;
 use crate::state::{Message, State};
+use crate::ui::icons::Icon;
 use crate::ui::tokens;
 
-use eframe::egui;
+use eframe::egui::{self, Sense};
 
 /// 「文件」两段:文件动作(常用序:新建 → 打开 → 快速打开 → 保存 →
 /// 另存为)+ 标签命令挂尾部(编辑器惯例:文件 → 关闭标签页),与
@@ -202,21 +214,35 @@ fn command_mnemonic(cmd: Command) -> char {
     }
 }
 
-/// 菜单条的 Alt 助记状态(单击 Alt 的武装标志)挂在 egui 临时数据上:
-/// 它是纯 UI 会话态,不进 `State` 存档,重启自然归零。
-fn alt_arm_id() -> egui::Id {
-    egui::Id::new("menubar-alt-arm")
-}
+/// 标题栏内标签行的助记后缀与正文**同字号**:无任何行高/对齐覆写时,
+/// egui 行内混排的 Inter 基线只比回退 CJK 基线高 1px(无头 galley 探针
+/// 实测),拉丁字母的墨高本来就矮于汉字 —— 同字号恰好落在中文软件菜单
+/// 「文件(F)」的标准形态上。缩号 + 行高补偿都试过:Inter 与 CJK 行盒
+/// metrics 不同,egui 的 BOTTOM 底对齐≠基线对齐,缩号反而把后缀吊离
+/// 汉字底线(2026-10-12 坤哥指出「英文明显高」);line_height 补偿又
+/// 会连带字形栅格尺寸,一并放弃,回到无覆写同字号。mac 不显示后缀。
+const MNEMONIC_SCALE: f32 = 1.0;
 
 /// 显示名 + 助记后缀:Win/Linux 显示「文件(F)」形态(mac 不显示)。
 /// egui 的下划线只能作用于整段 `RichText`,无法只给单个字母画线
-/// (epaint 无部分字形装饰),故用括号后缀 —— 中文 Windows 软件的标准形态。
-fn label_with_mnemonic(label: &str, letter: char) -> String {
-    if cfg!(target_os = "macos") {
-        label.to_owned()
-    } else {
-        format!("{label}({letter})")
+/// (epaint 无部分字形装饰),故用括号后缀 —— 中文 Windows 软件的标准
+/// 形态。`ui.style()` 决定正文字号 —— 菜单条与条目按钮同吃 Button
+/// 样式,两侧自然一致。
+fn mnemonic_label(ui: &egui::Ui, label: &str, letter: char) -> egui::text::LayoutJob {
+    use egui::text::{TextFormat, TextWrapping};
+    let base = egui::TextStyle::Button.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let mut job = egui::text::LayoutJob {
+        wrap: TextWrapping::no_max_width(),
+        ..egui::text::LayoutJob::default()
+    };
+    job.append(label, 0.0, TextFormat::simple(base.clone(), color));
+    if !cfg!(target_os = "macos") {
+        let suffix = format!("({letter})");
+        let small = egui::FontId::new(base.size * MNEMONIC_SCALE, base.family.clone());
+        job.append(&suffix, 0.0, TextFormat::simple(small, color));
     }
+    job
 }
 
 /// 布偶开关命令的当前值(菜单条目勾选态;#67 M2):`Some(true/false)` =
@@ -302,63 +328,6 @@ fn bare_key_letter(ctx: &egui::Context) -> Option<char> {
     })
 }
 
-/// 单击 Alt(按下→抬起,中间无其他按键/输入)的检测:跨帧武装状态机,
-/// Win/Linux「单击 Alt 聚焦菜单栏」惯例的实现面。Alt+字母的组合会在字母
-/// 按下帧污染武装标志,不会误触发;Alt 键事件本身可达(egui-winit 把
-/// `KeyCode::AltLeft/Right` 映射为 `Key::AltLeft/Right` 照常推 `Event::Key`,
-/// lib.rs 核验记录见 decisions-pending #119)。
-fn single_alt_click(ctx: &egui::Context) -> bool {
-    if cfg!(target_os = "macos") {
-        return false;
-    }
-    let mut armed = ctx.data_mut(|data| data.get_temp::<bool>(alt_arm_id()).unwrap_or(false));
-    let mut fired = false;
-    ctx.input(|input| {
-        for event in &input.events {
-            match event {
-                egui::Event::Key {
-                    key: egui::Key::AltLeft | egui::Key::AltRight,
-                    pressed: true,
-                    repeat: false,
-                    ..
-                } => armed = true,
-                // 长按 Alt 的 repeat 事件不污染(保持武装)
-                egui::Event::Key {
-                    key: egui::Key::AltLeft | egui::Key::AltRight,
-                    pressed: true,
-                    ..
-                } => {}
-                egui::Event::Key { pressed: true, .. } => armed = false,
-                egui::Event::Text(_) => armed = false,
-                // 失焦即缴械(#69):Alt 按下发生在本窗口、抬起却被 WM/他窗
-                // 吃掉的切窗场景里,armed 会跨会话遗留 —— 之后从别处
-                // Ctrl+Alt 切回时收到的孤立 Alt release 会被误判成单击,
-                // 炸开「文件」菜单。egui-winit 从 winit 的 WindowEvent::
-                // Focused 推送本事件(0.36.2 lib.rs:444),失焦帧必然早于
-                // 下一次聚焦,在此清零即可靠切断遗留链。
-                egui::Event::WindowFocused(false) => armed = false,
-                egui::Event::Key {
-                    key: egui::Key::AltLeft | egui::Key::AltRight,
-                    pressed: false,
-                    ..
-                } => {
-                    if armed {
-                        fired = true;
-                    }
-                    armed = false;
-                }
-                _ => {}
-            }
-        }
-    });
-    // 指针按下同样污染(Alt+点击是窗口操作/拖拽的常见前缀)
-    if ctx.input(|input| input.pointer.any_pressed()) {
-        armed = false;
-    }
-    ctx.data_mut(|data| data.insert_temp(alt_arm_id(), armed));
-    fired
-}
-
 /// 消费触发助记的那次按键(Key 事件连同同字母的 Text 事件):不消费的话,
 /// 部分平台上 Alt+字母会带 `Event::Text` 流进聚焦的 TextEdit 插出字符
 /// (egui-winit 的 `is_cmd` 不含 Alt)。
@@ -380,193 +349,286 @@ fn consume_letter_events(ctx: &egui::Context, letter: char) {
 /// 菜单展开帧的条目层助记:本帧裸字母命中本菜单某条目时,发消息并收起
 /// 菜单。只在命中的菜单/条目上消费事件 —— 未命中字母原样放行(菜单开着
 /// 时编辑器照常收字的现状不被扩大)。
-fn fire_item_letter(ui: &egui::Ui, sections: &[&[Command]], outbox: &mut Vec<Message>) {
+fn fire_item_letter(ui: &egui::Ui, sections: &[&[Command]], outbox: &mut Vec<Message>) -> bool {
     let Some(letter) = bare_key_letter(ui.ctx()) else {
-        return;
+        return false;
     };
     for cmd in sections.iter().flat_map(|section| section.iter().copied()) {
         if command_mnemonic(cmd) == letter {
             consume_letter_events(ui.ctx(), letter);
             outbox.push(cmd.message());
             ui.close();
-            return;
+            return true;
         }
     }
+    false
 }
 
 /// 「设置」菜单展开帧的条目层助记(与 [`fire_item_letter`] 同口径,目标
 /// 是设置页直达而非命令)。
-fn fire_settings_item_letter(ui: &egui::Ui, outbox: &mut Vec<Message>) {
+fn fire_settings_item_letter(ui: &egui::Ui, outbox: &mut Vec<Message>) -> bool {
     let Some(letter) = bare_key_letter(ui.ctx()) else {
-        return;
+        return false;
     };
     for (tab, mnemonic) in SETTINGS_TAB_MNEMONICS {
         if mnemonic == letter {
             consume_letter_events(ui.ctx(), letter);
             outbox.push(Message::SettingsOpened(tab));
             ui.close();
-            return;
+            return true;
         }
     }
+    false
 }
 
 /// 「帮助」菜单展开帧的条目层助记(与 [`fire_settings_item_letter`] 同
 /// 口径,目标是关于窗而非命令;#71 M1)。
-fn fire_help_item_letter(ui: &egui::Ui, outbox: &mut Vec<Message>) {
+fn fire_help_item_letter(ui: &egui::Ui, outbox: &mut Vec<Message>) -> bool {
     let Some(letter) = bare_key_letter(ui.ctx()) else {
-        return;
+        return false;
     };
     if ABOUT_MNEMONIC == letter {
         consume_letter_events(ui.ctx(), letter);
         outbox.push(Message::AboutOpened);
         ui.close();
+        return true;
     }
+    false
 }
 
-/// 绘制菜单栏内容(挂在 top panel 内)。开关类条目的勾选态从 `state`
-/// 取真值(与设置页/标题栏按钮同一事实源)。
-pub fn ui(bar: &mut egui::Ui, keymap: &Keymap, state: &State, outbox: &mut Vec<Message>) {
-    ui_with_probe(bar, keymap, state, outbox, None::<fn(usize, egui::Id)>);
+/// 标题栏菜单标签行的开合态(汉堡点击 toggle):纯 UI 会话态挂 egui
+/// 临时数据,不进 `State` 存档,重启自然归零。
+fn menu_row_open_id() -> egui::Id {
+    egui::Id::new("menubar-row-open")
 }
 
-/// 同 [`ui`],额外把每个菜单的 `(栏内序号, popup id)` 交给 `probe`
-/// (`None` 即不探针;仿 `ui::format_bar::ui_with_probe` 先例)。
-/// 无头测试用 popup id 断言「Alt 助记打开了对应菜单」——popup 的开合
-/// 状态在 egui memory,`Popup::is_id_open` 按 id 查询。
-#[allow(clippy::type_complexity)]
-pub(crate) fn ui_with_probe(
-    bar: &mut egui::Ui,
+pub(crate) fn menu_row_open(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(menu_row_open_id()).unwrap_or(false))
+}
+
+fn set_menu_row_open(ctx: &egui::Context, open: bool) {
+    ctx.data_mut(|data| data.insert_temp(menu_row_open_id(), open));
+}
+
+/// Alt+字母 命中组的「待弹出」暂存:汉堡层写入,标签行层读走并对该组
+/// 执行 `Popup::open_id` —— 组名按钮的 popup id 要到按钮绘制时才存在,
+/// 跨层经 temp 交接(一次性,读后即清)。
+fn alt_pending_id() -> egui::Id {
+    egui::Id::new("menubar-alt-pending")
+}
+
+/// 标题栏左缘的汉堡菜单按钮(绝对矩形自绘):点击开合**标题栏内**
+/// 的菜单标签行([`menu_row`],坤哥 2026-10-12 指定形态 —— 点汉堡不出
+/// 浮层,标签行就地长在标题栏条内);Alt+字母 展开标签行并直接弹出
+/// 对应组。单击 Alt 不打开任何东西(误触史与退役理由见模块文档)。
+pub(crate) fn hamburger_button_at(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
+    // 自绘交互底而非 `egui::Button`:AtomLayout 把 frame 内边距加在
+    // min_size 之外(outer = 内容 + margin),`ui.put` 32×24 实际分到
+    // 32×32 的命中/绘制矩形,图标中心随之整体下坠 4px、命中区侵入下方
+    // 标签行。`allocate_rect` 保证响应矩形与传入矩形严格相等。
+    let response = ui.allocate_rect(rect, Sense::click());
+    let colors = crate::theme::shell(ui);
+    if response.hovered() || menu_row_open(ui.ctx()) {
+        ui.painter()
+            .rect_filled(rect, crate::ui::tokens::RADIUS_SM, colors.hover);
+    }
+    paint_hamburger_icon(ui, &response);
+    let ctx = ui.ctx();
+    if response.clicked() {
+        set_menu_row_open(ctx, !menu_row_open(ctx));
+    }
+    if let Some(letter) = alt_menu_letter(ctx) {
+        if let Some(section) = section_index_of(letter) {
+            set_menu_row_open(ctx, true);
+            ctx.data_mut(|data| data.insert_temp(alt_pending_id(), Some(section)));
+            consume_letter_events(ctx, letter);
+        }
+    }
+    response.on_hover_text("菜单")
+}
+
+/// 汉堡图标叠画在按钮中心(响应矩形即传入矩形,中心即标题栏中心线)。
+/// 图标全集走 painter 自绘(icons.rs 铁律),不吃字体字形。
+fn paint_hamburger_icon(ui: &egui::Ui, response: &egui::Response) {
+    if !ui.is_rect_visible(response.rect) {
+        return;
+    }
+    let visuals = ui.visuals();
+    let color = if response.hovered() || menu_row_open(ui.ctx()) {
+        visuals.widgets.hovered.fg_stroke.color
+    } else {
+        visuals.widgets.inactive.fg_stroke.color
+    };
+    Icon::Hamburger.draw(ui.painter(), response.rect.center(), 16.0, color);
+}
+
+/// 标题栏内的菜单标签行:八个组名按钮(文件…帮助)横排,点击某组即
+/// 在其下方弹出条目下拉(egui `menu_button` 内建:点开、再点收、点外
+/// 收)。宿主 `ui::titlebar`:展开态下 logo/标题/页签让位,标签行独占
+/// 标题栏左中段。
+///
+/// 收层口径:条目点击(指针或裸字母助记)选中即整行收起(菜单栏惯例:
+/// 用完就走);下拉全关后点击行外区域同样收起 —— 与 Windows 菜单栏的
+/// 「点外面就收」一致。Esc 只关下拉(egui 内建),标签行保留,再点
+/// 汉堡收。
+pub(crate) fn menu_row(
+    ui: &mut egui::Ui,
+    bar: egui::Rect,
     keymap: &Keymap,
     state: &State,
     outbox: &mut Vec<Message>,
-    mut probe: Option<impl FnMut(usize, egui::Id)>,
+    mut probe: Option<impl FnMut(usize, egui::Id, egui::Rect)>,
 ) {
-    egui::MenuBar::new().ui(bar, |ui| {
-        // 排版统一(#62 M2):标题间距用外壳 token(工具栏分组同档),
-        // 字号/悬停态/内边距两侧(菜单条与下拉)同吃 `menu_style`
-        // (egui 0.36 的 MenuBar 与 Popup::menu 继承同一份,无需重复投影)。
-        ui.spacing_mut().item_spacing.x = tokens::SPACE_MD;
-        // 助记输入检测每帧一次(循环外),菜单循环里只查结果
-        let open_letter = alt_menu_letter(ui.ctx());
-        let open_first = single_alt_click(ui.ctx());
-        for (index, (title, mnemonic, sections)) in MENUS.iter().enumerate() {
-            let response = ui
-                .menu_button(label_with_mnemonic(title, *mnemonic), |ui| {
-                    draw_sections(ui, sections, keymap, state, outbox);
-                    fire_item_letter(ui, sections, outbox);
-                })
-                .response;
-            if let Some(probe) = probe.as_mut() {
-                probe(
-                    index,
-                    egui::containers::Popup::default_response_id(&response),
-                );
-            }
-            // Alt+字母 / 单击 Alt → 打开对应(首个)菜单。open_id 写的是
-            // egui popup 记忆,下一帧 menu_button 读到即展开;命中帧同时
-            // 消费按键,防字母/文本漏进聚焦的编辑器。
-            if open_letter == Some(*mnemonic) || (open_first && index == 0) {
-                egui::containers::Popup::open_id(
-                    ui.ctx(),
-                    egui::containers::Popup::default_response_id(&response),
-                );
-                if let Some(letter) = open_letter {
-                    consume_letter_events(ui.ctx(), letter);
-                } else {
-                    // 单击 Alt:消费 Alt 键的抬起事件即可(无字母副作用)
-                    ui.ctx().input_mut(|input| {
-                        input.events.retain(|event| {
-                            !matches!(
-                                event,
-                                egui::Event::Key {
-                                    key: egui::Key::AltLeft | egui::Key::AltRight,
-                                    ..
-                                }
-                            )
-                        });
-                    });
+    let ctx = ui.ctx().clone();
+    let menu_rect = crate::ui::titlebar::menu_button_rect(bar);
+    // 行起点贴汉堡右缘 4px(2026-10-12 坤哥「左侧文件可以再往左点」;
+    // 原为 SPACE_SM=6,叠上标签内边距后首个「文件」距汉堡图标过远)。
+    let row_rect = egui::Rect::from_min_max(
+        egui::pos2(menu_rect.right() + tokens::SPACE_XS, bar.top()),
+        egui::pos2(bar.right(), bar.bottom()),
+    );
+    let mut popup_ids: Vec<(usize, egui::Id)> = Vec::new();
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(row_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    row.set_clip_rect(row_rect.intersect(ui.clip_rect()));
+    // 标签按钮之间采用紧凑的 4px 节奏，避免标题栏展开后横向过松。
+    row.spacing_mut().item_spacing.x = tokens::SPACE_XS;
+    // 标签按钮内边距局部收紧(2026-10-12 坤哥「菜单的间距太宽了」):
+    // 全局 button_padding 是输入框档(shadcn px-3=12,theme 投影),菜单
+    // 标签吃它会把文本间隙撑到 ~22px。菜单栏惯例是标签近贴、hover 底
+    // 轻贴文字,仅本行局部改写,输入框/其余按钮不受影响。
+    row.style_mut().spacing.button_padding = egui::vec2(tokens::SPACE_XS, 1.0);
+    // Alt+字母 的待弹组:读走即清(Option<usize> 存取,读后写回 None)
+    let pending = ctx.data_mut(|data| data.get_temp::<Option<usize>>(alt_pending_id()).flatten());
+    if pending.is_some() {
+        ctx.data_mut(|data| data.insert_temp(alt_pending_id(), None::<usize>));
+    }
+    for index in 0..section_count() {
+        let (title, mnemonic) = section_title(index);
+        let response = row
+            .menu_button(mnemonic_label(&row, title, mnemonic), |ui| {
+                let used = draw_group_content(ui, index, keymap, state, outbox);
+                if used {
+                    ui.close();
+                    set_menu_row_open(ui.ctx(), false);
                 }
-            }
+            })
+            .response;
+        let popup_id = egui::containers::Popup::default_response_id(&response);
+        if let Some(probe) = probe.as_mut() {
+            probe(index, popup_id, response.rect);
         }
+        popup_ids.push((index, popup_id));
+        if pending == Some(index) {
+            egui::containers::Popup::open_id(&ctx, popup_id);
+        }
+    }
+    drop(row);
+
+    // 下拉全关 + 指针点击在行外 → 收层。条目点击帧不触发(popup 记忆
+    // 在绘制期仍为开态,自动关闭发生在本帧绘制之后,下一帧才见全关)。
+    let any_open = popup_ids
+        .iter()
+        .any(|(_, id)| egui::containers::Popup::is_id_open(ui.ctx(), *id));
+    if !any_open
+        && ui.input(|i| i.pointer.any_click())
+        && ui
+            .input(|i| i.pointer.interact_pos())
+            .is_none_or(|pos| !row_rect.contains(pos) && !menu_rect.contains(pos))
+    {
+        set_menu_row_open(ui.ctx(), false);
+    }
+}
+
+/// 标签行第 `index` 组的下拉内容:条目渲染 + 条目层助记;返回是否有
+/// 条目被选中(指针点击或裸字母),供收层判断。
+fn draw_group_content(
+    ui: &mut egui::Ui,
+    index: usize,
+    keymap: &Keymap,
+    state: &State,
+    outbox: &mut Vec<Message>,
+) -> bool {
+    if index < MENUS.len() {
+        let used = draw_sections(ui, MENUS[index].2, keymap, state, outbox);
+        fire_item_letter(ui, MENUS[index].2, outbox) || used
+    } else if index == MENUS.len() {
         // 设置:菜单保留两个直达页(外观 / 快捷键),完整五页由工具栏齿轮开
-        let response = ui
-            .menu_button(label_with_mnemonic("设置", SETTINGS_MNEMONIC), |ui| {
-                for (tab, mnemonic) in SETTINGS_TAB_MNEMONICS {
-                    if ui
-                        .button(label_with_mnemonic(tab.label(), mnemonic))
-                        .clicked()
-                    {
-                        outbox.push(Message::SettingsOpened(tab));
-                    }
-                }
-                fire_settings_item_letter(ui, outbox);
-            })
-            .response;
-        if let Some(probe) = probe.as_mut() {
-            probe(
-                MENUS.len(),
-                egui::containers::Popup::default_response_id(&response),
-            );
+        let mut used = false;
+        for (tab, mnemonic) in SETTINGS_TAB_MNEMONICS {
+            if ui
+                .button(mnemonic_label(ui, tab.label(), mnemonic))
+                .clicked()
+            {
+                outbox.push(Message::SettingsOpened(tab));
+                used = true;
+            }
         }
-        if open_letter == Some(SETTINGS_MNEMONIC) {
-            egui::containers::Popup::open_id(
-                ui.ctx(),
-                egui::containers::Popup::default_response_id(&response),
-            );
-            consume_letter_events(ui.ctx(), SETTINGS_MNEMONIC);
+        fire_settings_item_letter(ui, outbox) || used
+    } else {
+        // 帮助(#71 M1):非命令菜单,条目直达关于窗
+        let mut used = false;
+        if ui
+            .button(mnemonic_label(ui, "关于 LaterMD…", ABOUT_MNEMONIC))
+            .clicked()
+        {
+            outbox.push(Message::AboutOpened);
+            used = true;
         }
-        // 帮助(#71 M1):非命令菜单(条目直达关于窗),照「设置」同款
-        // 绘制与 Alt 助记;桌面惯例居菜单栏末位
-        let response = ui
-            .menu_button(label_with_mnemonic("帮助", HELP_MNEMONIC), |ui| {
-                if ui
-                    .button(label_with_mnemonic("关于 LaterMD…", ABOUT_MNEMONIC))
-                    .clicked()
-                {
-                    outbox.push(Message::AboutOpened);
-                }
-                fire_help_item_letter(ui, outbox);
-            })
-            .response;
-        if let Some(probe) = probe.as_mut() {
-            probe(
-                MENUS.len() + 1,
-                egui::containers::Popup::default_response_id(&response),
-            );
-        }
-        if open_letter == Some(HELP_MNEMONIC) {
-            egui::containers::Popup::open_id(
-                ui.ctx(),
-                egui::containers::Popup::default_response_id(&response),
-            );
-            consume_letter_events(ui.ctx(), HELP_MNEMONIC);
-        }
-    });
+        fire_help_item_letter(ui, outbox) || used
+    }
+}
+
+/// 组总数 = [`MENUS`] 六组 + 设置 + 帮助。
+fn section_count() -> usize {
+    MENUS.len() + 2
+}
+
+/// 组序号 → (标题, 助记)。设置/帮助排在 [`MENUS`] 之后(菜单末位惯例)。
+fn section_title(index: usize) -> (&'static str, char) {
+    match index {
+        i if i < MENUS.len() => (MENUS[i].0, MENUS[i].1),
+        i if i == MENUS.len() => ("设置", SETTINGS_MNEMONIC),
+        _ => ("帮助", HELP_MNEMONIC),
+    }
+}
+
+/// 助记字母 → 组序号(Alt+字母 落组;无命中 None,如 Alt+T 主题键)。
+fn section_index_of(letter: char) -> Option<usize> {
+    (0..section_count()).find(|index| section_title(*index).1 == letter)
 }
 
 /// 一份菜单的分组段:段间画分隔线(首段之前不画),段内逐条渲染。
-/// 独立成函数是为了让无头测试不经过 `menu_button`(未展开的菜单不执行
-/// 闭包)就能渲染全部条目 —— 分组渲染不 panic 的断言面。
+/// 返回是否有条目被点击 —— 弹层是 `CloseOnClickOutside`,点击收层由
+/// 调用方据此显式 `ui.close()`。独立成函数是为了让无头测试不经过弹层
+/// (未展开时不执行内容)就能渲染全部条目 —— 分组渲染不 panic 的断言面。
 fn draw_sections(
     ui: &mut egui::Ui,
     sections: &[&[Command]],
     keymap: &Keymap,
     state: &State,
     outbox: &mut Vec<Message>,
-) {
+) -> bool {
+    let mut clicked_any = false;
     for (index, section) in sections.iter().enumerate() {
         if index > 0 {
             ui.separator();
         }
         for cmd in *section {
-            item(ui, *cmd, keymap, toggle_checked(*cmd, state), outbox);
+            if item(ui, *cmd, keymap, toggle_checked(*cmd, state), outbox).clicked() {
+                clicked_any = true;
+            }
         }
     }
+    clicked_any
 }
 
 /// 单个菜单项:显示名(带助记后缀,开关类条目前置勾选列 `checked`)+
-/// 当前键位(未绑快捷键的命令只显示名字);点击发消息(egui 菜单内点击
-/// 任意控件自动收起)。返回按钮响应,独立成函数便于点击测试定位。
+/// 当前键位(未绑快捷键的命令只显示名字);点击发消息。返回按钮响应,
+/// 独立成函数便于点击测试定位。
 pub fn item(
     ui: &mut egui::Ui,
     cmd: Command,
@@ -574,11 +636,8 @@ pub fn item(
     checked: Option<bool>,
     outbox: &mut Vec<Message>,
 ) -> egui::Response {
-    let mut button = egui::Button::new(format!(
-        "{}{}",
-        check_prefix(checked),
-        label_with_mnemonic(cmd.label(), command_mnemonic(cmd))
-    ));
+    let label = format!("{}{}", check_prefix(checked), cmd.label());
+    let mut button = egui::Button::new(mnemonic_label(ui, &label, command_mnemonic(cmd)));
     if let Some(shortcut) = keymap.get(cmd) {
         button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut.keyboard()));
     }
@@ -775,9 +834,32 @@ mod tests {
         for theme in [egui::Theme::Dark, egui::Theme::Light] {
             let ctx = egui::Context::default();
             ctx.set_theme(theme);
-            let output = ctx.run_ui(RawInput::default(), |ui| {
-                super::ui(ui, &keymap, &state, &mut outbox);
-            });
+            let bar = Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, crate::ui::tokens::TITLEBAR_H),
+            );
+            let output = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    super::hamburger_button_at(ui, crate::ui::titlebar::menu_button_rect(bar));
+                    if super::menu_row_open(ui.ctx()) {
+                        super::menu_row(
+                            ui,
+                            bar,
+                            &keymap,
+                            &state,
+                            &mut outbox,
+                            None::<fn(usize, egui::Id, Rect)>,
+                        );
+                    }
+                },
+            );
             output.drop_without_applying_deltas();
             assert!(outbox.is_empty(), "菜单栏收起态渲染不产生消息({theme:?})");
         }
@@ -1011,19 +1093,36 @@ mod tests {
         }
     }
 
-    /// 助记后缀的平台口径(#62 M2):macOS 无 Alt 助记惯例(菜单助记符由
-    /// 系统菜单层处理,自绘菜单不显示),不渲染后缀;其余平台渲染
-    /// 「文件(F)」形态。按编译目标断言,两侧在各自平台 CI 上跑。
+    /// 助记后缀的平台口径(#62 M2)+ 缩号口径(2026-10-12 中英文等高):
+    /// macOS 无 Alt 助记惯例(菜单助记符由系统菜单层处理,自绘菜单不显示),
+    /// job 只有正文一段;其余平台渲染「文件(F)」形态,后缀段字号 =
+    /// 正文 × [`MNEMONIC_SCALE`](Inter 字母墨高高于 CJK 汉字,缩号取平)。
+    /// 按编译目标断言,两侧在各自平台 CI 上跑。
     #[test]
     fn mnemonic_suffix_per_platform() {
+        let ctx = egui::Context::default();
+        let mut job = None;
+        let output = ctx.run_ui(RawInput::default(), |ui| {
+            job = Some(mnemonic_label(ui, "文件", 'F'));
+        });
+        output.drop_without_applying_deltas();
+        let job = job.expect("job 已产出");
         if cfg!(target_os = "macos") {
-            assert_eq!(
-                label_with_mnemonic("文件", 'F'),
-                "文件",
-                "mac 不显示助记后缀"
-            );
+            assert_eq!(job.text, "文件", "mac 不显示助记后缀");
+            assert_eq!(job.sections.len(), 1, "mac 只有一段正文");
         } else {
-            assert_eq!(label_with_mnemonic("文件", 'F'), "文件(F)");
+            assert_eq!(job.text, "文件(F)", "非 mac 渲染助记后缀");
+            // MNEMONIC_SCALE = 1.0 时正文与后缀 TextFormat 全等,egui
+            // `LayoutJob::append` 把相邻同格式段合并成一段 —— 这是纯
+            // 优化,渲染逐字一致;若将来恢复异号后缀,这里会回到 2 段。
+            assert_eq!(job.sections.len(), 1, "同字号后缀并入正文段");
+            assert_eq!(
+                job.sections[0].format.font_id.size,
+                egui::TextStyle::Button
+                    .resolve(&egui::Style::default())
+                    .size,
+                "助记后缀与正文同字号(基线只差 1px,见 MNEMONIC_SCALE 注释)"
+            );
         }
     }
 
@@ -1047,356 +1146,363 @@ mod tests {
         }
     }
 
-    /// 无头帧跑菜单栏并收集每个菜单的 popup id(`(栏内序号, id)`,
-    /// 序号 0-5 对应 [`MENUS`],6 = 设置,7 = 帮助)。返回 popup id 表供
-    /// 开合断言。
-    fn menubar_frame(ctx: &egui::Context, events: Vec<Event>) -> Vec<(usize, egui::Id)> {
+    /// 标题栏菜单的驱动帧:复刻 `ui::titlebar` 的调用序(汉堡 → 读开态 →
+    /// 展开时画标签行),收集各组 popup id 与矩形。bar 固定 900×TITLEBAR_H,
+    /// 与 `titlebar::menu_button_rect` 的取值口径同源。
+    struct MenuFrame {
+        row_open: bool,
+        sections: Vec<(usize, egui::Id, Rect)>,
+        outbox: Vec<Message>,
+        shapes: Vec<egui::epaint::ClippedShape>,
+    }
+
+    fn menu_frame(ctx: &egui::Context, events: Vec<Event>) -> MenuFrame {
+        menu_frame_at_width(ctx, events, 900.0)
+    }
+
+    fn menu_frame_at_width(ctx: &egui::Context, events: Vec<Event>, width: f32) -> MenuFrame {
         let keymap = Keymap::builtin();
         let state = State::default();
+        let bar = Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width, crate::ui::tokens::TITLEBAR_H),
+        );
         let mut outbox = Vec::new();
-        let mut ids = Vec::new();
+        let mut sections = Vec::new();
         let output = ctx.run_ui(
             RawInput {
                 events,
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 600.0),
+                )),
                 ..Default::default()
             },
             |ui| {
-                super::ui_with_probe(
-                    ui,
-                    &keymap,
-                    &state,
-                    &mut outbox,
-                    Some(|index, id| {
-                        ids.push((index, id));
-                    }),
-                );
+                super::hamburger_button_at(ui, crate::ui::titlebar::menu_button_rect(bar));
+                if super::menu_row_open(ui.ctx()) {
+                    super::menu_row(
+                        ui,
+                        bar,
+                        &keymap,
+                        &state,
+                        &mut outbox,
+                        Some(|index, id, rect| sections.push((index, id, rect))),
+                    );
+                }
             },
         );
+        let output_shapes = output.shapes.clone();
         output.drop_without_applying_deltas();
-        assert!(outbox.is_empty(), "开合菜单本身不产生命令消息:{outbox:?}");
-        ids
+        MenuFrame {
+            row_open: super::menu_row_open(ctx),
+            sections,
+            outbox,
+            shapes: output_shapes,
+        }
     }
 
-    /// Alt+F 打开「文件」菜单(标题层助记的行为面):事件帧 + 展开帧之后,
-    /// 文件菜单的 popup 在 egui memory 里是开的,其余菜单都没开。
-    /// Alt+T(主题键 #45)不开任何菜单 —— 字母避让审计的行为面。
+    /// 在本帧 shapes 里找含 `needle` 的文本矩形(条目定位用)。
+    fn find_text_rect(frame: &MenuFrame, needle: &str) -> Option<Rect> {
+        frame.shapes.iter().find_map(|clipped| {
+            let egui::epaint::Shape::Text(text) = &clipped.shape else {
+                return None;
+            };
+            text.galley
+                .job
+                .text
+                .contains(needle)
+                .then(|| clipped.shape.visual_bounding_rect())
+        })
+    }
+
+    /// 各文本 job 的 (全文, 正文段字号) 断面(排版统一断言用)。
+    fn job_sections(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Vec<(String, f32)> {
+        shapes
+            .iter()
+            .filter_map(|clipped| {
+                let egui::epaint::Shape::Text(text) = &clipped.shape else {
+                    return None;
+                };
+                let job = &text.galley.job;
+                job.sections
+                    .first()
+                    .filter(|_| job.text.contains(needle))
+                    .map(|section| (job.text.clone(), section.format.font_id.size))
+            })
+            .collect()
+    }
+
+    fn section_id(frame: &MenuFrame, index: usize) -> egui::Id {
+        frame
+            .sections
+            .iter()
+            .find(|(i, _, _)| *i == index)
+            .expect("组名按钮本帧渲染")
+            .1
+    }
+
+    fn popup_open(ctx: &egui::Context, id: &egui::Id) -> bool {
+        egui::containers::Popup::is_id_open(ctx, *id)
+    }
+
+    /// 指针在 `pos` 处单击:moved / press / release **分三帧**注入 ——
+    /// egui 要求「按下帧之前指针已停在目标上」,同帧三连发不算点击
+    /// (layout.rs 面板层点击测试同款节奏,实证记录见其文档)。
+    fn click_frames(ctx: &egui::Context, pos: egui::Pos2) -> Vec<Message> {
+        let click = |pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut outbox = Vec::new();
+        // 三帧各自的消息都要收(条目点击的消息落在 release 帧)
+        outbox.extend(menu_frame(ctx, vec![Event::PointerMoved(pos)]).outbox);
+        outbox.extend(menu_frame(ctx, vec![click(true)]).outbox);
+        outbox.extend(menu_frame(ctx, vec![click(false)]).outbox);
+        outbox
+    }
+
+    /// 点击汉堡 → 标题栏内展开标签行(不弹任何下拉);再点 → 收起。
+    #[test]
+    fn hamburger_click_toggles_menu_row() {
+        let ctx = egui::Context::default();
+        let bar = Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, crate::ui::tokens::TITLEBAR_H),
+        );
+        let hamburger = crate::ui::titlebar::menu_button_rect(bar).center();
+        click_frames(&ctx, hamburger);
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(frame.row_open, "点击汉堡展开标签行");
+        assert!(
+            frame.outbox.is_empty(),
+            "开合标签行不产生命令消息:{:?}",
+            frame.outbox
+        );
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(frame.row_open, "空帧保持展开");
+        for (_, id, _) in &frame.sections {
+            assert!(!popup_open(&ctx, id), "展开标签行不自动弹下拉");
+        }
+        click_frames(&ctx, hamburger);
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(!frame.row_open, "再点汉堡收起标签行");
+    }
+
+    /// Alt+F 展开标签行并**直接弹出**「文件」组(标题层助记的行为面):
+    /// 其他组不弹。Alt+E/Alt+S(设置组)同理。Alt+T(主题键 #45)不开任何
+    /// 东西 —— 字母避让审计的行为面。
     #[test]
     fn alt_letter_opens_matching_menu_only() {
         let ctx = egui::Context::default();
-        let ids = menubar_frame(&ctx, vec![key_event(egui::Key::F, egui::Modifiers::ALT)]);
-        menubar_frame(&ctx, vec![]);
-        let file_id = ids.iter().find(|(index, _)| *index == 0).unwrap().1;
+        menu_frame(&ctx, vec![key_event(egui::Key::F, egui::Modifiers::ALT)]);
+        let frame = menu_frame(&ctx, vec![]);
         assert_eq!(
-            egui::containers::Popup::is_id_open(&ctx, file_id),
+            frame.row_open,
             !cfg!(target_os = "macos"),
-            "Alt+F 仅在非 macOS 平台打开菜单"
+            "Alt+F 仅在非 macOS 平台展开标签行"
         );
-        for (index, id) in &ids {
-            if *index != 0 {
-                assert!(
-                    !egui::containers::Popup::is_id_open(&ctx, *id),
-                    "Alt+F 不该顺带打开第 {index} 个菜单"
-                );
+        if !cfg!(target_os = "macos") {
+            assert!(
+                popup_open(&ctx, &section_id(&frame, 0)),
+                "Alt+F 弹出「文件」"
+            );
+            for (index, id, _) in &frame.sections {
+                if *index != 0 {
+                    assert!(!popup_open(&ctx, id), "Alt+F 不该顺带弹出第 {index} 组");
+                }
             }
         }
 
-        // Alt+T 是主题切换的出厂键(#45 K1),不分配给任何菜单 —— 按下后
-        // 没有菜单被打开(它仍触发主题命令这件事由 command.rs 的
-        // `alt_t_fires_only_toggle_theme` 钉住,此处只审菜单侧)。
+        // Alt+E 落「编辑」
         let ctx = egui::Context::default();
-        let ids = menubar_frame(&ctx, vec![key_event(egui::Key::T, egui::Modifiers::ALT)]);
-        menubar_frame(&ctx, vec![]);
-        for (_, id) in &ids {
+        menu_frame(&ctx, vec![key_event(egui::Key::E, egui::Modifiers::ALT)]);
+        let frame = menu_frame(&ctx, vec![]);
+        if !cfg!(target_os = "macos") {
+            assert!(frame.row_open);
             assert!(
-                !egui::containers::Popup::is_id_open(&ctx, *id),
-                "Alt+T 不该打开任何菜单"
+                popup_open(&ctx, &section_id(&frame, 1)),
+                "Alt+E 弹出「编辑」"
             );
         }
 
-        // 严格匹配的对照:Ctrl+Alt+R(切换预览栏)带 Ctrl,不是纯 Alt,
-        // 不触发助记 —— 检测层用位相等而非 matches_logically 的原因。
+        // Alt+S 落「设置」(非 MENUS 组同样可达)
         let ctx = egui::Context::default();
-        let ids = menubar_frame(
+        menu_frame(&ctx, vec![key_event(egui::Key::S, egui::Modifiers::ALT)]);
+        let frame = menu_frame(&ctx, vec![]);
+        if !cfg!(target_os = "macos") {
+            assert!(frame.row_open);
+            assert!(
+                popup_open(&ctx, &section_id(&frame, MENUS.len())),
+                "Alt+S 弹出「设置」"
+            );
+        }
+
+        // Alt+T 是主题切换的出厂键(#45 K1),不分配给任何菜单
+        let ctx = egui::Context::default();
+        menu_frame(&ctx, vec![key_event(egui::Key::T, egui::Modifiers::ALT)]);
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(!frame.row_open, "Alt+T 不展开标签行");
+
+        // 严格匹配的对照:Ctrl+Alt+R(切换预览栏)带 Ctrl,不是纯 Alt
+        let ctx = egui::Context::default();
+        menu_frame(
             &ctx,
             vec![key_event(
                 egui::Key::R,
                 egui::Modifiers::COMMAND | egui::Modifiers::ALT,
             )],
         );
-        menubar_frame(&ctx, vec![]);
-        for (_, id) in &ids {
-            assert!(
-                !egui::containers::Popup::is_id_open(&ctx, *id),
-                "Ctrl+Alt+R 是命令快捷键,不该触发菜单助记"
-            );
-        }
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(!frame.row_open, "Ctrl+Alt+R 是命令快捷键,不触发菜单助记");
     }
 
-    /// 基础交互核验(#62 M2):Alt 打开的菜单,Esc 关闭、点击菜单外区域
-    /// 关闭 —— 两者都是 egui 0.36 popup 的内建行为(`popup.rs` 的
-    /// `key_pressed(Escape)` 与 `close_behavior` 点击分支),这里无头复测
-    /// 走的是本仓菜单条的完整路径,守「将来升级 egui 时开合语义悄悄变」。
-    /// 悬停切换菜单的现状也在此核验:egui 顶层 `MenuButton` 只在点击时
-    /// toggle(menu.rs 实读),悬停另一个标题不切换 —— 无头断言钉住现状,
-    /// 将来 egui 改了行为或本仓想补 Windows 式悬停切换,这条测试是落点。
+    /// 基础交互核验:点组名开它的下拉(再点收);Esc 关下拉但标签行保留;
+    /// 下拉关闭后点击行外区域收起整行 —— Windows 菜单栏的「点外面就收」。
     #[test]
     fn open_menu_closes_on_escape_and_outside_click() {
-        // Esc 关闭
+        if cfg!(target_os = "macos") {
+            // mac 无 Alt 助记层,本测试的展开手段(Alt+F)不可达;mac 的
+            // 点击路径已由 `hamburger_click_toggles_menu_row` 与设置/帮助
+            // 点击测试覆盖。
+            return;
+        }
         let ctx = egui::Context::default();
-        let ids = menubar_frame(&ctx, vec![]);
-        let file = ids.iter().find(|(index, _)| *index == 0).unwrap().1;
-        egui::containers::Popup::open_id(&ctx, file);
-        menubar_frame(&ctx, vec![]);
-        let file_id = ids.iter().find(|(index, _)| *index == 0).unwrap().1;
+        menu_frame(&ctx, vec![key_event(egui::Key::F, egui::Modifiers::ALT)]);
+        let frame = menu_frame(&ctx, vec![]);
         assert!(
-            egui::containers::Popup::is_id_open(&ctx, file_id),
-            "前置:菜单已开"
+            popup_open(&ctx, &section_id(&frame, 0)),
+            "前置:「文件」已弹"
         );
-        menubar_frame(
+
+        // Esc:下拉收,标签行保留
+        menu_frame(
             &ctx,
             vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)],
         );
-        menubar_frame(&ctx, vec![]);
-        assert!(
-            !egui::containers::Popup::is_id_open(&ctx, file_id),
-            "Esc 应关闭打开的菜单"
-        );
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(!popup_open(&ctx, &section_id(&frame, 0)), "Esc 关下拉");
+        assert!(frame.row_open, "Esc 不收标签行");
 
-        // 点击菜单外区域关闭
-        let ctx = egui::Context::default();
-        let ids = menubar_frame(&ctx, vec![]);
-        let file = ids.iter().find(|(index, _)| *index == 0).unwrap().1;
-        egui::containers::Popup::open_id(&ctx, file);
-        menubar_frame(&ctx, vec![]);
-        let file_id = ids.iter().find(|(index, _)| *index == 0).unwrap().1;
+        // 点组名开对应下拉:点「编辑」
+        let edit_rect = frame.sections.iter().find(|(i, _, _)| *i == 1).unwrap().2;
+        click_frames(&ctx, edit_rect.center());
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(popup_open(&ctx, &section_id(&frame, 1)), "点组名弹「编辑」");
         assert!(
-            egui::containers::Popup::is_id_open(&ctx, file_id),
-            "前置:菜单已开"
+            !popup_open(&ctx, &section_id(&frame, 0)),
+            "「文件」随之收起"
         );
-        let far = egui::Pos2::new(640.0, 400.0);
-        let click = |pressed| Event::PointerButton {
-            pos: far,
-            button: PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        menubar_frame(
-            &ctx,
-            vec![Event::PointerMoved(far), click(true), click(false)],
-        );
-        menubar_frame(&ctx, vec![]);
-        assert!(
-            !egui::containers::Popup::is_id_open(&ctx, file_id),
-            "点击菜单外应关闭菜单"
-        );
+        assert!(frame.row_open, "切组不收标签行");
 
-        // 悬停切换现状:菜单开着,指针移到另一标题上悬停 —— 顶层 MenuButton
-        // 只点击切换,悬停不开新菜单、原菜单保持(现状即如此,核验记录)
-        let ctx = egui::Context::default();
-        let ids = menubar_frame(&ctx, vec![]);
-        let file = ids.iter().find(|(index, _)| *index == 0).unwrap().1;
-        egui::containers::Popup::open_id(&ctx, file);
-        menubar_frame(&ctx, vec![]);
-        let (file_id, edit_id) = (
-            ids.iter().find(|(index, _)| *index == 0).unwrap().1,
-            ids.iter().find(|(index, _)| *index == 1).unwrap().1,
-        );
-        assert!(
-            egui::containers::Popup::is_id_open(&ctx, file_id),
-            "前置:文件菜单开"
-        );
-        let edit_title = egui::Pos2::new(120.0, 12.0);
-        menubar_frame(
+        // 下拉全关后点击行外 → 收整行:先 Esc 关「编辑」,再点远处
+        menu_frame(
             &ctx,
-            vec![
-                Event::PointerMoved(edit_title),
-                Event::PointerMoved(edit_title),
-            ],
+            vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)],
         );
-        menubar_frame(&ctx, vec![]);
-        assert!(
-            egui::containers::Popup::is_id_open(&ctx, file_id)
-                && !egui::containers::Popup::is_id_open(&ctx, edit_id),
-            "悬停另一标题不切换菜单(egui 顶层 MenuButton 现状:仅点击切换)"
-        );
+        let far = egui::Pos2::new(700.0, 400.0);
+        click_frames(&ctx, far);
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(!frame.row_open, "下拉全关后点行外收起标签行");
     }
 
-    /// #69 切窗误触回归:LaterMD 内按下 Alt 武装后切走(release 被 WM/他窗
-    /// 吃掉)、再从别处 Ctrl+Alt 切回时收到的孤立 Alt release,不得触发
-    /// 单击聚焦 —— 失焦帧必须缴械。修复前 armed 跨会话遗留,孤立 release
-    /// 炸开「文件」菜单(坤哥 2026-10-08 报的实测症状:Ctrl+Alt 切窗老触
-    /// 发文件菜单)。
+    /// 单击 Alt 不再打开任何东西(2026-10-12 坤哥报告的两条误触的退役面):
+    /// (a) 裸 Alt 按下→抬起不展开;(b) Ctrl 按住时 Alt 按下→抬起不展开
+    /// —— Deepin 工作区切换(Ctrl+Alt+方向键)不夺焦点,应用侧收到完整的
+    /// 修饰键序列,旧武装状态机在 Alt 抬起帧误判成「单击」;(c) 失焦场景
+    /// 的孤立 Alt release 不展开(#69 原案,武装链路退役后天然成立,钉住
+    /// 防回归)。Alt+字母 仍展开并弹组(见
+    /// `alt_letter_opens_matching_menu_only`),与本条互不干扰。
     #[test]
-    fn alt_release_after_refocus_does_not_fire_stale_armed() {
+    fn alt_release_never_opens_menu() {
+        // (a) 裸 Alt 按下→抬起
         let ctx = egui::Context::default();
-        let ids = menubar_frame(
+        menu_frame(
             &ctx,
             vec![key_event(egui::Key::AltLeft, egui::Modifiers::NONE)],
         );
-        // 失焦:release 没有回到本窗口(被 WM/目标窗口吃掉)
-        menubar_frame(&ctx, vec![Event::WindowFocused(false)]);
-        // 从别的应用 Ctrl+Alt 切回:聚焦 + 孤立 Alt release(无对应 press)
-        menubar_frame(&ctx, vec![Event::WindowFocused(true)]);
-        menubar_frame(
+        let frame = menu_frame(
             &ctx,
             vec![key_release(egui::Key::AltLeft, egui::Modifiers::ALT)],
         );
-        menubar_frame(&ctx, vec![]);
-        for (index, id) in &ids {
-            let _ = index;
-            assert!(
-                !egui::containers::Popup::is_id_open(&ctx, *id),
-                "遗留 armed + 孤立 Alt release 不触发菜单聚焦"
-            );
-        }
+        assert!(!frame.row_open, "单击 Alt 不展开标签行");
 
-        // 变体:未武装状态下失焦再聚焦,孤立 release 同样不触发(修复前
-        // 本就不触发,钉住防将来把 release 分支改坏)
+        // (b) Ctrl 按住时 Alt 按下→抬起(Deepin 工作区切换的按键序列)
         let ctx = egui::Context::default();
-        let ids = menubar_frame(&ctx, vec![Event::WindowFocused(false)]);
-        menubar_frame(&ctx, vec![Event::WindowFocused(true)]);
-        menubar_frame(
+        menu_frame(
+            &ctx,
+            vec![key_event(egui::Key::ControlLeft, egui::Modifiers::COMMAND)],
+        );
+        menu_frame(
+            &ctx,
+            vec![key_event(
+                egui::Key::AltLeft,
+                egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            )],
+        );
+        let frame = menu_frame(
+            &ctx,
+            vec![key_release(
+                egui::Key::AltLeft,
+                egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            )],
+        );
+        assert!(!frame.row_open, "Ctrl+Alt 组合的 Alt 抬起不展开标签行");
+
+        // (c) Alt 按下后失焦、抬起来自切回(#69 场景)
+        let ctx = egui::Context::default();
+        menu_frame(
+            &ctx,
+            vec![key_event(egui::Key::AltLeft, egui::Modifiers::NONE)],
+        );
+        menu_frame(&ctx, vec![Event::WindowFocused(false)]);
+        menu_frame(&ctx, vec![Event::WindowFocused(true)]);
+        let frame = menu_frame(
             &ctx,
             vec![key_release(egui::Key::AltLeft, egui::Modifiers::ALT)],
         );
-        menubar_frame(&ctx, vec![]);
-        for (index, id) in &ids {
-            let _ = index;
-            assert!(
-                !egui::containers::Popup::is_id_open(&ctx, *id),
-                "未武装的孤立 Alt release 不触发"
-            );
-        }
+        assert!(!frame.row_open, "孤立 Alt release 不展开标签行");
     }
 
-    /// 单击 Alt(按下→抬起,中间无其他输入)聚焦菜单栏:打开首个菜单
-    /// 「文件」;Alt+字母的组合(按下→字母按下→抬起)不触发 —— 字母
-    /// 按下帧污染武装标志。
-    #[test]
-    fn single_alt_click_opens_first_menu() {
-        let ctx = egui::Context::default();
-        let ids = menubar_frame(
-            &ctx,
-            vec![key_event(egui::Key::AltLeft, egui::Modifiers::NONE)],
-        );
-        let ids2 = menubar_frame(
-            &ctx,
-            vec![key_release(egui::Key::AltLeft, egui::Modifiers::ALT)],
-        );
-        assert_eq!(ids, ids2, "两帧的 popup id 稳定");
-        menubar_frame(&ctx, vec![]);
-        let file_id = ids.iter().find(|(index, _)| *index == 0).unwrap().1;
-        assert_eq!(
-            egui::containers::Popup::is_id_open(&ctx, file_id),
-            !cfg!(target_os = "macos"),
-            "单击 Alt 仅在非 macOS 平台聚焦菜单"
-        );
-
-        // 对照:Alt+字母组合不触发单击语义(那由 Alt+字母助记负责)
-        let ctx = egui::Context::default();
-        menubar_frame(
-            &ctx,
-            vec![key_event(egui::Key::AltLeft, egui::Modifiers::NONE)],
-        );
-        menubar_frame(
-            &ctx,
-            vec![
-                key_event(egui::Key::T, egui::Modifiers::ALT),
-                key_release(egui::Key::AltLeft, egui::Modifiers::ALT),
-            ],
-        );
-        menubar_frame(&ctx, vec![]);
-        for (index, id) in &ids {
-            let _ = index;
-            assert!(
-                !egui::containers::Popup::is_id_open(&ctx, *id),
-                "Alt+T 组合的抬起不该触发单击聚焦"
-            );
-        }
-    }
-
-    /// 菜单展开态的裸字母触发条目(条目层助记):Alt+E 开「编辑」→
-    /// 展开帧按 F → 发出「查找」的归约消息,菜单收起;同字母的 Key 与
-    /// Text 事件都被消费(不落进聚焦的编辑器)。
+    /// 标签行展开态的裸字母触发条目(条目层助记):Alt+E 开「编辑」→
+    /// 展开帧按 F → 发出「查找」的归约消息,下拉与标签行一并收起;同字母
+    /// 的 Key 与 Text 事件都被消费(不落进聚焦的编辑器)。
     #[test]
     fn bare_letter_in_open_menu_fires_item_and_closes() {
         let ctx = egui::Context::default();
-        let keymap = Keymap::builtin();
-        let state = State::default();
-        let mut outbox = Vec::new();
-        let mut ids = Vec::new();
-        // 帧 1:Alt+E 开「编辑」
-        let output = ctx.run_ui(
-            RawInput {
-                events: vec![key_event(egui::Key::E, egui::Modifiers::ALT)],
-                ..Default::default()
-            },
-            |ui| {
-                super::ui_with_probe(
-                    ui,
-                    &keymap,
-                    &state,
-                    &mut outbox,
-                    Some(|index, id| {
-                        ids.push((index, id));
-                    }),
-                );
-            },
-        );
-        output.drop_without_applying_deltas();
-        assert!(outbox.is_empty());
+        menu_frame(&ctx, vec![key_event(egui::Key::E, egui::Modifiers::ALT)]);
+        let frame = menu_frame(&ctx, vec![]);
         if cfg!(target_os = "macos") {
-            let edit_id = ids.iter().find(|(index, _)| *index == 1).unwrap().1;
-            egui::containers::Popup::open_id(&ctx, edit_id);
-        }
-        // 帧 2:展开帧(闭包执行,无输入)
-        let output = ctx.run_ui(RawInput::default(), |ui| {
-            super::ui_with_probe(ui, &keymap, &state, &mut outbox, Some(|_, _| {}));
-        });
-        output.drop_without_applying_deltas();
-        // 帧 3:裸 F → 命中「查找」(F),发消息并收起
-        let output = ctx.run_ui(
-            RawInput {
-                events: vec![
-                    key_event(egui::Key::F, egui::Modifiers::NONE),
-                    Event::Text("f".to_owned()),
-                ],
-                ..Default::default()
-            },
-            |ui| {
-                super::ui_with_probe(ui, &keymap, &state, &mut outbox, Some(|_, _| {}));
-            },
-        );
-        output.drop_without_applying_deltas();
-        if cfg!(target_os = "macos") {
-            assert!(outbox.is_empty(), "macOS 裸字母不触发菜单命令");
-            let edit_id = ids.iter().find(|(index, _)| *index == 1).unwrap().1;
-            assert!(egui::containers::Popup::is_id_open(&ctx, edit_id));
+            assert!(!frame.row_open, "macOS 无 Alt 助记层");
             return;
         }
+        let edit_id = section_id(&frame, 1);
+        assert!(popup_open(&ctx, &edit_id), "前置:「编辑」已弹");
+
+        // 裸 F → 命中「查找」(F),发消息并收起
+        let frame = menu_frame(
+            &ctx,
+            vec![
+                key_event(egui::Key::F, egui::Modifiers::NONE),
+                Event::Text("f".to_owned()),
+            ],
+        );
         assert_eq!(
-            outbox,
+            frame.outbox,
             vec![Message::FindBarToggled(true)],
-            "展开的「编辑」菜单里按 F 应触发「查找」"
+            "展开的「编辑」组里按 F 应触发「查找」"
         );
-        let edit_id = ids.iter().find(|(index, _)| *index == 1).unwrap().1;
-        // 帧 4:菜单已收起(close 标记在下一帧生效为 popup 关闭)
-        let output = ctx.run_ui(RawInput::default(), |ui| {
-            super::ui_with_probe(ui, &keymap, &state, &mut Vec::new(), Some(|_, _| {}));
-        });
-        output.drop_without_applying_deltas();
-        assert!(
-            !egui::containers::Popup::is_id_open(&ctx, edit_id),
-            "条目触发后菜单应收起"
-        );
+        assert!(!popup_open(&ctx, &edit_id), "条目触发后下拉收起");
+        assert!(!frame.row_open, "条目触发后标签行一并收起");
     }
 
-    /// 「设置」菜单直达页的真实点击路径(#67 M1 抽查):「设置」不在
+    /// 「设置」组直达页的真实点击路径(#67 M1 抽查):「设置」不在
     /// [`MENUS`] 表里(非命令,直达设置页),`clicking_every_menu_item…`
-    /// 不遍历它 —— 这里走完整 popup 路径:Alt+S 打开 → 展开帧定位条目
-    /// 文本矩形 → 指针逐帧点击 → 发出 [`Message::SettingsOpened`] 的
-    /// 对应页;消息再喂进 `State::apply` 落出打开的页签(点击 → 消息 →
-    /// 归约一段齐,齿轮路径的等价归约断言在 layout.rs 已有)。
+    /// 不遍历它 —— 这里走完整路径:点汉堡展开 → 点「设置」组名 → 展开帧
+    /// 定位条目文本矩形 → 指针逐帧点击 → 发出 [`Message::SettingsOpened`]
+    /// 的对应页并整行收起;消息再喂进 `State::apply` 落出打开的页签。
     #[test]
     fn settings_menu_direct_tabs_click_through_and_reduce() {
         for (needle, expected) in [
@@ -1404,77 +1510,48 @@ mod tests {
             ("快捷键", SettingsTab::Keymap),
         ] {
             let ctx = egui::Context::default();
-            // 显式打开 popup，让点击测试在没有 Alt 助记层的 macOS 也执行。
-            let keymap = Keymap::builtin();
-            let state = State::default();
-            let mut outbox = Vec::new();
-            let ids = menubar_frame(&ctx, vec![]);
-            let settings_id = ids
+            let bar = Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, crate::ui::tokens::TITLEBAR_H),
+            );
+            let hamburger = crate::ui::titlebar::menu_button_rect(bar).center();
+            click_frames(&ctx, hamburger);
+            let frame = menu_frame(&ctx, vec![]);
+            assert!(frame.row_open, "前置:标签行已展开");
+            let settings_rect = frame
+                .sections
                 .iter()
-                .find(|(index, _)| *index == MENUS.len())
+                .find(|(i, _, _)| *i == MENUS.len())
                 .unwrap()
-                .1;
-            egui::containers::Popup::open_id(&ctx, settings_id);
+                .2;
+            click_frames(&ctx, settings_rect.center());
+            let frame = menu_frame(&ctx, vec![]);
+            let settings_id = section_id(&frame, MENUS.len());
+            assert!(popup_open(&ctx, &settings_id), "前置:「设置」下拉已开");
 
-            // 帧 2-3:两次空帧 —— egui 0.36 的 MenuButton 从 popup 记忆
-            // 开态到闭包真正绘制隔一帧(事件帧写记忆 → 次帧菜单按钮收
-            // 到开态 → 再次帧闭包执行画出条目;与 `bare_letter…` 三帧
-            // 节奏同因,这里实证后取末帧 shapes 定位条目矩形)
-            let mut located = None;
+            // 展开帧 ×2:popup 记忆开态到闭包真正绘制隔一帧(实证节奏),
+            // 取末帧 shapes 定位条目矩形
+            let mut rect = None;
             for _ in 0..2 {
-                let mut outbox = Vec::new();
-                let output = ctx.run_ui(RawInput::default(), |ui| {
-                    super::ui(ui, &keymap, &state, &mut outbox);
-                });
-                let shapes = output.shapes.clone();
-                output.drop_without_applying_deltas();
-                assert!(outbox.is_empty(), "展开不点击不产生消息");
-                located = shapes.iter().find_map(|clipped| {
-                    let egui::epaint::Shape::Text(text) = &clipped.shape else {
-                        return None;
-                    };
-                    text.galley
-                        .job
-                        .text
-                        .contains(needle)
-                        .then(|| clipped.shape.visual_bounding_rect())
-                });
-                if located.is_some() {
+                let frame = menu_frame(&ctx, vec![]);
+                assert!(frame.outbox.is_empty(), "展开不点击不产生消息");
+                rect = find_text_rect(&frame, needle);
+                if rect.is_some() {
                     break;
                 }
             }
-            let rect = located.unwrap_or_else(|| panic!("{needle:?} 条目未绘制"));
+            let rect = rect.unwrap_or_else(|| panic!("{needle:?} 条目未绘制"));
 
-            // 帧 4-6:moved → press → release(与 layout 的面板层点击测试
-            // 同节奏,指针停在条目中心)
-            let center = rect.center();
-            let click = |pressed| Event::PointerButton {
-                pos: center,
-                button: PointerButton::Primary,
-                pressed,
-                modifiers: Default::default(),
-            };
-            for events in [
-                vec![Event::PointerMoved(center)],
-                vec![click(true)],
-                vec![click(false)],
-            ] {
-                let mut frame_outbox = std::mem::take(&mut outbox);
-                let output = ctx.run_ui(
-                    RawInput {
-                        events,
-                        ..Default::default()
-                    },
-                    |ui| super::ui(ui, &keymap, &state, &mut frame_outbox),
-                );
-                output.drop_without_applying_deltas();
-                outbox = frame_outbox;
-            }
+            // moved → press → release,点击条目中心(消息落在 release 帧,
+            // 由 click_frames 累积返回)
+            let clicked = click_frames(&ctx, rect.center());
             assert_eq!(
-                outbox,
+                clicked,
                 vec![Message::SettingsOpened(expected)],
                 "{needle:?} 条目点击应发出直达该页的消息"
             );
+            let frame = menu_frame(&ctx, vec![]);
+            assert!(!frame.row_open, "条目选中后标签行整行收起");
 
             // 归约一段:直达页消息落 State,设置窗开在对应页签
             let mut state = crate::state::State::default();
@@ -1484,78 +1561,51 @@ mod tests {
         }
     }
 
-    /// 「帮助」菜单(#71 M1)的完整路径:打开 popup → 真实点击
-    /// 「关于 LaterMD…」条目 → 发出 [`Message::AboutOpened`] → 归约后
-    /// `about.open` 为真(点击 → 消息 → 归约一段齐;帮助非命令菜单,
-    /// `clicking_every_menu_item…` 不遍历它,这里补齐真实 popup 路径)。
+    /// 「帮助」组(#71 M1)的完整路径:点汉堡展开 → 点「帮助」组名 →
+    /// 真实点击「关于 LaterMD…」条目 → 发出 [`Message::AboutOpened`] →
+    /// 归约后 `about.open` 为真(点击 → 消息 → 归约一段齐;帮助非命令
+    /// 菜单,`clicking_every_menu_item…` 不遍历它,这里补齐真实路径)。
     #[test]
     fn help_menu_about_entry_click_through_and_reduce() {
         let ctx = egui::Context::default();
-        let keymap = Keymap::builtin();
-        let state = State::default();
-        let mut outbox = Vec::new();
-        // 点击测试显式展开 popup，与设置菜单测试一致，不依赖 Alt 助记键。
-        let ids = menubar_frame(&ctx, vec![]);
-        let help_id = ids
+        let bar = Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, crate::ui::tokens::TITLEBAR_H),
+        );
+        let hamburger = crate::ui::titlebar::menu_button_rect(bar).center();
+        click_frames(&ctx, hamburger);
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(frame.row_open, "前置:标签行已展开");
+        let help_rect = frame
+            .sections
             .iter()
-            .find(|(index, _)| *index == MENUS.len() + 1)
+            .find(|(i, _, _)| *i == MENUS.len() + 1)
             .unwrap()
-            .1;
-        egui::containers::Popup::open_id(&ctx, help_id);
+            .2;
+        click_frames(&ctx, help_rect.center());
+        let frame = menu_frame(&ctx, vec![]);
+        let help_id = section_id(&frame, MENUS.len() + 1);
+        assert!(popup_open(&ctx, &help_id), "前置:「帮助」下拉已开");
 
-        // 帧 2-3:两次空帧 —— MenuButton 从 popup 记忆开态到闭包画出条目
-        // 隔一帧(设置菜单同款节奏),取末帧 shapes 定位条目矩形
-        let mut located = None;
+        // 展开帧 ×2(设置组同款节奏),定位「关于 LaterMD…」条目
+        let mut rect = None;
         for _ in 0..2 {
-            let output = ctx.run_ui(RawInput::default(), |ui| {
-                super::ui(ui, &keymap, &state, &mut outbox);
-            });
-            let shapes = output.shapes.clone();
-            output.drop_without_applying_deltas();
-            assert!(outbox.is_empty(), "展开不点击不产生消息");
-            located = shapes.iter().find_map(|clipped| {
-                let egui::epaint::Shape::Text(text) = &clipped.shape else {
-                    return None;
-                };
-                text.galley
-                    .job
-                    .text
-                    .contains("关于 LaterMD…")
-                    .then(|| clipped.shape.visual_bounding_rect())
-            });
-            if located.is_some() {
+            let frame = menu_frame(&ctx, vec![]);
+            assert!(frame.outbox.is_empty(), "展开不点击不产生消息");
+            rect = find_text_rect(&frame, "关于 LaterMD…");
+            if rect.is_some() {
                 break;
             }
         }
-        let rect = located.expect("「关于 LaterMD…」条目未绘制");
-
-        // 帧 4-6:moved → press → release,点击条目中心
-        let center = rect.center();
-        let click = |pressed| Event::PointerButton {
-            pos: center,
-            button: PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        for events in [
-            vec![Event::PointerMoved(center)],
-            vec![click(true)],
-            vec![click(false)],
-        ] {
-            let output = ctx.run_ui(
-                RawInput {
-                    events,
-                    ..Default::default()
-                },
-                |ui| super::ui(ui, &keymap, &state, &mut outbox),
-            );
-            output.drop_without_applying_deltas();
-        }
+        let rect = rect.expect("「关于 LaterMD…」条目未绘制");
+        let clicked = click_frames(&ctx, rect.center());
         assert_eq!(
-            outbox,
+            clicked,
             vec![Message::AboutOpened],
             "「关于 LaterMD…」条目点击应发出开窗消息"
         );
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(!frame.row_open, "条目选中后标签行整行收起");
 
         // 归约一段:消息落 State,关于窗开
         let mut state = crate::state::State::default();
@@ -1563,85 +1613,35 @@ mod tests {
         assert!(state.about.open, "归约后关于窗打开");
     }
 
-    /// 帮助菜单展开态的裸字母触发(条目层助记):Alt+H 开「帮助」→
-    /// 展开帧按 A → 发出 [`Message::AboutOpened`],菜单收起。
+    /// 帮助组展开态的裸字母触发(条目层助记):Alt+H 展开并弹「帮助」→
+    /// 展开帧按 A → 发出 [`Message::AboutOpened`],下拉与标签行一并收起。
     #[test]
     fn bare_letter_in_open_help_menu_fires_about() {
         let ctx = egui::Context::default();
-        let keymap = Keymap::builtin();
-        let state = State::default();
-        let mut outbox = Vec::new();
-        let mut ids = Vec::new();
-        // 帧 1:Alt+H 开「帮助」
-        let output = ctx.run_ui(
-            RawInput {
-                events: vec![key_event(egui::Key::H, egui::Modifiers::ALT)],
-                ..Default::default()
-            },
-            |ui| {
-                super::ui_with_probe(
-                    ui,
-                    &keymap,
-                    &state,
-                    &mut outbox,
-                    Some(|index, id| {
-                        ids.push((index, id));
-                    }),
-                );
-            },
-        );
-        output.drop_without_applying_deltas();
-        assert!(outbox.is_empty());
-        let help_id = ids
-            .iter()
-            .find(|(index, _)| *index == MENUS.len() + 1)
-            .unwrap()
-            .1;
+        menu_frame(&ctx, vec![key_event(egui::Key::H, egui::Modifiers::ALT)]);
+        let frame = menu_frame(&ctx, vec![]);
         if cfg!(target_os = "macos") {
-            assert!(
-                !egui::containers::Popup::is_id_open(&ctx, help_id),
-                "macOS Alt+H 不打开帮助菜单"
-            );
-            egui::containers::Popup::open_id(&ctx, help_id);
-        }
-        // 帧 2:展开帧(闭包执行,无输入)
-        let output = ctx.run_ui(RawInput::default(), |ui| {
-            super::ui_with_probe(ui, &keymap, &state, &mut outbox, Some(|_, _| {}));
-        });
-        output.drop_without_applying_deltas();
-        // 帧 3:裸 A → 命中「关于 LaterMD…」,发消息并收起
-        let output = ctx.run_ui(
-            RawInput {
-                events: vec![
-                    key_event(egui::Key::A, egui::Modifiers::NONE),
-                    Event::Text("a".to_owned()),
-                ],
-                ..Default::default()
-            },
-            |ui| {
-                super::ui_with_probe(ui, &keymap, &state, &mut outbox, Some(|_, _| {}));
-            },
-        );
-        output.drop_without_applying_deltas();
-        if cfg!(target_os = "macos") {
-            assert!(outbox.is_empty(), "macOS 裸字母不触发帮助菜单命令");
-            assert!(egui::containers::Popup::is_id_open(&ctx, help_id));
+            assert!(!frame.row_open, "macOS 无 Alt 助记层");
             return;
         }
+        let help_id = section_id(&frame, MENUS.len() + 1);
+        assert!(popup_open(&ctx, &help_id), "前置:「帮助」已弹");
+
+        // 裸 A → 命中「关于 LaterMD…」,发消息并收起
+        let frame = menu_frame(
+            &ctx,
+            vec![
+                key_event(egui::Key::A, egui::Modifiers::NONE),
+                Event::Text("a".to_owned()),
+            ],
+        );
         assert_eq!(
-            outbox,
+            frame.outbox,
             vec![Message::AboutOpened],
-            "展开的「帮助」菜单里按 A 应触发「关于 LaterMD…」"
+            "展开的「帮助」组里按 A 应触发「关于 LaterMD…」"
         );
-        // 帧 4:菜单已收起(close 标记在下一帧生效为 popup 关闭)
-        let output = ctx.run_ui(RawInput::default(), |ui| {
-            super::ui_with_probe(ui, &keymap, &state, &mut Vec::new(), Some(|_, _| {}));
-        });
-        output.drop_without_applying_deltas();
-        assert!(
-            !egui::containers::Popup::is_id_open(&ctx, help_id),
-            "条目触发后菜单应收起"
-        );
+        assert!(!popup_open(&ctx, &help_id), "条目触发后下拉收起");
+        assert!(!frame.row_open, "标签行一并收起");
     }
 
     /// 开关类菜单条目的勾选态(#67 M2):`toggle_checked` 从 [`State`] 取
@@ -1708,12 +1708,12 @@ mod tests {
         }
         let on = item_text(Command::ToggleMinimap, Some(true));
         assert!(
-            on.contains("✓") && on.contains(&label_with_mnemonic("Minimap 缩略图", 'M')),
+            on.contains("✓") && on.contains("Minimap 缩略图"),
             "开态条目应渲染 ✓ 前缀 + 带助记后缀的显示名(实际:{on:?})"
         );
         let off = item_text(Command::ToggleMinimap, Some(false));
         assert!(
-            !off.contains("✓") && off.contains(&label_with_mnemonic("Minimap 缩略图", 'M')),
+            !off.contains("✓") && off.contains("Minimap 缩略图"),
             "关态条目不渲染 ✓(占位空格保持开关条目对齐;实际:{off:?})"
         );
         let plain = item_text(Command::ToggleTheme, None);
@@ -1791,72 +1791,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 排版统一(#62 M2):菜单条标题与下拉条目同走 egui `Button` 的
-    /// `TextStyle::Button` 档 —— 两处 galley 字号必须一致(守门将来一侧
-    /// 改字号另一侧没跟);收起态菜单条本身在窄窗口(400px)渲染不
-    /// panic(溢出策略=单行裁切,见 decisions-pending #119)。
+    /// 排版统一(#62 M2,2026-10-12 汉堡化后改为 job 断面):组名行标题
+    /// 与条目按钮同走 egui `Button` 的 `TextStyle::Button` 档 —— 两侧
+    /// galley 的**正文段**字号必须一致(守门将来一侧改字号另一侧没跟),
+    /// 助记后缀段一律缩号 [`MNEMONIC_SCALE`](中英文等高的实现面);
+    /// 窄窗口(400px)展开标签行渲染不 panic(溢出=裁切)。
     #[test]
     fn menubar_and_item_share_font_size_and_narrow_render_is_safe() {
-        fn font_sizes(output: &FullOutput) -> Vec<(String, f32)> {
-            output
-                .shapes
-                .iter()
-                .filter_map(|clipped| {
-                    let egui::epaint::Shape::Text(text) = &clipped.shape else {
-                        return None;
-                    };
-                    text.galley
-                        .job
-                        .sections
-                        .first()
-                        .map(|section| (text.galley.job.text.clone(), section.format.font_id.size))
-                })
-                .collect()
-        }
-
         let keymap = Keymap::builtin();
-        let state = State::default();
         let ctx = egui::Context::default();
-        let output = ctx.run_ui(RawInput::default(), |ui| {
-            super::ui(ui, &keymap, &state, &mut Vec::new());
-        });
-        let bar_texts = font_sizes(&output);
-        output.drop_without_applying_deltas();
-        let title = bar_texts
-            .iter()
-            .find(|(text, _)| text.starts_with(&label_with_mnemonic("文件", 'F')))
-            .expect("菜单条渲染出带助记后缀的标题");
-        let bar_size = title.1;
+        let bar = Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, crate::ui::tokens::TITLEBAR_H),
+        );
+        click_frames(&ctx, crate::ui::titlebar::menu_button_rect(bar).center());
+        let frame = menu_frame(&ctx, vec![]);
+        assert!(frame.row_open, "前置:标签行已展开");
+        let title = job_sections(&frame.shapes, "文件")
+            .into_iter()
+            .next()
+            .expect("标签行渲染出带助记后缀的组名");
+        let title_size = title.1;
 
-        let ctx = egui::Context::default();
-        let output = ctx.run_ui(RawInput::default(), |ui| {
-            item(ui, Command::Save, &keymap, None, &mut Vec::new());
-        });
-        let item_texts = font_sizes(&output);
-        output.drop_without_applying_deltas();
-        let entry = item_texts
-            .iter()
-            .find(|(text, _)| text.starts_with(&label_with_mnemonic("保存", 'S')))
+        let entry_frame = {
+            let mut outbox = Vec::new();
+            let output = ctx.run_ui(RawInput::default(), |ui| {
+                item(ui, Command::Save, &keymap, None, &mut outbox);
+            });
+            (output.shapes.clone(), output.drop_without_applying_deltas())
+        };
+        let entry = job_sections(&entry_frame.0, "保存")
+            .into_iter()
+            .next()
             .expect("菜单条目渲染出带助记后缀的显示名");
         assert_eq!(
-            bar_size, entry.1,
-            "菜单条标题与下拉条目字号一致(排版统一,当前 Button 档)"
+            title_size, entry.1,
+            "组名行标题与条目正文字号一致(排版统一,当前 Button 档)"
         );
 
-        // 窄窗口渲染不 panic(单行裁切现状的守门面)
+        // 窄窗口(400px)展开标签行渲染不 panic(溢出=裁切)
         let ctx = egui::Context::default();
-        let output = ctx.run_ui(
-            RawInput {
-                screen_rect: Some(Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(400.0, 300.0),
-                )),
-                ..Default::default()
-            },
-            |ui| {
-                super::ui(ui, &keymap, &state, &mut Vec::new());
-            },
+        let bar = Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(400.0, crate::ui::tokens::TITLEBAR_H),
         );
-        output.drop_without_applying_deltas();
+        click_frames(&ctx, crate::ui::titlebar::menu_button_rect(bar).center());
+        set_menu_row_open(&ctx, true);
+        let narrow = menu_frame_at_width(&ctx, vec![], 400.0);
+        assert_eq!(narrow.sections.len(), section_count());
     }
 }
