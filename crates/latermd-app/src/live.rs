@@ -679,6 +679,11 @@ pub fn ui(
     }
 
     let mut active_response: Option<egui::Response> = None;
+    // macOS 会在切换输入源时短暂重置 IME 上下文。若这发生在 Live
+    // TextEdit 的活动块上，egui 可能保留光标状态却丢掉 widget 焦点，
+    // 下一帧就不再绘制插入光标。记住上一帧的焦点，在 IME 事件帧末尾
+    // 把焦点交还给同一个稳定的块 id；源码编辑器也有同类的恢复通道。
+    let mut ime_restore_focus: Option<egui::Id> = None;
     let mut activate: Option<(usize, usize)> = None;
     let mut route: Option<(usize, usize)> = None;
     // 选区 AI 浮标(#61 M1)的锚点素材:活动块持久选区(**文档坐标**字符
@@ -767,6 +772,10 @@ pub fn ui(
                     };
                     // 稳定 id:按块序号(不带长度/hash),AGENTS §6.7 的红线
                     let response_id = editor_id.with(("live-block", index));
+                    let focus_memory_id = editor_id.with(("live-ime-focus", index));
+                    let focused_last_frame = ui
+                        .ctx()
+                        .data(|data| data.get_temp::<bool>(focus_memory_id).unwrap_or(false));
                     let edit = egui::TextEdit::multiline(&mut buffer)
                         .id(response_id)
                         .font(egui::TextStyle::Monospace)
@@ -781,6 +790,53 @@ pub fn ui(
                     let edit =
                         edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)));
                     let output = edit.show(ui);
+                    let focused_now = ui.ctx().memory(|mem| mem.has_focus(response_id));
+                    let ime_event = ui.ctx().input(|input| {
+                        input
+                            .events
+                            .iter()
+                            .any(|event| matches!(event, egui::Event::Ime(_)))
+                    });
+                    // 不在输入事件帧直接抢焦点：等这个活动块的所有绘制和
+                    // 命中探针完成后再恢复，避免后续控件把恢复请求覆盖。
+                    // 指针按下表示用户正在把焦点交给别的控件，此时让出。
+                    if focused_last_frame
+                        && ime_event
+                        && !ui.ctx().input(|input| input.pointer.any_pressed())
+                    {
+                        ime_restore_focus = Some(response_id);
+                    }
+                    // egui-winit 的自动 IME spot 以整个 TextEdit 矩形为锚点，
+                    // 输入法切换时会把候选框临时移到块首。活动块有稳定光标时
+                    // 同帧补发光标矩形，保证中文候选框和插入点仍贴在原位置。
+                    if ime_event && (focused_now || ime_restore_focus == Some(response_id)) {
+                        if let Some(caret) = output
+                            .state
+                            .cursor
+                            .char_range()
+                            .map(|range| range.primary.index.0)
+                        {
+                            let caret = output
+                                .galley
+                                .pos_from_cursor(egui::text::CCursor::new(caret));
+                            let caret_rect = egui::Rect::from_min_max(
+                                output.galley_pos
+                                    + caret.min.to_vec2()
+                                    + egui::vec2(0.0, caret.height()),
+                                output.galley_pos
+                                    + caret.max.to_vec2()
+                                    + egui::vec2(0.0, caret.height()),
+                            );
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::IMERect(caret_rect));
+                        }
+                    }
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(
+                            focus_memory_id,
+                            focused_now || ime_restore_focus == Some(response_id),
+                        )
+                    });
 
                     // 光标(块内字符偏移):跨块路由判定、键盘跟随与回填共用
                     let caret = output
@@ -1170,7 +1226,8 @@ pub fn ui(
             }
         });
 
-    if let Some((index, local)) = activate {
+    let focus_target_changed = activate.is_some() || route.is_some();
+    if let Some((index, local)) = activate.take() {
         live.browse_only = false;
         live.active = Some(index);
         live.pending_caret = Some((index, local));
@@ -1205,7 +1262,7 @@ pub fn ui(
             .ctx()
             .data_mut(|d| d.insert_temp(crate::ui::typewriter::live_memory_id(editor_id), tw));
     }
-    if let Some(route) = route {
+    if let Some(route) = route.take() {
         live.browse_only = false;
         live.active = Some(route.0);
         live.pending_caret = Some(route);
@@ -1213,6 +1270,15 @@ pub fn ui(
         // 跨块路由:光标去了别的块,落地帧视口必须同帧跟上
         live.caret_follow = true;
         live.drag_anchor = None;
+    }
+
+    // IME 切换造成的临时失焦在整帧命中处理完成后恢复。若用户同帧点击
+    // 了另一个块，`activate`/`route` 已经改变活动目标，此请求不会覆盖
+    // 新目标的焦点交接。
+    if !focus_target_changed {
+        if let Some(id) = ime_restore_focus {
+            panel.ctx().memory_mut(|mem| mem.request_focus(id));
+        }
     }
 
     // 任务 checkbox 的帧末命中(#63,与右栏预览同一探针纪律):全部块
@@ -1542,6 +1608,67 @@ mod tests {
         assert_eq!(live.active, Some(0), "连续 Enter 不应退出当前写作块");
         assert!(!live.browse_only, "连续 Enter 后仍处于写作态");
         assert!(cursor.byte.is_some(), "插入点仍应回填到共享缓冲");
+    }
+
+    /// macOS 切换中文输入法会短暂重置 IME 上下文。Live 活动块应在该帧
+    /// 之后恢复焦点，并继续使用原来的持久光标状态，而不是回到浏览态。
+    #[test]
+    fn ime_switch_restores_live_focus_and_caret() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("中文输入\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(0),
+            browse_enabled: true,
+            ..LiveState::default()
+        };
+        live.pending_caret = Some((0, 2));
+
+        let _ = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let id = egui::Id::new("live-copy-test").with(("live-block", 0));
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        // 让上一帧的焦点记忆落地，再模拟 macOS 输入源切换时的短暂失焦。
+        let _ = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        ctx.memory_mut(|memory| memory.surrender_focus(id));
+
+        let _ = live_frame(
+            &ctx,
+            vec![egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: String::new(),
+                active_range_chars: None,
+            })],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+
+        assert!(
+            ctx.memory(|memory| memory.has_focus(id)),
+            "IME 切换后焦点应回到活动块"
+        );
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id)
+            .expect("活动块 TextEdit 状态应保留");
+        assert_eq!(
+            state.cursor.char_range().map(|range| range.primary.index.0),
+            Some(2),
+            "IME 切换不应丢失插入点"
+        );
     }
 
     /// 编辑前块序号发生漂移时，源码未变化的块仍复用富渲染结果。
