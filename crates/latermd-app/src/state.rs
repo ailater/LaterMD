@@ -298,6 +298,10 @@ pub struct FindBarState {
     /// 卡片相对右上锚点的用户拖动偏移(#72 M2,把手累计):`(0,0)` = 原
     /// 锚点(与改前逐字节一致)。会话内保持(关了再开不重置),**不持久化**。
     pub drag_offset: eframe::egui::Vec2,
+    /// 打开时的「给查找框焦点」意图:归约置位一次,UI 绘制查找框时消费
+    /// (请求焦点后清除)。放在 state 而非 UI 局部,是因为 Ctrl+F 的落点
+    /// 在归约(命令 → Message),那一刻 UI 还没画。
+    pub want_focus: bool,
 }
 
 /// 「跳转到行」浮条状态(#60 M1,Ctrl+G):全局一条(与查找条同款,不随
@@ -2086,6 +2090,7 @@ impl State {
     fn toggle_find(&mut self, open: bool) {
         self.find.open = open;
         if open {
+            self.find.want_focus = true;
             self.goto.open = false;
             let tab = self.tabs.current();
             if let Some((start, stop)) = tab.selection {

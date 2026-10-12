@@ -627,6 +627,14 @@ impl LaterMdApp {
         if state.find.open && state.render_mode == crate::live::RenderMode::Source {
             if let Some(rect) = source_rect {
                 draw_find_overlay(ui.ctx(), rect, &mut state.find, outbox);
+                // 打开时的「给焦点」意图由归约置位,这里消费一次:
+                // VS Code 同款,打开即可打字;焦点请求发生在本帧 TextEdit
+                // 绘制之后 egui 仍会在下一帧生效,清除标志保证只在打开后
+                // 请求一次 —— 用户随后的任何点击(把手/编辑器)不被抢回。
+                if state.find.want_focus {
+                    ui.memory_mut(|memory| memory.request_focus(find_input_id()));
+                    state.find.want_focus = false;
+                }
             }
         }
 
@@ -2321,6 +2329,40 @@ mod tests {
             assert!(ctx.memory(|memory| memory.has_focus(input)));
             assert_eq!(app.state.tabs.current().editor.text(), original);
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Ctrl+F 打开查找卡:焦点自动落进查找框(VS Code 同款,打开即可
+    /// 打字)。want_focus 只在打开时置位、绘制时消费一次 —— 后续帧用户
+    /// 点了编辑器/把手不再被抢回(把手测试已覆盖)。
+    #[test]
+    fn find_bar_open_focuses_the_query_input() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1500.0, 850.0));
+        let (mut app, dir) = find_test_app("open-focus");
+        let editor_id = crate::ui::editor::tab_editor_id(app.state.tabs.current().id);
+        // 起始帧让编辑器先持有焦点(模拟 Ctrl+F 前光标在编辑器里)
+        find_test_frame(&mut app, &ctx, screen, 0.0, Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        app.state.apply(Message::FindBarToggled(true));
+        assert!(app.state.find.want_focus, "打开时置位焦点意图");
+        find_test_frame(&mut app, &ctx, screen, 0.1, Vec::new());
+        find_test_frame(&mut app, &ctx, screen, 0.2, Vec::new());
+        assert!(!app.state.find.want_focus, "绘制消费后清除,只请求一次");
+        assert!(
+            ctx.memory(|memory| memory.has_focus(find_input_id())),
+            "Ctrl+F 打开后焦点应落进查找框"
+        );
+        // 打开即打字:Text 事件直落查找词,不进编辑器
+        find_test_frame(
+            &mut app,
+            &ctx,
+            screen,
+            0.3,
+            vec![Event::Text("n".to_owned())],
+        );
+        find_test_frame(&mut app, &ctx, screen, 0.4, Vec::new());
+        assert_eq!(app.state.find.query, "n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
