@@ -680,7 +680,6 @@ pub fn ui(
 
     let mut active_response: Option<egui::Response> = None;
     let mut activate: Option<(usize, usize)> = None;
-    let mut finish_editing = false;
     let mut route: Option<(usize, usize)> = None;
     // 选区 AI 浮标(#61 M1)的锚点素材:活动块持久选区(**文档坐标**字符
     // 区对,块内捕获时换算)与尾端光标条屏幕矩形,活动块分支内捕获、
@@ -730,6 +729,7 @@ pub fn ui(
                         .desired_width(f32::INFINITY)
                         .desired_rows(1)
                         .hint_text("从这里开始写作")
+                        .lock_focus(true)
                         .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)))
                         .show(ui);
                     cursor.byte = output
@@ -771,7 +771,11 @@ pub fn ui(
                         .id(response_id)
                         .font(egui::TextStyle::Monospace)
                         .desired_width(f32::INFINITY)
-                        .desired_rows(lines.clamp(1, 40));
+                        .desired_rows(lines.clamp(1, 40))
+                        // 与源码编辑器同样锁定焦点。活动块仍可由本模块的
+                        // 双击/单击路由显式切换，普通工具条、滚动和预览
+                        // 控件不会让写作插入点被 egui 无意收回。
+                        .lock_focus(true);
                     // 活动块无输入框式外框(2026-10-10 mac 精修全平台化,
                     // #169):只留文字内距,光标/选区/IME 通路不变
                     let edit =
@@ -784,18 +788,6 @@ pub fn ui(
                         .cursor
                         .char_range()
                         .map(|range| range.primary.index.0);
-                    // Live 写作以空行结束当前块：第一次 Enter 仍是普通换行，
-                    // 第二次 Enter 形成空行后立即回到浏览态，下一帧显示富预览。
-                    if live.browse_enabled && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                    {
-                        if let Some(local) = caret {
-                            let global_char = buffer.buffer.byte_to_char(range.start) + local;
-                            let caret_byte = buffer.buffer.char_to_byte(global_char);
-                            if buffer.buffer.text()[..caret_byte].ends_with("\n\n") {
-                                finish_editing = true;
-                            }
-                        }
-                    }
                     // 跨块 caret 路由:块首按 ↑ 去上一块末尾;块尾按 ↓ 去下一块开头
                     if output.response.response.has_focus() {
                         let at_start = caret == Some(0);
@@ -1187,14 +1179,6 @@ pub fn ui(
         live.caret_follow = false;
         live.drag_anchor = None;
     }
-    if finish_editing {
-        live.browse_only = true;
-        live.active = None;
-        live.pending_caret = None;
-        live.pending_range = None;
-        live.caret_follow = false;
-        live.drag_anchor = None;
-    }
 
     // 打字机接管判定(#64 M1):本帧偏移动了、且不是打字机自己落的地、
     // 也不是编辑/路由落地帧 —— 即用户主动滚动,记一次 Override 暂停。
@@ -1508,6 +1492,56 @@ mod tests {
 
         assert!(live.active.is_none(), "浏览态不应因源码光标显示插入框");
         assert!(!live.blocks.is_empty(), "浏览态仍需建立富渲染块表");
+    }
+
+    /// 写作态连续输入空行仍属于正文编辑，不能把活动块清掉并让插入点
+    /// 消失；用户可通过双击其他块或切换模式主动结束当前块。
+    #[test]
+    fn writing_keeps_caret_after_blank_line() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("alpha\n\nnext\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(0),
+            browse_enabled: true,
+            ..LiveState::default()
+        };
+        live.pending_caret = Some((0, 0));
+        let _ = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        let _ = live_frame(
+            &ctx,
+            vec![enter.clone()],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let _ = live_frame(
+            &ctx,
+            vec![enter],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert_eq!(live.active, Some(0), "连续 Enter 不应退出当前写作块");
+        assert!(!live.browse_only, "连续 Enter 后仍处于写作态");
+        assert!(cursor.byte.is_some(), "插入点仍应回填到共享缓冲");
     }
 
     /// 编辑前块序号发生漂移时，源码未变化的块仍复用富渲染结果。
