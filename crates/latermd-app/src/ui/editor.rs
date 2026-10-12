@@ -19,6 +19,47 @@ use eframe::egui;
 /// 编辑器 widget 的 id:由**标签的稳定 id** 派生(多标签 #11)—— 每个标签
 /// 一套 TextEdit 持久状态(光标/undo/焦点),切标签零恢复逻辑;标签关闭后
 /// id 不复用(`TabsState::next_id` 自增),新标签不会继承旧标签的光标。
+/// 查找卡打开时给**页面内全部命中**画浅底(非当前条 —— 当前条由
+/// pending_selection 的选区高亮承担,语义同 VS Code:其余命中比当前条
+/// 更淡一档)。字符区间 → galley 行内矩形:命中多为行内短片段,单行矩形
+/// 就够;跨行命中(多行正则/find 不会,但防御)按整段每行拆矩形。
+fn paint_find_marks(
+    ui: &egui::Ui,
+    output: &egui::widgets::text_edit::TextEditOutput,
+    marks: &[std::ops::Range<usize>],
+) {
+    if marks.is_empty() {
+        return;
+    }
+    let galley = &output.galley;
+    let base = output.galley_pos;
+    let clip = ui.clip_rect();
+    let painter = ui.painter();
+    // 与选区底同族但更淡:selection.bg_fill 的 45% —— 同一视觉语言里
+    // 读作「选区的一档弱化」,不会与真正选区混淆。
+    let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.45);
+    for mark in marks {
+        // pos_from_cursor 给的是 galley 局部坐标,先加 galley_pos 落到
+        // 屏幕,再与视口 clip 比较(直接拿局部 y 比 clip 会全被当成
+        // 「视口之上」而跳过 —— 无头测试实测踩过)。
+        let start = galley.pos_from_cursor(egui::text::CCursor::new(mark.start));
+        let end = galley.pos_from_cursor(egui::text::CCursor::new(mark.end));
+        let top = base.y + start.min.y;
+        let bottom = base.y + end.max.y;
+        if top > clip.bottom() {
+            break; // 命中按文档序,y 单调不减
+        }
+        if bottom < clip.top() {
+            continue;
+        }
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(base.x + start.min.x, top),
+            egui::pos2(base.x + end.max.x.max(start.max.x), bottom),
+        );
+        painter.rect_filled(rect, 0.0, fill);
+    }
+}
+
 pub(crate) fn tab_editor_id(tab_id: u64) -> egui::Id {
     egui::Id::new("source-editor").with(tab_id)
 }
@@ -158,6 +199,7 @@ pub fn ui(
     show_typewriter: bool,
     show_focus: bool,
     outbox: &mut Vec<Message>,
+    find_marks: &[std::ops::Range<usize>],
 ) -> egui::Response {
     let CursorChannel {
         cursor,
@@ -295,6 +337,7 @@ pub fn ui(
                     .count()
             });
             gutter::paint(ui, &output, slot, cursor_line);
+            paint_find_marks(ui, &output, find_marks);
 
             // 进来:格式动作/大纲跳转产出的新选区,写回 TextEdit 持久 cursor
             // 并把焦点还给编辑器 —— 否则用户还得自己点回编辑区才能继续打字。
@@ -1044,6 +1087,7 @@ mod tests {
                         show_typewriter,
                         false,
                         outbox,
+                        &[],
                     )
                     .id,
                 );

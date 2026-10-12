@@ -1063,6 +1063,7 @@ mod tests {
                     false,
                     false,
                     &mut Vec::new(),
+                    &[],
                 );
             },
         );
@@ -2750,6 +2751,7 @@ mod tests {
                     false,
                     false,
                     &mut Vec::new(),
+                    &[],
                 );
             },
         );
