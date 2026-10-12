@@ -6262,7 +6262,7 @@ mod tests {
         let title = topmost_text(&shapes, "LaterMD —");
         let menubar = topmost_text(&shapes, "文件");
         let status = topmost_text(&shapes, "248 字");
-        let nav = topmost_text(&shapes, "未选择根目录");
+        let nav = topmost_text(&shapes, "选择一个目录作为文件树根");
 
         // 自上而下:标题栏 → 菜单栏(都在自己那条带里)
         assert!(
@@ -6971,7 +6971,7 @@ mod tests {
             "窗口 chrome 保留:{zen:?}"
         );
         // menubar / 状态栏 / 侧边栏 / 格式工具条的专属文案全部消失
-        for gone in ["文件", "248 字", "未选择根目录", "无序列表"] {
+        for gone in ["文件", "248 字", "选择一个目录作为文件树根", "无序列表"] {
             assert!(
                 !zen.iter().any(|t| t.contains(gone)),
                 "禅定帧里不该出现 {gone:?}:{zen:?}"
@@ -6979,13 +6979,13 @@ mod tests {
         }
         // 取证信号都取「只有那一条 panel 才会画」的专属文案:
         // 「文件」= menubar 首项、「248 字」= statusbar 的字数统计、
-        // 「未选择根目录」= 左栏文件树。
+        // 「选择一个目录作为文件树根」= 左栏文件树的引导语。
         //
         // 格式工具条的信号 2026-10-08 S2-2 从「H1」换成「更多」:H1 已
         // 连同标题组收进溢出菜单,**菜单关闭时不绘制**,拿它取证会在
         // S2-2 落地后恒失败。「更多」是溢出按钮的本体文案,只由格式工具条
         // 画出,且**与菜单开合无关**(直出位恒在),是更稳的取证点。
-        for present in ["文件", "248 字", "未选择根目录", "更多"] {
+        for present in ["文件", "248 字", "选择一个目录作为文件树根", "更多"] {
             assert!(
                 three.iter().any(|t| t.contains(present)),
                 "取证有效:三栏帧里能找到 {present:?}"

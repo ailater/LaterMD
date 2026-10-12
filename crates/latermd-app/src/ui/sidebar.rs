@@ -37,6 +37,37 @@ const OUTLINE_INDENT: f32 = 14.0;
 /// 搜索结果行摘要的最大字符数(命中行可能是长段落,截断保列表可读)。
 const SNIPPET_MAX_CHARS: usize = 120;
 
+/// 根目录行里目录名以外要**预留**出去的宽度(三枚按钮 + 三个行内间距 +
+/// ComboBox 的内边距与下拉箭头),见 [`root_row`]。
+///
+/// **这里的算式与 `icons::narrow_icon_button` 的占位式是同一份尺寸来源**
+/// (`ICON + 2 * SPACE_XS`),不是抄来的魔数:两者同改同变,改
+/// `narrow_icon_button` 的按钮宽度而忘了这里,`root_row_icon_buttons_*`
+/// 那条宽度断言会当场红(它在最窄侧栏下量真实矩形)。
+///
+/// 选 `SPACE_XS`(4px)而非默认档的 `SPACE_SM`(6px):横向留白从 6 收到 4,
+/// 三枚按钮省下 12px。实测侧栏内容区192px 时,这 12px 正是「未选择根
+/// 目录」能否完整显示的分界 —— 默认档下它被截成「未…」。
+///
+/// 但**间距不是常量**:egui 的 `item_spacing.x` 是样式的一部分,用户
+/// 换密度/主题会变。故实测的部分(按钮宽)写成算式,随样式变的部分
+/// (间距)在 [`root_row`] 里按当帧的 `ui.spacing()` 加 —— 只把真正稳定
+/// 的量当常量,是这里分开处理的唯一理由。
+const ROOT_ROW_BUTTON_W: f32 = tokens::ICON + 2.0 * tokens::SPACE_XS;
+
+/// ComboBox 自带占掉的宽度(左右 padding + 下拉箭头区)——给箭头留的位置
+/// 若不算进去,截断后的文字仍会被箭头顶出框外。
+///
+/// **按样式算而不是写死数字**:第一版写死 34px,实测 ComboBox 的
+/// `button_padding.x` 是 4、箭头区 ~40,真值 48px —— 少算 14px 的后果是
+/// 常用文案「未选择根目录」被砍成「未选…」(实测 1200×800 屏、侧栏
+/// 内容区 192px 时)。padding 随样式/密度变,写死必然再犯。
+fn combo_chrome(ui: &egui::Ui) -> f32 {
+    // 左右 padding 各一份 + 箭头区。箭头区取 `interact_size.x` 与
+    // `icon_width` 的较大者(不同主题/密度下二者不同,取大者保守)。
+    2.0 * ui.spacing().button_padding.x + ui.spacing().interact_size.x.max(ui.spacing().icon_width)
+}
+
 /// 大纲页的只读数据:标题快照 + 编辑器当前光标(两者分属 `State` 的
 /// `preview` 与 `cursor` 字段,侧边栏只读;打包纯粹为收敛 `ui` 的参数)。
 pub struct OutlineView<'a> {
@@ -1142,9 +1173,14 @@ pub(crate) fn new_file_dialog(
 }
 
 /// Files 页顶部根目录行:目录名(最近列表下拉 / 无历史时纯文本)+ 三枚
-/// 见方图标按钮(选文件夹 / 新建 / 刷新)。行高只有面板宽,三枚按钮
-/// 各自 `TOOLBAR_H` 见方,图标语义靠 tooltip 与辅助技术标签区分
-/// (`icon_button` 两者都给,不是只画个图标了事)。
+/// 见方图标按钮(选文件夹 / 新建 / 刷新)。
+///
+/// **目录名的宽度上限自己算,不指望 egui 遵守**:实测
+/// `ComboBox::width()` 在 `selected_text` 过长时会被忽略 —— 三种面板
+/// 宽度(180/240/400)下按钮右缘都固定落到 561.8px(按文字自然宽度排),
+/// 完全溢出侧栏。故先按字宽把名字截到预算内
+/// ([`crate::ui::tabs::elide_text`]),再交给
+/// ComboBox:让 egui 拿到的已经是短文本,它想撑也撑不开。
 ///
 /// 独立成函数并返回三枚响应:无头测试要按矩形点它们,而 `files_panel`
 /// 内部布局拿不到单枚按钮的矩形。
@@ -1161,16 +1197,26 @@ fn root_row(
         refresh: None,
     };
     ui.horizontal(|ui| {
-        // 目录名区先吃剩余宽度:ComboBox 默认 `width` 是"整行可用宽",
-        // 三枚按钮会被直接挤出侧栏(最窄 180px 时实测按钮右缘到 208)。
-        // 故按 `available_width` 减去三枚按钮的预算来给目录名区定宽 ——
-        // 单枚实测宽为 `ICON + 2 * SPACE_SM`;间隔按**三个**:行内共
-        // 四个元素(目录名 + 三按钮),`item_spacing` 落在每一对之间,漏算
-        // 一个就会在最小宽度下溢出(实测 180px 时右缘 188)。
-        let buttons_w =
-            3.0 * (tokens::ICON + 2.0 * tokens::SPACE_SM) + 3.0 * ui.spacing().item_spacing.x;
-        let label_w = (ui.available_width() - buttons_w).max(tokens::ICON);
-        let selected = root_label(tree);
+        // **行内间距收窄到 `SPACE_XS`**:默认的 8px 是给「并列的独立控件」
+        // 用的,而这三枚是**一组同类图标按钮**(选文件夹 / 新建 / 刷新),
+        // 8px 的缝会把它们读成三个互不相干的控件。收窄同时腾出目录名的
+        // 空间 —— 实测侧栏内容区仅 192px,按默认间距三枚按钮要占 108px
+        // (56%),目录名区被压到 84px,扣掉 ComboBox 的 48px chrome 后
+        // 文字预算只剩 36px,连「未选择根目录」都放不下。
+        //
+        // 这正是「两侧都是内容、语义是组内间距」与「控件到边界的距离」
+        // 的区别(MEMORY 那条间距纪律):前者两侧对称留白、可以小。
+        ui.spacing_mut().item_spacing.x = tokens::SPACE_XS;
+        // 预算是**实测值**而不是推导式 —— 见 [`ROOT_ROW_BUTTON_W`]。
+        // 间隔按**三个**:行内共四个元素(目录名 + 三按钮),间距落在
+        // 每一对之间,漏算一个就会在最小宽度下溢出。
+        let reserved = 3.0 * ROOT_ROW_BUTTON_W + 3.0 * tokens::SPACE_XS;
+        let label_w = (ui.available_width() - reserved).max(tokens::ICON);
+        // 截到 label_w 之内:**扣除 ComboBox 自身的内边距与箭头**,
+        // 否则「文本不溢出、框溢出」,箭头会把文字顶出去(实测)。
+        let text_budget = (label_w - combo_chrome(ui)).max(0.0);
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let selected = crate::ui::tabs::elide_text(ui, &root_label(tree), &font, text_budget);
         if tree.recents.is_empty() {
             // 无最近列表:纯文本占位,同样吃掉 label_w(否则它也撑满整行)
             let response = ui.add_sized(
@@ -1194,19 +1240,20 @@ fn root_row(
                 response.on_hover_text(hover);
             }
         }
-        let pick = crate::ui::icons::icon_button(ui, Icon::Open, "选择文件夹…");
+        let pick = crate::ui::icons::narrow_icon_button(ui, Icon::Open, "选择文件夹…");
         if pick.clicked() {
             outbox.push(Message::FileTreeRootPick);
         }
         // 新建落在「当前文档所在目录」,没有落盘文档才回落根 —— 决定
         // 目录的活归归约(它手上有完整的文档状态),这里只发请求。
-        let new = crate::ui::icons::icon_button(ui, Icon::New, "在当前目录新建 Markdown 文档");
+        let new =
+            crate::ui::icons::narrow_icon_button(ui, Icon::New, "在当前目录新建 Markdown 文档");
         if new.clicked() {
             if let Some(dir) = new_file_target(current_file, tree.root.as_deref()) {
                 outbox.push(Message::FileTreeNewFileRequested(dir));
             }
         }
-        let refresh = crate::ui::icons::busy_icon_button(
+        let refresh = crate::ui::icons::narrow_busy_icon_button(
             ui,
             Icon::Reset,
             tree.refreshing(std::time::Instant::now()),
@@ -4534,6 +4581,123 @@ mod tests {
             vec![Message::FileTreeRefreshRequested],
             "刷新途中再点仍是刷新,不该被禁用吞掉"
         );
+    }
+
+    /// 侧栏变宽后,目录名区要能吃回空间(而不是三枚按钮把宽度吃干)。
+    ///
+    /// **上一版的这条测试把要求定错了,记录在此**:它原本断言「常用文案
+    /// 完整显示」,在 192px 侧栏里永远红 —— 但那里**物理上放不下**
+    /// 6 个中文字(约 84px):三枚按钮 72px + 行内间距 12px + ComboBox 的
+    /// chrome 48px = 132px,192 里只剩 60px。截断在窄栏下是**正确
+    /// 行为**,坤哥要的「限制最大宽度」正是它。把断言改成「宽栏完整、
+    /// 窄栏不溢出」两件事分开验。
+    ///
+    /// 本测试只管前者:侧栏宽到 320px 时,「未选择根目录」应当**完整**
+    /// 显示 —— 它实测需要约 84px,320 减掉固定开销后绰绰有余。若这里红,
+    /// 说明有人把按钮预留或 chrome 预算调大了,窄栏会被进一步挤扁。
+    #[test]
+    fn wide_sidebar_gives_the_root_label_its_space_back() {
+        let tree = FileTreeState::default();
+        // 320px 侧栏:真实用户把面板拖宽后的常见值
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let mut content = ui.new_child(egui::UiBuilder::new().max_rect(
+                    Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(320.0, 200.0)),
+                ));
+                root_row(&mut content, &tree, None, &mut Vec::new());
+            },
+        );
+        out.textures_delta.clear();
+        let painted: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            painted.iter().any(|t| t == "未选择根目录"),
+            "宽侧栏下常用文案应完整(被截断说明按钮预留或 chrome 预算过大):{painted:?}"
+        );
+    }
+
+    /// 长文件夹名不得把三枚按钮挤出侧栏(坤哥反馈「限制下最大宽度,
+    /// 要不然后面按钮显示不出来了」)。
+    ///
+    /// **这条守的是 egui 的一个真实行为,不是我们的布局算式**:
+    /// `ComboBox::width()` 在 `selected_text` 过长时会被忽略 —— 实测修复前
+    /// 三档面板宽度(180/240/400)下按钮右缘一律落到 561.8px(按文字自然
+    /// 宽度排),完全在侧栏之外。我们传给 `.width()` 的值是对的,失效的是
+    /// egui 那一侧。所以修法是**先把文字截到预算内**再交给 ComboBox,
+    /// 让它拿到的已经是短文本。
+    ///
+    /// 断言「长名与短名的按钮矩形逐像素相同」而不是「没超出某个 x」——
+    /// 前者顺带钉住「截断后目录名区不因内容变化而重排」,这才是「按钮
+    /// 显示不出来」在用户眼里的样子。
+    #[test]
+    fn long_root_label_keeps_action_buttons_inside_the_panel() {
+        let short = "docs";
+        let long = "很长的文件夹名字很长的文件夹名字很长的文件夹名字很长的文件夹名字";
+        for width in [tokens::SIDEBAR_MIN_W, 240.0, 400.0] {
+            let rects_of = |name: &str| {
+                let root = PathBuf::from("/vault").join(name);
+                let mut tree = FileTreeState {
+                    root: Some(root.clone()),
+                    recents: vec![root.clone()],
+                    ..FileTreeState::default()
+                };
+                tree.children.insert(root.clone(), DirChildren::default());
+                let mut outbox = Vec::new();
+                let mut rects: [Rect; 3] = [Rect::NOTHING; 3];
+                let bounds = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 200.0));
+                let ctx = egui::Context::default();
+                let mut out = ctx.run_ui(
+                    RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width + 40.0, 400.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(bounds));
+                        let handles = root_row(&mut content, &tree, None, &mut outbox);
+                        for (slot, response) in rects.iter_mut().zip([
+                            handles.pick.expect("选目录按钮在场"),
+                            handles.new.expect("新建按钮在场"),
+                            handles.refresh.expect("刷新按钮在场"),
+                        ]) {
+                            *slot = response.rect;
+                        }
+                    },
+                );
+                // 要读下一帧的 rect 就不能一丢了之;直接 drop 未应用的
+                // textures delta 会 panic,`clear` 是它的安全版本。
+                out.textures_delta.clear();
+                (rects, bounds)
+            };
+            let (short_rects, bounds) = rects_of(short);
+            let (long_rects, _) = rects_of(long);
+            assert_eq!(
+                long_rects, short_rects,
+                "长名({long})不得改变按钮位置(宽 {width}):"
+            );
+            for rect in long_rects {
+                assert!(
+                    rect.right() <= bounds.right() + 0.5,
+                    "按钮不得越出侧栏(宽 {width}):{rect:?},bounds={bounds:?}"
+                );
+            }
+        }
     }
 
     /// rail 五枚视图 tab 在同一条纵带上排得下。
