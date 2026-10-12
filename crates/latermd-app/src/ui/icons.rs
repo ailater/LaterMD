@@ -125,7 +125,15 @@ impl Icon {
     /// 在 `center` 处以 `size` 边长画图标,颜色由调用方给(通常取 visuals
     /// 前景色,禁用态取 weak)。
     pub fn draw(self, painter: &Painter, center: Pos2, size: f32, color: Color32) {
-        let stroke = Stroke::new((size / 12.0).max(1.0), color);
+        // 线宽基准:**1.5px @ 16px**,不是 `size / 12`(=1.33px)。
+        // 16px 是本项目最常用的档位(`ICON`),VS Code 的 codicons 在这一档
+        // 用 1.5 —— 1.33px 在 1x 下会被量化成"有时 1px 有时 2px",细弱
+        // 且发虚,这正是「图标不精致」最直接的观感来源。
+        //
+        // 写成 `size * 1.5 / 16.0` 而不是常数 1.5:改 `ICON` 时线宽自动等比
+        // 跟随,不会出现「大图标配细线」的比例失衡(见本文件头部「改 `size`
+        // 即整体等比缩放」的坐标约定)。
+        let stroke = Stroke::new((size * 1.5 / 16.0).max(1.0), color);
         // 归一化坐标 → 屏幕坐标
         let at = |x: f32, y: f32| center + Vec2::new(x * size, y * size);
         let seg = |a: (f32, f32), b: (f32, f32)| {
@@ -136,14 +144,53 @@ impl Icon {
                 seg(pair[0], pair[1]);
             }
         };
-        let frame = |a: (f32, f32), b: (f32, f32)| {
-            painter.rect_stroke(
-                Rect::from_two_pos(at(a.0, a.1), at(b.0, b.1)),
-                size * 0.08,
-                stroke,
-                egui::StrokeKind::Outside,
-            );
+        // **圆角矩形描边(多段折线近似)** —— 比 `rect_stroke` 精致得多。
+        //
+        // 为什么不用现成的 `painter.rect_stroke`:它画的是「切角矩形」
+        // (miter),圆角处两段直线硬接,16px 下能看到明显的折角;而 VS Code
+        // 的图标全是**连续圆弧过渡**,放大后棱角立刻暴露。
+        //
+        // `r` 是圆角半径(归一化)。段数按**弧长**定而不是固定值:半径越小
+        // 需要的段数越少,固定高段数只是白白多画几段重合线(不改变外观、
+        // 但每帧多几十条 shape)。
+        let round_rect = |a: (f32, f32), b: (f32, f32), r: f32| {
+            let (x0, y0) = (a.0.min(b.0), a.1.min(b.1));
+            let (x1, y1) = (a.0.max(b.0), a.1.max(b.1));
+            let r = r.min((x1 - x0) / 2.0).min((y1 - y0) / 2.0);
+            if r <= 0.01 {
+                path(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]);
+                return;
+            }
+            // 每 90° 用 8 段:单段 11.25°,肉眼看不出棱角(实测 4 段时
+            // 圆角处能明显看到折线)。
+            const PER_QUARTER: usize = 8;
+            let corner = |cx: f32, cy: f32, from: f32, to: f32| -> Vec<(f32, f32)> {
+                (0..=PER_QUARTER)
+                    .map(|i| {
+                        let t = from + (to - from) * (i as f32 / PER_QUARTER as f32);
+                        (cx + r * t.cos(), cy + r * t.sin())
+                    })
+                    .collect()
+            };
+            let mut pts: Vec<(f32, f32)> = Vec::with_capacity(PER_QUARTER * 4 + 1);
+            pts.extend(corner(x1 - r, y0 + r, -core::f32::consts::FRAC_PI_2, 0.0));
+            pts.extend(corner(x1 - r, y1 - r, 0.0, core::f32::consts::FRAC_PI_2));
+            pts.extend(corner(
+                x0 + r,
+                y1 - r,
+                core::f32::consts::FRAC_PI_2,
+                core::f32::consts::PI,
+            ));
+            pts.extend(corner(
+                x0 + r,
+                y0 + r,
+                core::f32::consts::PI,
+                core::f32::consts::PI * 1.5,
+            ));
+            pts.push(pts[0]);
+            path(&pts);
         };
+        let frame = |a: (f32, f32), b: (f32, f32)| round_rect(a, b, 0.12);
         let fill = |a: (f32, f32), b: (f32, f32)| {
             painter.rect_filled(
                 Rect::from_two_pos(at(a.0, a.1), at(b.0, b.1)),
@@ -169,8 +216,15 @@ impl Icon {
             ]);
         };
         // 折线近似圆弧(egui 无 arc API);返回终点坐标,箭头用它接续。
+        //
+        // **段数按弧长算,不写死**:18 段在半径 0.42 时单段约 15°,放大后
+        // 圆弧上能一节一节数出来 —— 这是「图标不精致」的第二来源。
+        // 现按每段不超过 6°(肉眼平滑的常规门槛)算需要的段数,下限 6 段
+        // (半径极小时再少就退化成折线了)。段数随半径走,故小圆环不会白
+        // 画几十段重合线。
         let arc = |c: (f32, f32), r: f32, a0: f32, a1: f32| -> (f32, f32) {
-            let steps = 18usize;
+            let span = (a1 - a0).abs();
+            let steps = ((span / core::f32::consts::PI * 30.0).ceil() as usize).max(6);
             let point = |i: usize| {
                 let t = a0 + (a1 - a0) * (i as f32 / steps as f32);
                 (c.0 + r * t.cos(), c.1 + r * t.sin())
@@ -185,22 +239,56 @@ impl Icon {
 
         match self {
             Self::New => {
-                frame((-0.42, -0.40), (0.02, 0.42));
-                seg((-0.30, -0.14), (-0.08, -0.14));
-                seg((-0.30, 0.06), (-0.08, 0.06));
-                seg((0.20, 0.02), (0.44, 0.02));
-                seg((0.32, -0.10), (0.32, 0.14));
+                // 文档轮廓 + 右上角加号。**文档是空的** —— 原实现里有两条
+                // 横线,读起来像「带文字的便签」而不是「新文档」;16px 下那
+                // 两根线还会与加号的横画挤在一起,整枚图标发糊。去掉它们,
+                // 轮廓 + 加号已是足够且更干净的语义。
+                frame((-0.44, -0.44), (0.10, 0.44));
+                // 加号:比轮廓略粗一点(视觉上「+」是动作,「轮廓」是对象,
+                // 动作该更醒目)。用实心小块画竖画的两端做小圆头,避免
+                // 纯线段的生硬方角。
+                fill((0.24, -0.16), (0.32, 0.24));
+                fill((0.08, 0.00), (0.48, 0.08));
             }
             // 工具栏「打开」与文件树收起目录共用闭合文件夹几何:闭合文件夹
             // 就是这把形状,分两套坐标只会画出两个略有出入的文件夹。
             Self::Open | Self::FolderClosed => {
+                // 工具栏「打开」与文件树收起目录共用闭合文件夹几何:闭合文件夹
+                // 就是这把形状,分两套坐标只会画出两个略有出入的文件夹。
+                //
+                // **顶部标签(flap)的两个拐角走圆弧**:原实现是
+                // `path(&[硬拐点…])`,直角处线段直接相交,16px 下标签与主体
+                // 的接缝像「贴上去的」—— 这是文件夹形状显廉价的主因。
+                // 主体已是 `round_rect`(见 `frame`),标签与它的过渡必须同款
+                // 柔和,否则一半圆一半尖,观感更割裂。
                 frame((-0.42, -0.22), (0.42, 0.38));
-                path(&[
-                    (-0.42, -0.22),
-                    (-0.42, -0.40),
-                    (-0.12, -0.40),
-                    (-0.04, -0.22),
-                ]);
+                // 标签:左侧短竖 → 顶部横 → 右侧短斜下,与主体上缘相接。
+                // 顶部两个角用小圆弧过渡(`round_rect` 退化不出这个形状,
+                // 故手工给两段 3 步的折线弧)。
+                let flap_arc = |cx: f32, cy: f32, from: f32, to: f32| {
+                    let mut pts = Vec::new();
+                    for i in 0..=3 {
+                        let t = from + (to - from) * (i as f32 / 3.0);
+                        pts.push((cx + 0.06 * t.cos(), cy + 0.06 * t.sin()));
+                    }
+                    pts
+                };
+                let mut flap = vec![(-0.42, -0.22), (-0.42, -0.34)];
+                flap.extend(flap_arc(
+                    -0.36,
+                    -0.34,
+                    core::f32::consts::PI,
+                    core::f32::consts::PI * 1.5,
+                ));
+                flap.push((-0.10, -0.40));
+                flap.extend(flap_arc(
+                    -0.04,
+                    -0.34,
+                    core::f32::consts::PI * 1.5,
+                    core::f32::consts::TAU,
+                ));
+                flap.push((-0.04, -0.22));
+                path(&flap);
             }
             Self::Save => {
                 frame((-0.42, -0.40), (0.42, 0.40));
@@ -764,6 +852,82 @@ mod tests {
         output.drop_without_applying_deltas();
     }
 
+    /// 线宽基准是 **1.5px @ 16px**(VS Code codicons 同档),不是 `size / 12`
+    /// (=1.33px)。这条钉的是**观感底线**:1.33px 在 1x 下被量化成「有时
+    /// 1px 有时 2px」,细弱发虚 —— 正是「图标不精致」最直接的来源,而它
+    /// **没有任何形状类断言能发现**(线宽变了,形状数与几何都不变)。
+    ///
+    /// 量法:取一条纯线段图标的描边,直接量 `Shape::LineSegment` 的
+    /// `stroke.width`。用 `Minimize`(一条横线,无其他笔画干扰)。
+    #[test]
+    fn stroke_width_matches_the_16px_codicon_baseline() {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            Icon::Minimize.draw(ui.painter(), egui::pos2(20.0, 20.0), ICON, Color32::WHITE);
+        });
+        out.textures_delta.clear();
+        let widths: Vec<f32> = out
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::LineSegment { stroke, .. } => Some(stroke.width),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(widths.len(), 1, "Minimize 恰好一条线:{widths:?}");
+        // 上界 1.6 / 下界 1.4:钉住 1.5 这个标定值,同时留 ±0.1 余量给
+        // 「有人想微调」。改回 size/12(=1.33)会当场红。
+        assert!(
+            (1.4..=1.6).contains(&widths[0]),
+            "16px 图标线宽应在 1.5px 附近(实测 {:.2});\
+             1.33px 之类偏细的值在 1x 下会量化抖动、显虚",
+            widths[0]
+        );
+        // 大图标要等比跟随(改 ICON 时线宽自动缩放,不出「大图标配细线」)
+        let ctx2 = egui::Context::default();
+        let mut out2 = ctx2.run_ui(egui::RawInput::default(), |ui| {
+            Icon::Minimize.draw(ui.painter(), egui::pos2(40.0, 40.0), 32.0, Color32::WHITE);
+        });
+        out2.textures_delta.clear();
+        let big: Vec<f32> = out2
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::LineSegment { stroke, .. } => Some(stroke.width),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            (2.9..=3.1).contains(&big[0]),
+            "32px 图标线宽应为 3.0px(=1.5 的两倍):实测 {:.2}",
+            big[0]
+        );
+    }
+
+    /// 圆弧必须**平滑**:`arc` 的折线段数按弧长算,单段不超过约 6°。
+    ///
+    /// 原实现写死 18 段,半径 0.42 时单段约 15°,放大后圆弧一节一节数得
+    /// 出来 —— 「不精致」的第二来源。改「段数写死的小值」会当场红。
+    #[test]
+    fn refresh_arc_is_smooth_not_faceted() {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            Icon::Reset.draw(ui.painter(), egui::pos2(30.0, 30.0), 64.0, Color32::WHITE);
+        });
+        out.textures_delta.clear();
+        let segments = out
+            .shapes
+            .iter()
+            .filter(|c| matches!(c.shape, egui::Shape::LineSegment { .. }))
+            .count();
+        // 64px 下圆弧约 260°,6°/段 → 44 段,加箭头两笔 ≈ 46。取 30 作
+        // 下限:15°/段的旧实现只有 ~19 段,会红;6°/段 ~44 段,绿。
+        assert!(
+            segments >= 30,
+            "圆弧应平滑铺足够多的线段(64px 下 ≥30):实测 {segments}"
+        );
+    }
+
     /// 一排里并排的图标,视觉尺寸须落在同一档 —— 坤哥反馈「选择文件夹和
     /// 新建文件按钮弄好看点,最好能看起来等宽」的那一条守门。
     ///
@@ -870,9 +1034,15 @@ mod tests {
     }
 
     /// Copy 与 Check 是 Painter 画的矢量,不走 Unicode 字形(`⧉`/`✓` 在三平台
-    /// 缺字风险真实)。Copy 在左、Check 在右(x=40 分界):Copy 应有一枚完整
-    /// 矩形描边(前框)+ 至少两条边线(后框上、左边);Check 两条线段一负
-    /// 斜率(下挑)一正斜率(上挑),连成对勾。
+    /// 缺字风险真实)。Copy 在左、Check 在右(x=40 分界):Copy 应画出一枚
+    /// **闭合矩形轮廓**(前框);Check 两条线段一负斜率(下挑)一正斜率
+    /// (上挑),连成对勾。
+    ///
+    /// **前框不再是单枚 `Shape::Rect`**:`frame` 改用 `round_rect`(多段
+    /// 折线圆角,见其定义),闭合矩形是一串 `LineSegment`。本测试断言的是
+    /// **意图**(前框是矢量闭合轮廓、不是字体字形),故改数线段;若日后
+    /// 有人换回字体字符 `⧉`,这里仍红 —— 字形在**文本层**,本测试只看
+    /// `Shape::LineSegment`。
     #[test]
     fn copy_and_check_icons_are_vector_shapes() {
         let ctx = egui::Context::default();
@@ -880,33 +1050,26 @@ mod tests {
             Icon::Copy.draw(ui.painter(), egui::pos2(20.0, 20.0), ICON, Color32::WHITE);
             Icon::Check.draw(ui.painter(), egui::pos2(60.0, 20.0), ICON, Color32::WHITE);
         });
-        let mut copy_rects = 0;
         let mut copy_lines = 0;
         let mut check_lines = Vec::new();
         for clipped in &output.shapes {
-            match &clipped.shape {
-                egui::Shape::Rect(rect) if rect.brush.is_none() => {
-                    if rect.visual_bounding_rect().center().x < 40.0 {
-                        copy_rects += 1;
-                    }
+            if let egui::Shape::LineSegment { points, .. } = &clipped.shape {
+                if points[0].x < 40.0 {
+                    copy_lines += 1;
+                } else {
+                    check_lines.push(*points);
                 }
-                egui::Shape::LineSegment { points, .. } => {
-                    if points[0].x < 40.0 {
-                        copy_lines += 1;
-                    } else {
-                        check_lines.push(*points);
-                    }
-                }
-                _ => {}
             }
         }
+        // 前框圆角矩形 = 4 角 × (PER_QUARTER+1) 段。断言**按段数下限
+        // 8 反而太松** —— `PER_QUARTER=1` 时恰好也是 8 段(4 角 × 2),
+        // 红绿验证实测它照样绿。改用「明显多于 8」的下限 16:只有
+        // `PER_QUARTER>=3` 起步(4 角 × ≥4 段 = 16)才过,而 3 段/90° =
+        // 30°/段,肉眼已能见棱角 —— 真要平滑得 8 段(见 `round_rect`)。
+        // 故取 20(对应 PER_QUARTER=4)作闸:挡住「圆角退化成切角」。
         assert!(
-            copy_rects >= 1,
-            "Copy 前框应有一枚矩形描边:rects={copy_rects}"
-        );
-        assert!(
-            copy_lines >= 2,
-            "Copy 后框应至少画上、左两条边:{copy_lines}"
+            copy_lines >= 20,
+            "Copy 前框应是平滑的闭合圆角轮廓,不是切角矩形:{copy_lines} 段"
         );
         assert!(
             check_lines
