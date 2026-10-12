@@ -60,18 +60,12 @@ fn rail_item_rect(rail: egui::Rect, index: usize) -> egui::Rect {
     egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(item, item))
 }
 
-/// rail 上下两组之间分隔线的 y。下组自这根线再往下 [`tokens::RAIL_GAP`]
-/// 起排,视觉上「线跟着上组」而不是悬在两组正中。
-fn rail_divider_y(rail: egui::Rect, upper_count: usize) -> f32 {
-    let pitch = tokens::RAIL_ITEM + tokens::RAIL_GAP;
-    rail.top() + pitch * upper_count as f32 - tokens::RAIL_GAP * 0.5
-}
-
 /// 绘制左缘 rail(2026-10-08 决策):**完全取代**单行横排 `view_nav` 与原
-/// 顶部 `top_actions`。上组 [`SidebarTab::ALL`] 五视图,横线,下组
-/// [`Command::FILE`] + 导出两项共六枚,自此左栏顶部 chrome 归零。
+/// 顶部 `top_actions`,画 [`SidebarTab::ALL`] 五视图。原下组(文件动作
+/// 六枚 + 分隔线)**2026-10-12 应坤哥要求整组裁撤** —— 文件动作仍有
+/// 菜单「文件」「导出」、快捷键与快速打开三个入口,rail 回归纯视图切换。
 ///
-/// 两组的每一枚只 `allocate_rect` **一次**并返回同一个 `Response`,命中
+/// 每一枚只 `allocate_rect` **一次**并返回同一个 `Response`,命中
 /// 判定与点击判定都读它 —— 同一矩形分配两次会叠出两层命中,后画的那个
 /// 吞掉前一个的 `clicked()`(egui 同层「后画者胜」),首版草稿踩过。
 ///
@@ -83,75 +77,32 @@ fn draw_rail(
     rail: egui::Rect,
     active: SidebarTab,
     outbox: &mut Vec<Message>,
-    probe: &mut Option<&mut dyn FnMut(RailItem, egui::Rect)>,
 ) {
     panel
         .painter()
         .rect_filled(rail, 0.0, crate::theme::shell(panel).rail);
 
-    let keymap = Keymap::builtin();
-    // 不用闭包:闭包要同时捕获 `&mut panel` 与 `index`,借用检查过不去
-    // (`panel` 已被外层持有),故把 index 显式当作循环外的游标推进。
-    let mut index = 0usize;
-    // `probe` 是 `&mut Option<&mut dyn FnMut>`:`as_deref_mut` 每次**重新**
-    // 借一层 `Option<&mut dyn FnMut>` 出来,故能在循环里反复消费,不必
-    // 先 `take()` 再包回去。
-    let mut probe = probe.as_deref_mut();
-
-    // ① 上组:五枚视图 tab
-    for tab in SidebarTab::ALL {
+    for (index, tab) in SidebarTab::ALL.into_iter().enumerate() {
         let rect = rail_item_rect(rail, index);
         let response = panel.allocate_rect(rect, egui::Sense::click());
-        let item = RailItem::View(tab);
-        if let Some(probe) = probe.as_deref_mut() {
-            probe(item, rect);
-        }
         if panel.is_rect_visible(rect) {
-            paint_rail_item(panel, rect, item, tab == active, response.hovered());
+            paint_rail_item(panel, rect, tab, tab == active, response.hovered());
         }
         if response.on_hover_text(tab.label()).clicked() {
             outbox.push(Message::SidebarTabChanged(tab));
         }
-        index += 1;
-    }
-
-    // ② 分隔线
-    let y = rail_divider_y(rail, index);
-    let inset = tokens::SPACE_SM;
-    panel.painter().hline(
-        egui::Rangef::new(rail.left() + inset, rail.right() - inset),
-        y,
-        egui::Stroke::new(
-            tokens::RAIL_DIVIDER_H,
-            crate::theme::shell(panel).border.gamma_multiply(0.28),
-        ),
-    );
-
-    // ③ 下组:文件动作六枚(Command::FILE + 导出 HTML / PDF)
-    for cmd in Command::FILE
-        .iter()
-        .copied()
-        .chain([Command::ExportHtml, Command::ExportPdf])
-    {
-        let rect = rail_item_rect(rail, index);
-        let response = panel.allocate_rect(rect, egui::Sense::click());
-        let item = RailItem::Action(cmd);
-        if let Some(probe) = probe.as_deref_mut() {
-            probe(item, rect);
-        }
-        if panel.is_rect_visible(rect) {
-            paint_rail_item(panel, rect, item, false, response.hovered());
-        }
-        if response.on_hover_text(tooltip_of(cmd, &keymap)).clicked() {
-            outbox.push(cmd.message());
-        }
-        index += 1;
     }
 }
 
 /// rail 单枚的绘制:选中 = 实心底 + 左缘竖条;hover = 内建 hover 底;
-/// 常态只画图标。图标无条件取自 [`RailItem`],两组共用这条路径。
-fn paint_rail_item(ui: &egui::Ui, rect: egui::Rect, item: RailItem, selected: bool, hovered: bool) {
+/// 常态只画图标。
+fn paint_rail_item(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    tab: SidebarTab,
+    selected: bool,
+    hovered: bool,
+) {
     let painter = ui.painter();
     let visuals = ui.visuals();
     let radius = egui::CornerRadius::same(tokens::RADIUS_SM as u8);
@@ -174,31 +125,8 @@ fn paint_rail_item(ui: &egui::Ui, rect: egui::Rect, item: RailItem, selected: bo
     } else {
         visuals.text_color()
     };
-    item.icon()
+    tab.icon()
         .draw(painter, rect.center(), tokens::NAV_TAB_ICON, color);
-}
-
-/// rail 上的一枚:或一个视图 tab,或一条文件命令。
-///
-/// 两组的摆位与绘制完全共用,差异只有三处(图标 / tooltip / 点击发出
-/// 的消息),把这枚「是什么」显式化比在两个循环里各抄一遍近乎相同的
-/// 代码更稳 —— 加一枚按钮时只改 `RAIL_ITEMS`,不会漏掉一半。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RailItem {
-    /// 上组的视图切换。
-    View(SidebarTab),
-    /// 下组的文件动作。
-    Action(Command),
-}
-
-impl RailItem {
-    /// rail 图标(两组都走 `ui::icons` 的自绘全集)。
-    fn icon(self) -> crate::ui::icons::Icon {
-        match self {
-            Self::View(tab) => tab.icon(),
-            Self::Action(cmd) => cmd.icon(),
-        }
-    }
 }
 
 /// rail 带本身:占 sidebar 矩形左端 [`tokens::RAIL_W`] 宽、纵贯到底。
@@ -246,7 +174,7 @@ pub fn ui(
     // rail 先画、body 的 ScrollArea 后加:后者按 available_width 演算,
     // 天然从 rail 右缘起排,不必手动给它减 RAIL_W。
     let strip = rail_strip(panel.max_rect());
-    draw_rail(panel, strip, *active_tab, outbox, &mut None);
+    draw_rail(panel, strip, *active_tab, outbox);
 
     // body 必须显式下到一个**限定过的子 Ui**里,不能指望它自己往后排:
     // `draw_rail` 用的是逐枚 `allocate_rect` 摆**绝对**矩形,**不吃游标**
@@ -369,7 +297,8 @@ fn draw_body(
 /// `broken_intra_doc_links` 警告)。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SidebarBands {
-    /// 顶段:高频文件动作。
+    /// 顶段:高频文件动作(2026-10-08 改版起恒为零高矩形;2026-10-12 rail
+    /// 下组文件动作亦整组裁撤,左栏只剩 rail 五视图,字段仅为形状兼容保留)。
     pub top: egui::Rect,
     /// 次段:视图导航(2026-10-08 起为单行五 tab,`NAV_TAB_H` 高)。
     pub nav: egui::Rect,
@@ -380,8 +309,9 @@ pub struct SidebarBands {
 /// 左栏顶部高频文件动作(**2026-10-08 起退役**)。
 ///
 /// 原为 [Command::FILE] + 导出两项共六枚横排常驻,是文件动作的按钮入口
-/// (decisions-pending #32)。现全部迁入 [`draw_rail`] 的下组 —— 自此左栏
-/// 顶部 chrome 归零,窄栏下不再换行成两行。
+/// (decisions-pending #32)。后迁入 [`draw_rail`] 下组,而下组本身
+/// **2026-10-12 亦整组裁撤** —— 文件动作的常驻按钮入口就此归零,只剩
+/// 菜单「文件」「导出」、快捷键与快速打开;rail 只剩五枚视图 tab。
 ///
 /// **保留而不删**的理由同 `tokens::NAV_ROW_H`:历史 commit 的测试引用它,
 /// 删掉会让旧 commit 无法 `git bisect` 复现。新代码不许新增调用方。
@@ -3979,7 +3909,7 @@ mod tests {
     /// 点 rail 上「搜索」tab:走完整 `sidebar::ui` 多帧请求,只发一条
     /// `SidebarTabChanged`。
     ///
-    /// 直接驱 `sidebar::ui`(而非孤立 tab)是有意的:rail 里的十一枚按钮
+    /// 直接驱 `sidebar::ui`(而非孤立 tab)是有意的:rail 上的五枚 tab
     /// 与 body 的 ScrollArea 都在左栏这一层,只测孤立按钮会漏掉「谁抢走了
     /// 这次点击」—— 三栏重排时已经在标题栏上踩过一次。
     ///
@@ -4133,196 +4063,28 @@ mod tests {
         }
     }
 
-    /// rail 下组六枚文件动作逐个点得动:真实 [`draw_rail`] 路径下点击各发
-    /// 对应命令消息。
+    /// rail 五枚视图 tab 在同一条纵带上排得下。
     ///
-    /// **2026-10-08 从 `top_actions_with_probe` 迁来**(原
-    /// `clicking_every_top_action_sends_its_command`)。顶段六枚已迁入 rail,
-    /// 继续测退役函数会得到**假绿** —— 函数在,但生产路径已不再调它,测出
-    /// 的「六枚都点得动」与用户实际看到的东西无关。入口易位而不断链,是
-    /// 这次改版最容易静默丢失的保障。
-    #[test]
-    fn clicking_every_rail_action_sends_its_command() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-
-        let commands: Vec<Command> = Command::FILE
-            .iter()
-            .copied()
-            .chain([Command::ExportHtml, Command::ExportPdf])
-            .collect();
-        let ctx = egui::Context::default();
-        let rects = Rc::new(RefCell::new(Vec::<(Command, Rect)>::new()));
-        let rail = rail_strip(Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(crate::ui::tokens::SIDEBAR_MIN_W, 600.0),
-        ));
-
-        // 帧 1:探针拿按钮矩形(仅渲染,顺带断言不产消息)
-        let mut outbox = Vec::new();
-        {
-            let sink = rects.clone();
-            let mut probe = |item: RailItem, rect: Rect| {
-                if let RailItem::Action(cmd) = item {
-                    sink.borrow_mut().push((cmd, rect));
-                }
-            };
-            let output = ctx.run_ui(RawInput::default(), |ui| {
-                super::draw_rail(
-                    ui,
-                    rail,
-                    SidebarTab::Files,
-                    &mut outbox,
-                    &mut Some(&mut probe),
-                );
-            });
-            output.drop_without_applying_deltas();
-        }
-        assert!(outbox.is_empty(), "仅渲染帧不产消息:{outbox:?}");
-        let rects = rects.borrow().clone();
-        assert_eq!(
-            rects.iter().map(|(cmd, _)| *cmd).collect::<Vec<_>>(),
-            commands,
-            "rail 下组 = Command::FILE + 导出两项(HTML/PDF),不多不少"
-        );
-
-        // 每按钮三帧(moved / press / release):点击发出对应消息
-        let click = |pos, pressed| Event::PointerButton {
-            pos,
-            button: PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        for (cmd, rect) in rects {
-            let mut outbox = Vec::new();
-            let center = rect.center();
-            for events in [
-                vec![Event::PointerMoved(center)],
-                vec![click(center, true)],
-                vec![click(center, false)],
-            ] {
-                let output = ctx.run_ui(
-                    RawInput {
-                        events,
-                        screen_rect: Some(Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(crate::ui::tokens::SIDEBAR_MIN_W, 600.0),
-                        )),
-                        ..Default::default()
-                    },
-                    |ui| super::draw_rail(ui, rail, SidebarTab::Files, &mut outbox, &mut None),
-                );
-                output.drop_without_applying_deltas();
-            }
-            assert_eq!(
-                outbox,
-                vec![cmd.message()],
-                "{cmd:?} rail 按钮点击出对应消息"
-            );
-        }
-    }
-
-    /// hover 出 tooltip:指针停在 rail 的「保存」上时,tooltip 文本(含出厂
-    /// 键位)真实渲染出来(`everything_is_visible` 是 egui 自己的 UI 测试
-    /// 手法,免去 tooltip 延迟)。
-    ///
-    /// **2026-10-08 从 `top_actions_with_probe` 迁来**,理由同
-    /// [`clicking_every_rail_action_sends_its_command`]:图标不自解释
-    /// (ui-polish §1.1),tooltip 是 rail 里唯一的辨识手段 —— 入口搬了家,
-    /// 这条必须跟着搬到 rail 上,否则改坏了也绿。
-    #[test]
-    fn hovering_rail_action_shows_shortcut_tooltip() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-
-        let ctx = egui::Context::default();
-        let rail = rail_strip(Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(crate::ui::tokens::SIDEBAR_MIN_W, 600.0),
-        ));
-        let save_rect = Rc::new(RefCell::new(Rect::NOTHING));
-        {
-            let sink = save_rect.clone();
-            let mut probe = |item: RailItem, rect: Rect| {
-                if item == RailItem::Action(Command::Save) {
-                    *sink.borrow_mut() = rect;
-                }
-            };
-            let output = ctx.run_ui(RawInput::default(), |ui| {
-                super::draw_rail(
-                    ui,
-                    rail,
-                    SidebarTab::Files,
-                    &mut Vec::new(),
-                    &mut Some(&mut probe),
-                );
-            });
-            output.drop_without_applying_deltas();
-        }
-        let center = save_rect.borrow().center();
-        assert!(center.y > 0.0, "探针拿到 rail 上的保存按钮");
-
-        ctx.memory_mut(|mem| mem.set_everything_is_visible(true));
-        // 两帧:hover 判定用上一帧的指针位置,tooltip 在下一帧才渲染
-        let mut shapes = Vec::new();
-        for events in [
-            vec![Event::PointerMoved(center)],
-            vec![Event::PointerMoved(center)],
-        ] {
-            let output = ctx.run_ui(
-                RawInput {
-                    events,
-                    screen_rect: Some(Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(crate::ui::tokens::SIDEBAR_MIN_W, 600.0),
-                    )),
-                    ..Default::default()
-                },
-                |ui| super::draw_rail(ui, rail, SidebarTab::Files, &mut Vec::new(), &mut None),
-            );
-            shapes = output.shapes.clone();
-            output.drop_without_applying_deltas();
-        }
-        let shortcut = Keymap::builtin()
-            .get(Command::Save)
-            .map(|s| s.platform_text())
-            .unwrap_or_default();
-        let expected = format!("保存({shortcut})");
-        let painted: Vec<String> = shapes
-            .iter()
-            .filter_map(|clipped| match &clipped.shape {
-                egui::epaint::Shape::Text(text) => Some(text.galley.job.text.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            painted.iter().any(|t| t.contains(&expected)),
-            "tooltip 应含 {expected:?},实际画出的文本:{painted:?}"
-        );
-    }
-
-    /// rail 十一枚在同一条纵带上排得下 —— 这是「顶部 chrome 归零」的
-    /// **前提断言**:挤不下就得给 rail 自己做滚动或分两列,收益随之打折。
+    /// **2026-10-12 下组六枚文件动作裁撤**后这条从「11 枚的前提断言」退成
+    /// 下限守门:再加常驻按钮就得重新过一遍高度预算(挤不下就得给 rail
+    /// 自己做滚动或分两列,收益随之打折)。
     ///
     /// 上界取侧栏常见高度而非某个 rail 尺寸 token:「一行占用多少」与
     /// 「剩下多少给内容」是两件独立的事(同 §2.1 的纪律)。
     #[test]
     fn every_rail_item_fits_the_sidebar_height() {
         let pitch = crate::ui::tokens::RAIL_ITEM + crate::ui::tokens::RAIL_GAP;
-        let upper = SidebarTab::ALL.len();
-        let lower = Command::FILE.len() + 2;
-        let divider = crate::ui::tokens::RAIL_GAP;
-        let total = pitch * (upper + lower) as f32 + divider;
+        let count = SidebarTab::ALL.len();
+        let total = pitch * count as f32;
         // 600px 栏高留出 1 行以上余量;1500 是实测侧栏可达高度的上放大镜。
         const COLUMN_H: f32 = 600.0;
         assert!(
             total <= COLUMN_H,
-            "rail 十一枚合计 {total}px 须 ≤ 栏高 {COLUMN_H}px(pitch={pitch})"
+            "rail {count} 枚合计 {total}px 须 ≤ 栏高 {COLUMN_H}px(pitch={pitch})"
         );
         assert_eq!(
-            upper + lower,
-            11,
-            "上组五视图 + 下组六文件动作 = 11 枚;改任一组时这条会红"
+            count, 5,
+            "rail 只挂五枚视图 tab;再加常驻按钮先过上方高度预算"
         );
     }
 }

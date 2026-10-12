@@ -378,6 +378,22 @@ left_to_right` 直驱 `sidebar::ui`，**绕过了承载它的 `Panel::left("nav"
 | panel `inner_margin.left` 0 → 8 | ✅ 红，报「差 8px，须 ≤3px」 |
 | `RAIL_W` 40 → 48 | ✅ 红（宽度断言独立触发） |
 
+#### 5.5.6 下组六枚文件动作整组裁撤（2026-10-12，坤哥指定）
+
+rail 上线次日起的减法：坤哥要求去掉「新建、打开、保存、导出」——点名
+四类，落在 rail 上即下组六枚（`Command::FILE` 四枚 + 导出 HTML/PDF）。
+真正开口的取舍是**另存为**：它不在点名清单里，但五枚撤走后独留一枚孤儿
+按钮挂在分隔线下，不是任何产品会要的形态，故随组一并裁撤。文件动作自此
+只剩菜单「文件」「导出」、快捷键（Ctrl+N/O/S/Shift+S）与快速打开三个
+入口，没有一个被连根拔掉；rail 回归**纯视图切换**（五枚 tab），分隔线
+与 `RAIL_DIVIDER_H` token 一并下岗。
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 裁撤范围 | 下组整组六枚（含未点名的另存为） | 孤儿按钮不成形态；入口三兜底（菜单/快捷键/快速打开）无一失去 |
+| 测试处置 | `clicking_every_rail_action_sends_its_command`、`hovering_rail_action_shows_shortcut_tooltip` **随入口一起删** | 沿用 §5.5.2 的反假绿纪律：生产路径没了，测试留着就是假绿；点击→消息链路在 `ui::menubar` 的菜单测试里仍有覆盖 |
+| 高度预算 | `every_rail_item_fits_the_sidebar_height` 缩到五枚、断言「只挂五枚」 | 从「11 枚排得下」的前提断言退成下限守门：再加常驻按钮必须先过预算 |
+
 ### 5.6 标题栏命令箱：搜索胶囊 + 源码 / Live 切换（已落地）
 
 **已落地**（`ui/tokens.rs` 新 token + `ui/titlebar.rs` 的 `command_box`）
