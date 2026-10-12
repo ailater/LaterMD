@@ -29,7 +29,7 @@ use latermd_git::{CommitInfo, DiffHunk, DiffLine, DiffLineKind, FileDiff, FileSt
 use latermd_md::OutlineItem;
 
 use eframe::egui;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 大纲层级每深一级的缩进宽度(px)。
 const OUTLINE_INDENT: f32 = 14.0;
@@ -1072,33 +1072,11 @@ fn files_panel(
     workbench: bool,
     outbox: &mut Vec<Message>,
 ) {
-    // 根目录行:最近列表下拉(有历史才有)+ 选新目录按钮
-    let root_hover = tree.root.as_deref().map(|path| path.display().to_string());
+    // 根目录行:最近列表下拉(有历史才有)+ 选目录 / 新建 / 刷新三枚图标
+    // 按钮。行宽只有面板宽,三枚按钮按 TOOLBAR_H 见方摆,图标语义靠
+    // tooltip 与辅助技术标签(见 `icon_button`)区分。
     if !workbench {
-        panel.horizontal(|ui| {
-            let selected = root_label(tree);
-            if tree.recents.is_empty() {
-                let response = ui.weak(&selected);
-                if let Some(hover) = &root_hover {
-                    response.on_hover_text(hover);
-                }
-            } else {
-                let response = egui::ComboBox::from_id_salt("file-tree-roots")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for dir in &tree.recents {
-                            recent_row(ui, tree, dir, outbox);
-                        }
-                    })
-                    .response;
-                if let Some(hover) = &root_hover {
-                    response.on_hover_text(hover);
-                }
-            }
-            if ui.small_button("选择…").clicked() {
-                outbox.push(Message::FileTreeRootPick);
-            }
-        });
+        root_row(panel, tree, current_file, outbox);
     }
     egui::ScrollArea::vertical()
         .id_salt("file-tree-scroll")
@@ -1121,6 +1099,140 @@ fn files_panel(
                 });
             }
         });
+}
+
+/// 「新建」浮窗:文件名输入 + 目标目录回显 + 创建/取消。
+///
+/// 只收草稿,**不碰 IO** —— 落盘、缓存失效与开标签都在归约
+/// (`State::confirm_new_file`)。「创建」在草稿 trim 后为空、或含路径
+/// 分隔符时禁用:这两种名 `filetree::create_markdown` 必拒,让按钮先灰
+/// 掉比让用户点了吃一条错误提示友好。归约侧仍防御性拒绝直发的消息。
+///
+/// 返回(创建, 取消)响应供无头测试定位(与 `tabs::rename_dialog` 同款)。
+pub(crate) fn new_file_dialog(
+    ui: &mut egui::Ui,
+    new_file: &mut crate::filetree::NewFileDraft,
+) -> (egui::Response, egui::Response) {
+    let mut buttons = None;
+    egui::Window::new("新建文档")
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ui.ctx().viewport_rect().center())
+        .collapsible(false)
+        .resizable(false)
+        .frame(crate::ui::workbench::dialog_frame(ui))
+        .show(ui.ctx(), |ui| {
+            ui.label("文件名");
+            ui.text_edit_singleline(&mut new_file.draft)
+                .on_hover_text("可省略 .md 后缀;已存在同名文件时自动让开");
+            ui.add_space(tokens::SPACE_XS);
+            ui.weak(format!("位置:{}", new_file.dir.display()));
+            ui.add_space(tokens::SPACE_SM);
+            ui.separator();
+            ui.horizontal(|ui| {
+                let name = new_file.draft.trim();
+                let ready = crate::filetree::valid_file_name(name);
+                let confirm = ui
+                    .add_enabled(ready, egui::Button::new("创建"))
+                    .on_disabled_hover_text("文件名不能为空,也不能包含路径分隔符");
+                let cancel = ui.button("取消");
+                buttons = Some((confirm, cancel));
+            });
+        });
+    buttons.expect("浮窗必然绘制创建/取消按钮")
+}
+
+/// Files 页顶部根目录行:目录名(最近列表下拉 / 无历史时纯文本)+ 三枚
+/// 见方图标按钮(选文件夹 / 新建 / 刷新)。行高只有面板宽,三枚按钮
+/// 各自 `TOOLBAR_H` 见方,图标语义靠 tooltip 与辅助技术标签区分
+/// (`icon_button` 两者都给,不是只画个图标了事)。
+///
+/// 独立成函数并返回三枚响应:无头测试要按矩形点它们,而 `files_panel`
+/// 内部布局拿不到单枚按钮的矩形。
+fn root_row(
+    ui: &mut egui::Ui,
+    tree: &FileTreeState,
+    current_file: Option<&Path>,
+    outbox: &mut Vec<Message>,
+) -> RootRowHandles {
+    let root_hover = tree.root.as_deref().map(|path| path.display().to_string());
+    let mut handles = RootRowHandles {
+        pick: None,
+        new: None,
+        refresh: None,
+    };
+    ui.horizontal(|ui| {
+        // 目录名区先吃剩余宽度:ComboBox 默认 `width` 是"整行可用宽",
+        // 三枚按钮会被直接挤出侧栏(最窄 180px 时实测按钮右缘到 208)。
+        // 故按 `available_width` 减去三枚按钮的预算来给目录名区定宽 ——
+        // 单枚实测宽为 `ICON + 2 * SPACE_SM`;间隔按**三个**:行内共
+        // 四个元素(目录名 + 三按钮),`item_spacing` 落在每一对之间,漏算
+        // 一个就会在最小宽度下溢出(实测 180px 时右缘 188)。
+        let buttons_w =
+            3.0 * (tokens::ICON + 2.0 * tokens::SPACE_SM) + 3.0 * ui.spacing().item_spacing.x;
+        let label_w = (ui.available_width() - buttons_w).max(tokens::ICON);
+        let selected = root_label(tree);
+        if tree.recents.is_empty() {
+            // 无最近列表:纯文本占位,同样吃掉 label_w(否则它也撑满整行)
+            let response = ui.add_sized(
+                [label_w, tokens::TOOLBAR_H],
+                egui::Label::new(&selected).selectable(false),
+            );
+            if let Some(hover) = &root_hover {
+                response.on_hover_text(hover);
+            }
+        } else {
+            let response = egui::ComboBox::from_id_salt("file-tree-roots")
+                .selected_text(selected)
+                .width(label_w)
+                .show_ui(ui, |ui| {
+                    for dir in &tree.recents {
+                        recent_row(ui, tree, dir, outbox);
+                    }
+                })
+                .response;
+            if let Some(hover) = &root_hover {
+                response.on_hover_text(hover);
+            }
+        }
+        let pick = crate::ui::icons::icon_button(ui, Icon::Open, "选择文件夹…");
+        if pick.clicked() {
+            outbox.push(Message::FileTreeRootPick);
+        }
+        // 新建落在「当前文档所在目录」,没有落盘文档才回落根 —— 决定
+        // 目录的活归归约(它手上有完整的文档状态),这里只发请求。
+        let new = crate::ui::icons::icon_button(ui, Icon::New, "在当前目录新建 Markdown 文档");
+        if new.clicked() {
+            if let Some(dir) = new_file_target(current_file, tree.root.as_deref()) {
+                outbox.push(Message::FileTreeNewFileRequested(dir));
+            }
+        }
+        let refresh = crate::ui::icons::icon_button(ui, Icon::Reset, "刷新目录树");
+        if refresh.clicked() {
+            outbox.push(Message::FileTreeRefreshRequested);
+        }
+        handles = RootRowHandles {
+            pick: Some(pick),
+            new: Some(new),
+            refresh: Some(refresh),
+        };
+    });
+    handles
+}
+
+/// 根目录行三枚按钮的响应(见 [`root_row`])。三枚**每帧都在场**,故用
+/// `Option` 而非 `Default`:无头测试按「点这个矩形 → 断言发了这条消息」
+/// 驱动,缺席比「退化成一个零点矩形」更早暴露漏画。
+///
+/// 字段只被测试读(`files_panel` 忽略返回值 —— 点击判定在 `root_row` 内
+/// 就地做了),故按目标条件豁免 dead_code:`cargo build` / clippy 的非测试
+/// 目标会因字段无读点告警,而门禁跑 `--all-targets` 时测试是读者。
+pub struct RootRowHandles {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub pick: Option<egui::Response>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub new: Option<egui::Response>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub refresh: Option<egui::Response>,
 }
 
 /// recents 下拉项:显示名只取末级文件夹名(`recent_label`,与 root_label
@@ -1151,6 +1263,19 @@ fn root_label(tree: &FileTreeState) -> String {
         .as_deref()
         .and_then(last_segment)
         .unwrap_or_else(|| "未选择根目录".to_owned())
+}
+
+/// 「新建」按钮的目标目录:当前文档所在目录,无落盘文档(或文档在根之外)
+/// 时回落文件树根;两者都没有返回 `None`(按钮此时不发消息)。
+///
+/// **「当前目录」的口径在此定义,归约只做兜底**(目录已被外部删掉时回落
+/// 根)。放在 UI 层是因为这里已经同时握有 `current_file` 与 `root`,
+/// 而归约侧还得再查一遍文档状态 —— 两处各算一次迟早会算出不同答案。
+fn new_file_target(current_file: Option<&Path>, root: Option<&Path>) -> Option<PathBuf> {
+    current_file
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .or_else(|| root.map(Path::to_path_buf))
 }
 
 /// 路径末级名(文件夹名);根路径 `/` 等无末段时为 None。
@@ -4177,6 +4302,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 文件栏根目录行:三枚图标按钮各自点得动,消息不串;且在**最窄**
+    /// 侧栏里三枚都还在可视范围内(旧实现是一个文字按钮,加到三枚后才有
+    /// 宽度预算这回事)。
+    ///
+    /// 几何断言按 [`tokens::ICON`] 与 `TOOLBAR_H` 独立算,不复用
+    /// `icon_button` 内部的尺寸表达式 —— 那样断言就变成自我满足。
+    #[test]
+    fn root_row_icon_buttons_send_their_own_messages() {
+        let root = PathBuf::from("/vault");
+        let docs = root.join("docs");
+        for width in [tokens::SIDEBAR_MIN_W, 240.0, 400.0] {
+            let mut tree = FileTreeState {
+                root: Some(root.clone()),
+                recents: vec![root.clone()],
+                ..FileTreeState::default()
+            };
+            tree.children.insert(root.clone(), DirChildren::default());
+            let mut outbox = Vec::new();
+            let mut rects: [Rect; 3] = [Rect::NOTHING; 3];
+            let bounds = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 200.0));
+            let ctx = egui::Context::default();
+
+            let render = |ui: &mut egui::Ui, outbox: &mut Vec<Message>, slots: &mut [Rect; 3]| {
+                let mut content = ui.new_child(egui::UiBuilder::new().max_rect(bounds));
+                let handles = root_row(
+                    &mut content,
+                    &tree,
+                    Some(docs.join("note.md").as_path()),
+                    outbox,
+                );
+                for (slot, response) in slots.iter_mut().zip([
+                    handles.pick.expect("选目录按钮在场"),
+                    handles.new.expect("新建按钮在场"),
+                    handles.refresh.expect("刷新按钮在场"),
+                ]) {
+                    *slot = response.rect;
+                }
+            };
+
+            ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width + 40.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| render(ui, &mut outbox, &mut rects),
+            )
+            .drop_without_applying_deltas();
+            assert!(outbox.is_empty(), "仅渲染不产生消息");
+
+            for rect in rects {
+                assert!(rect.width() > 0.0, "按钮有可用宽度:{rect:?}");
+                assert!(
+                    rect.left() >= bounds.left() - 0.5 && rect.right() <= bounds.right() + 0.5,
+                    "按钮不得越出侧栏(宽 {width}):{rect:?},bounds={bounds:?}"
+                );
+                assert!(
+                    (rect.height() - crate::ui::tokens::TOOLBAR_H).abs() < 0.5,
+                    "按钮高取工具栏档位:{rect:?}"
+                );
+            }
+            for pair in rects.windows(2) {
+                assert!(pair[0].right() <= pair[1].left(), "有序不重叠:{rects:?}");
+            }
+
+            let click_at = |rect: Rect| {
+                let center = rect.center();
+                let click = |pressed| Event::PointerButton {
+                    pos: center,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                };
+                vec![Event::PointerMoved(center), click(true), click(false)]
+            };
+
+            // 三枚按钮各点一次,消息必须是三条互不相同的
+            let clicked: Vec<Rect> = rects.to_vec();
+            for (rect, expected) in clicked.iter().zip([
+                Message::FileTreeRootPick,
+                Message::FileTreeNewFileRequested(docs.clone()),
+                Message::FileTreeRefreshRequested,
+            ]) {
+                outbox.clear();
+                ctx.run_ui(
+                    RawInput {
+                        events: click_at(*rect),
+                        ..Default::default()
+                    },
+                    |ui| render(ui, &mut outbox, &mut rects),
+                )
+                .drop_without_applying_deltas();
+                assert_eq!(
+                    outbox,
+                    vec![expected],
+                    "点 {rect:?} 只发它自己那条消息,不得串"
+                );
+            }
+        }
+    }
+
+    /// 「新建」的目标目录口径:当前文档所在目录优先;没有落盘文档才回落
+    /// 树根;两者皆无返回 `None`(按钮不得发消息)。
+    #[test]
+    fn new_file_target_prefers_current_doc_dir() {
+        let root = Path::new("/vault");
+        assert_eq!(
+            new_file_target(Some(Path::new("/vault/docs/deep/note.md")), Some(root)),
+            Some(PathBuf::from("/vault/docs/deep")),
+            "当前文档所在目录优先于树根"
+        );
+        assert_eq!(
+            new_file_target(None, Some(root)),
+            Some(PathBuf::from("/vault")),
+            "无落盘文档回落树根"
+        );
+        assert_eq!(new_file_target(None, None), None, "两者皆无则不发消息");
     }
 
     /// rail 五枚视图 tab 在同一条纵带上排得下。

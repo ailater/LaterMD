@@ -796,6 +796,19 @@ impl LaterMdApp {
             }
         }
 
+        // 文件栏「新建」浮窗:草稿与目标目录由归约挂在 `file_tree.new_file`,
+        // 这里只收草稿、按名称合法性禁用「创建」、点按只发消息 —— 落盘、
+        // 缓存失效与开标签全在归约(与图片框同一纪律:对话框不碰 IO)。
+        if let Some(new_file) = self.state.file_tree.new_file.as_mut() {
+            let (confirm, cancel) = crate::ui::sidebar::new_file_dialog(ui, new_file);
+            if confirm.clicked() {
+                outbox.push(Message::FileTreeNewFileConfirmed);
+            }
+            if cancel.clicked() {
+                outbox.push(Message::FileTreeNewFileCancelled);
+            }
+        }
+
         // 图片框(docs/image-plan.md A/B/C 三段):只收 alt 与 url 草稿及
         // 图床选择,插入在归约走 `compose::insert_image`;地址为空时「插入」
         // 按钮在对话框里已被禁用。点击插入时草稿还在 state 上,克隆进消息

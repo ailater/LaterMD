@@ -23,6 +23,10 @@ use crate::theme;
 /// 持久化文件名,与 `settings.json` 同目录。
 const SETTINGS_FILE: &str = "file_tree.json";
 
+/// 新建文件时未指定后缀的缺省扩展名(不带点)。树只列 [`MARKDOWN_EXTENSIONS`]
+/// 里的扩展名,补别的后缀等于建一个树里看不见的文件。
+const DEFAULT_MD_EXT: &str = "md";
+
 /// 单个目录在树里的直接子项显示上限(大目录保护:遍历整层收集计数,但
 /// UI 只渲染前这么多项,剩余进截断提示行)。
 pub const MAX_CHILDREN: usize = 500;
@@ -43,6 +47,21 @@ pub struct FileTreeState {
     pub expanded: HashMap<PathBuf, bool>,
     /// 已列举的子项缓存。键缺席 + 对应目录展开中 = 待列举。
     pub children: HashMap<PathBuf, DirChildren>,
+    /// 新建文件浮窗的输入状态;`Some` 时 UI 显示浮窗。同一时间至多一个。
+    pub new_file: Option<NewFileDraft>,
+}
+
+/// 新建文件浮窗的输入状态(#see `Message::FileTreeNewFileRequested` 的
+/// 归约 [`crate::filetree::create_markdown`])。
+///
+/// 目标目录按**稳定路径**存而非索引:浮窗开着期间用户可以继续在树里点
+/// 别的行、切根目录,存索引会让「建到哪里」漂移到别处。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFileDraft {
+    /// 建文件的目录(当前文档所在目录,或文件树根)。
+    pub dir: PathBuf,
+    /// 文件名草稿(可带可不带 `.md`,`create_markdown` 会补)。
+    pub draft: String,
 }
 
 impl FileTreeState {
@@ -77,6 +96,26 @@ impl FileTreeState {
             self.expanded.insert(current.to_path_buf(), true);
             dir = current.parent();
         }
+    }
+
+    /// 丢掉某目录的子项缓存,使其下次 [`Self::ensure_loaded`] 重新列举。
+    ///
+    /// 外部写盘(新建文件)后调用:缓存是懒加载的产物,不在这里丢,新文件
+    /// 在本会话里永远不出现(树又不是每帧重扫)。只丢这一项 —— 兄弟目录
+    /// 的缓存与本次写盘无关,重扫它们只是白花 IO。
+    pub fn invalidate(&mut self, dir: &Path) {
+        self.children.remove(dir);
+    }
+
+    /// 丢弃全部子项缓存:下一次 [`Self::ensure_loaded`] 重扫「根 + 展开中」
+    /// 的每一项(外部增删改文件、`.gitignore` 变化后手动刷新走这里)。
+    ///
+    /// 清空整个 map 就是精确的「全部可见项」—— `children` 的键**只可能**
+    /// 是根与 `expanded` 里为真的目录(唯一的写入口是
+    /// [`Self::ensure_loaded`],`invalidate` 只做删除),不存在需要保留
+    /// 的不可见项。
+    pub fn refresh(&mut self) {
+        self.children.clear();
     }
 
     /// 补齐「根目录 + 展开中目录」的子项缓存。每帧归约末尾调用:键缺席才
@@ -256,6 +295,76 @@ fn is_markdown(path: &Path) -> bool {
                 .iter()
                 .any(|known| ext.eq_ignore_ascii_case(known))
         })
+}
+
+/// 在 `dir` 下新建一个空 Markdown 文件,返回落盘路径。
+///
+/// 名称口径(与 [`crate::assets`] 的图片入库同名逻辑同款,只是没有扩展名
+/// 白名单那一层):
+///
+/// - 空名(trim 后)拒绝 —— 调用方该禁用确认按钮,这里兜住直发的消息;
+/// - 含路径分隔符或 `.`/`..` 拒绝(不允许借文件名逃出目录);
+/// - 缺后缀补 `.md`;**已有扩展名但不是 Markdown 也照样补**(树只列
+///   Markdown,建 `x.txt` 等于建一个用户看不见的文件);
+/// - 撞名按 `-1`/`-2` 递增让开,不静默覆盖已有文档(覆盖是破坏性的,
+///   而这里只是「点了一下新建」)。
+///
+/// 写盘失败带路径,由调用方原样落提示行。
+pub fn create_markdown(dir: &Path, name: &str) -> Result<PathBuf, CreateError> {
+    let trimmed = name.trim();
+    if !valid_file_name(trimmed) {
+        return Err(CreateError {
+            path: dir.join(name),
+            source: "文件名不能为空,也不能包含路径分隔符".into(),
+        });
+    }
+    let wanted = if is_markdown(Path::new(trimmed)) {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}.{DEFAULT_MD_EXT}")
+    };
+    let path = dir.join(unique_name(dir, &wanted));
+    std::fs::write(&path, b"").map_err(|source| CreateError {
+        path: path.clone(),
+        source: source.into(),
+    })?;
+    Ok(path)
+}
+
+/// 纯文件名:非空、不是 `.`/`..`、不带路径分隔符(与 `assets::valid_name`
+/// 同口径;此处另有一份是因为那是图片入库的私有判据,不该由它决定
+/// 文档能不能建)。UI 层用它给「创建」按钮判禁用,与 [`create_markdown`]
+/// 的拒绝条件是同一份判据 —— 两处各写一遍必然漂移。
+pub fn valid_file_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
+}
+
+/// 撞名递增让开:`x.md` 已在则试 `x-1.md`,再撞试 `x-2.md`。与
+/// `assets::unique_name` 同款算法(`-N` 插在扩展名前)。
+fn unique_name(dir: &Path, name: &str) -> String {
+    let mut candidate = name.to_owned();
+    let mut seq: u32 = 0;
+    while dir.join(&candidate).exists() {
+        seq += 1;
+        candidate = match name.rsplit_once('.') {
+            Some((stem, ext)) => format!("{stem}-{seq}.{ext}"),
+            None => format!("{name}-{seq}"),
+        };
+    }
+    candidate
+}
+
+/// 新建 Markdown 失败:带路径与原因,调用方原样落提示行。
+#[derive(Debug)]
+pub struct CreateError {
+    path: PathBuf,
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl fmt::Display for CreateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "新建失败 {}: {}", self.path.display(), self.source)
+    }
 }
 
 /// 持久化的文件树设置(根目录 + 最近列表)。
@@ -579,6 +688,82 @@ mod tests {
                 recents: Vec::new(),
             }
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 新建:落盘为 Markdown、缺后缀补 `.md`、撞名让开(不覆盖既有文档)。
+    ///
+    /// 上界独立于实现:这里断言的是盘上真实存在的文件名,不引用任何
+    /// 参与造名的常量 —— `unique_name` 改算法(比如换成 `_1`)时断言会红,
+    /// 而不会跟着一起变。
+    #[test]
+    fn create_markdown_writes_file_and_yields_on_collision() {
+        let dir = temp_tree("create");
+
+        let first = create_markdown(&dir, "笔记").unwrap();
+        assert_eq!(first, dir.join("笔记.md"), "缺后缀补 .md");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "", "空文档");
+        assert!(first.is_file(), "真的落盘了,不只是返回路径");
+
+        // 撞名:既有 `笔记.md` 不许被覆盖,让开到 `-1`
+        let second = create_markdown(&dir, "笔记.md").unwrap();
+        assert_ne!(second, first, "撞名不得返回同一路径");
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "",
+            "既有文件内容零变化(不静默覆盖)"
+        );
+
+        // 非 Markdown 后缀也补 `.md`:树只列 Markdown,建 `x.txt` 用户看不见
+        let third = create_markdown(&dir, "x.txt").unwrap();
+        assert_eq!(third.file_name().unwrap(), "x.txt.md");
+
+        // 非法名拒绝(不落任何文件)
+        for bad in ["", "   ", "a/b", "a\\b", ".", ".."] {
+            assert!(create_markdown(&dir, bad).is_err(), "{bad:?} 应被拒绝");
+        }
+        assert_eq!(
+            list_children(&dir, MAX_CHILDREN).entries.len(),
+            3,
+            "非法名一个都没落盘"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 新建后树里要能立刻看到:缓存是懒加载的,不显式失效则新文件在本会话
+    /// 里永远不出现(`ensure_loaded` 只补缺席的键)。
+    #[test]
+    fn invalidate_makes_new_file_visible_after_reload() {
+        let dir = temp_tree("invalidate");
+        std::fs::create_dir(dir.join("docs")).unwrap();
+
+        let mut tree = FileTreeState::default();
+        tree.set_root(dir.clone());
+        tree.toggle(&dir.join("docs"));
+        tree.ensure_loaded();
+        assert_eq!(entry_names(&tree.children[&dir]), ["docs"]);
+        assert_eq!(
+            entry_names(&tree.children[&dir.join("docs")]),
+            Vec::<&str>::new()
+        );
+
+        let created = create_markdown(&dir.join("docs"), "新文档").unwrap();
+        tree.ensure_loaded();
+        assert!(
+            entry_names(&tree.children[&dir.join("docs")]).is_empty(),
+            "未失效前缓存不重扫,新文件不可见(这是本测试要防的回归)"
+        );
+
+        tree.invalidate(&dir.join("docs"));
+        tree.ensure_loaded();
+        assert_eq!(
+            entry_names(&tree.children[&dir.join("docs")]),
+            ["新文档.md"],
+            "失效后下一次归约即列出新文件"
+        );
+        // 只丢指定目录:兄弟目录的缓存不动
+        assert!(tree.children.contains_key(&dir), "兄弟目录缓存保留");
+        assert!(created.is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
