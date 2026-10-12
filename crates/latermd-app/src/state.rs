@@ -2880,27 +2880,59 @@ impl State {
         if self.layout.zen {
             self.toggle_zen();
         }
+        let entering_live = self.render_mode == RenderMode::Source;
         self.render_mode = self.render_mode.opposite();
         self.layout.render_mode = Some(self.render_mode);
         if self.render_mode == RenderMode::Live {
             self.layout.pre_live_right = Some(self.layout.right);
             self.layout.right = false;
             let tab = self.tabs.current_mut();
-            // 切入 Live 先进入浏览态：打开/切换文档不自动抢焦点，用户
-            // 只有双击内容后才进入块级写作。
-            tab.live.browse_only = true;
+            // 打开/切换文档没有源码插入点时保持浏览态；显式从源码切入
+            // 且已有插入点时，把它交给对应 Live 块。
             tab.live.browse_enabled = true;
             tab.live.active = None;
             tab.live.pending_caret = None;
             tab.live.pending_range = None;
             let byte = tab.cursor.byte;
-            // 小文档立即建立块表；大文档把解析留给 Live 首帧，避免
-            // 状态归约与模式动画同帧阻塞 UI。
-            if tab.editor.text().len() <= 64 * 1024 {
-                tab.live.sync(&tab.editor, byte);
+            // 显式从源码切入 Live 时保留源码插入点；新打开/切换文档时
+            // cursor.byte 通常为空，仍保持浏览态，等待用户双击。
+            if entering_live {
+                if let Some(byte) = byte {
+                    tab.live.browse_only = false;
+                    tab.live.sync(&tab.editor, Some(byte));
+                    if let Some(index) = tab.live.block_containing(byte) {
+                        let local = tab.editor.byte_to_char(byte)
+                            - tab.editor.byte_to_char(tab.live.blocks[index].start);
+                        tab.live.active = Some(index);
+                        tab.live.pending_caret = Some((index, local));
+                        tab.live.caret_follow = false;
+                    } else {
+                        tab.live.browse_only = true;
+                    }
+                } else {
+                    tab.live.browse_only = true;
+                }
+            } else {
+                tab.live.browse_only = true;
             }
-        } else if let Some(previous) = self.layout.pre_live_right.take() {
-            self.layout.right = previous;
+            // 小文档立即建立块表；大文档把解析留给 Live 首帧，避免
+            // 状态归约与模式动画同帧阻塞 UI。显式保留插入点时已在上面
+            // 同步；浏览态也建立块表以便首帧直接显示富渲染。
+            if tab.live.blocks.is_empty() && tab.editor.text().len() <= 64 * 1024 {
+                tab.live.sync(&tab.editor, None);
+            }
+        } else {
+            // 离开 Live 前把最后一个活动插入点交给源码 TextEdit。源码和
+            // Live 使用不同的稳定 widget id，若不显式写回，切换后 egui
+            // 会显示文本却丢掉原来的插入位置和焦点。
+            let tab = self.tabs.current_mut();
+            if let Some(byte) = tab.cursor.byte {
+                let char_idx = tab.editor.byte_to_char(byte);
+                tab.pending_selection = Some((char_idx, char_idx));
+            }
+            if let Some(previous) = self.layout.pre_live_right.take() {
+                self.layout.right = previous;
+            }
         }
     }
 
@@ -5793,6 +5825,38 @@ mod tests {
 
         state.apply(Message::ToggleLivePreview);
         assert_eq!(state.render_mode, RenderMode::Source);
+    }
+
+    #[test]
+    fn switching_modes_preserves_the_writing_caret() {
+        let mut state = State::default();
+        let tab = state.tabs.current_mut();
+        tab.editor.replace_all("第一段\n\n第二段\n");
+        let byte = tab.editor.text().find("第二").expect("第二段存在");
+        let char_idx = tab.editor.byte_to_char(byte);
+        tab.cursor.byte = Some(byte);
+
+        // 源码 → Live:已有源码插入点直接成为活动块的 pending caret。
+        state.apply(Message::ToggleLivePreview);
+        let tab = state.tabs.current();
+        assert_eq!(state.render_mode, RenderMode::Live);
+        assert!(!tab.live.browse_only, "显式切换应保留正在写作的插入点");
+        assert_eq!(tab.live.active, Some(1));
+        assert_eq!(
+            tab.live.pending_caret,
+            Some((1, 0)),
+            "Live 活动块收到源码插入点"
+        );
+
+        // Live → 源码:反向把同一插入点交给源码 TextEdit。
+        state.apply(Message::ToggleLivePreview);
+        let tab = state.tabs.current();
+        assert_eq!(state.render_mode, RenderMode::Source);
+        assert_eq!(
+            tab.pending_selection,
+            Some((char_idx, char_idx)),
+            "源码 TextEdit 收到 Live 插入点"
+        );
     }
 
     #[test]
