@@ -114,6 +114,23 @@ pub(super) fn install(ctx: &egui::Context) -> Option<String> {
         defs.font_data
             .insert(name.into(), Arc::new(system_face(bytes, weight)));
     }
+    // UI 推广副本的 mac 修正(#43 M2 UI 推广,2026-10-12):上方
+    // build_definitions 把 UI 链尾 CJK 副本对齐到 Inter,但本函数随后把
+    // UI 链头换成了 SF NS —— 副本目标必须跟着链头走。用 SF NS 表值重写
+    // 同名键(与 PREVIEW 副本「SF 就 CJK」方向相反,同 editor-mono 的
+    // 「CJK 就链头」);SF NS 表值解析失败则保留 Inter 对齐版(基线残差
+    // 一个 1/32 网格步,由取证断言的网格等价容差吸收)。
+    if let Some(sf_ui_target) = parse_vertical_tables(&sf, 0).map(|t| t.vertical_metrics_em()) {
+        if let Some(patched) = override_vertical_metrics(&cjk, regular, sf_ui_target) {
+            defs.font_data.insert(
+                CJK_PROPORTIONAL_UI.into(),
+                Arc::new(FontData {
+                    index: regular,
+                    ..FontData::from_owned(patched)
+                }),
+            );
+        }
+    }
     if let Ok(mono) = std::fs::read("/System/Library/Fonts/SFNSMono.ttf") {
         if let Some(target) = parse_vertical_tables(&mono, 0).map(|t| t.vertical_metrics_em()) {
             if let Some(patched) = override_vertical_metrics(&cjk, regular, target) {
