@@ -6156,16 +6156,19 @@ mod tests {
                 path: note.clone(),
                 line_no: 1,
                 line_text: "foo bar".into(),
+                match_span: 0..0,
             },
             crate::search::SearchResult {
                 path: note.clone(),
                 line_no: 2,
                 line_text: "foo again".into(),
+                match_span: 0..0,
             },
             crate::search::SearchResult {
                 path: other.clone(),
                 line_no: 1,
                 line_text: "没有命中".into(),
+                match_span: 0..0,
             },
         ];
 
@@ -6230,11 +6233,13 @@ mod tests {
                 path: clean.clone(),
                 line_no: 1,
                 line_text: "alpha beta".into(),
+                match_span: 0..0,
             },
             crate::search::SearchResult {
                 path: dirty.clone(),
                 line_no: 1,
                 line_text: "beta 原稿".into(),
+                match_span: 0..0,
             },
         ];
         state.apply(Message::SearchReplaceAllRequested);
@@ -6288,11 +6293,13 @@ mod tests {
                 path: good.clone(),
                 line_no: 1,
                 line_text: "foo".into(),
+                match_span: 0..0,
             },
             crate::search::SearchResult {
                 path: bin.clone(),
                 line_no: 1,
                 line_text: "foo …".into(),
+                match_span: 0..0,
             },
         ];
         state.apply(Message::SearchReplaceAllRequested);
@@ -6329,6 +6336,7 @@ mod tests {
             path: path.clone(),
             line_no: 1,
             line_text: "foo".into(),
+            match_span: 0..0,
         }];
         for status in [
             crate::search::SearchStatus::Idle,
@@ -6388,6 +6396,7 @@ mod tests {
             path,
             line_no: 1,
             line_text: "foo".into(),
+            match_span: 0..0,
         };
         state.search.hits = vec![hit(a.clone())];
         state.apply(Message::SearchReplaceAllRequested);
@@ -6443,6 +6452,7 @@ mod tests {
             path: dir.join("stale.md"),
             line_no: 1,
             line_text: "旧根的残留".into(),
+            match_span: 0..0,
         });
 
         state.apply(Message::SearchQueryChanged);
@@ -6493,6 +6503,7 @@ mod tests {
             path: dir.join("old.md"),
             line_no: 1,
             line_text: "旧根结果".into(),
+            match_span: 0..0,
         });
 
         state.apply(Message::FileTreeRootSelected(dir.clone()));
