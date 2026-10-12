@@ -763,6 +763,11 @@ fn search_controls(
                         "搜索…"
                     })
                     .desired_width(input_width)
+                    // 垂直 margin 归零 + vertical_align(Center):出厂 frame(上
+                    // 下各 2px)让输入框总高 26px 且文字**贴顶**排,渲染中心与
+                    // 22px 按钮错开 —— 截图回归的「不在一条线上」。
+                    .margin(egui::Margin::symmetric(4, 0))
+                    .vertical_align(egui::Align::Center)
                     .min_size(egui::vec2(0.0, mode_size.y))
                     .show(ui)
                     .response
@@ -2427,6 +2432,95 @@ mod tests {
             .drop_without_applying_deltas();
             assert_eq!(search.replace_open, expected);
             assert!(outbox.is_empty(), "展开替换不触发搜索");
+        }
+    }
+
+    /// 直驱真实路径(Panel frame + sidebar::ui + ScrollArea)的搜索行守卫:
+    /// 几何测试的 bounds 是按 rail/边距/滚动条推算的,真机一旦多出哪怕几
+    /// px 消耗(新 margin、新角标),输入框就会把 `.*` 挤出可用区。这条测
+    /// 试走完整 sidebar::ui,从绘制层断言三枚按钮与输入框 hint 同一行。
+    #[test]
+    fn search_row_survives_the_real_sidebar_path() {
+        for sidebar_width in [tokens::SIDEBAR_MIN_W, 240.0, 320.0] {
+            let ctx = egui::Context::default();
+            let (tree, _root) = sample_tree();
+            let output = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(sidebar_width + 200.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut open = true;
+                    egui::Panel::left("nav-search-row")
+                        .resizable(true)
+                        .default_size(sidebar_width)
+                        .size_range(tokens::SIDEBAR_MIN_W..=400.0)
+                        .frame(
+                            egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin {
+                                left: 0,
+                                ..egui::Margin::symmetric(8, 2)
+                            }),
+                        )
+                        .show_collapsible(ui, &mut open, |ui| {
+                            let mut search = SearchState {
+                                query: "needle".into(),
+                                ..SearchState::default()
+                            };
+                            let backlinks = BacklinkState::default();
+                            let mut outbox = Vec::new();
+                            let mut tab = SidebarTab::Search;
+                            super::ui(
+                                ui,
+                                &mut tab,
+                                &tree,
+                                None,
+                                OutlineView {
+                                    items: &[],
+                                    cursor_byte: None,
+                                },
+                                &mut search,
+                                &GitPanelState::default(),
+                                &backlinks,
+                                &mut outbox,
+                            );
+                        });
+                },
+            );
+            let mut centers: Vec<(String, f32)> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(text)
+                        if matches!(
+                            text.galley.job.text.as_str(),
+                            "needle" | "Aa" | "ab" | ".*"
+                        ) =>
+                    {
+                        Some((
+                            text.galley.job.text.clone(),
+                            text.visual_bounding_rect().center().y,
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect();
+            output.drop_without_applying_deltas();
+            centers.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(
+                centers.len(),
+                4,
+                "四个文本都应可见(搜索词 + 三枚按钮): {centers:?}"
+            );
+            let (_, base_y) = centers[0];
+            for (label, y) in &centers {
+                assert!(
+                    (y - base_y).abs() < 1.0,
+                    "「{label}」与搜索词不在一条线上(y={y}, 基准={base_y}, 侧栏 {sidebar_width}px)"
+                );
+            }
         }
     }
 
