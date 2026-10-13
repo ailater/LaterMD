@@ -2307,12 +2307,28 @@ mod tests {
     /// `resize` response 与 `PanelState` —— 首版那组测试手工
     /// `insert_persisted` 造 PanelState,测的是一条**生产中不存在的路径**,
     // 于是「线不跟手」这个真 bug 从它下面溜了过去(2026-10-13)。
+    /// `divider_geometry` 的交回值。
+    ///
+    /// **带 `width_px`** 是因为 hover 反馈的主通道是**线宽**(1px → 3px),
+    /// 只交回颜色的话那条测试压根看不见加粗 —— 2026-10-13 坤哥实测
+    /// 「没看见 hover 加粗」而当时颜色通道明明是生效的。
+    struct DividerProbe {
+        /// 线中心的 x(逻辑像素)。
+        x: f32,
+        /// 线色。
+        color: egui::Color32,
+        /// 面板底色,用来算与线色的落差。
+        content: egui::Color32,
+        /// 线宽(物理像素)。idle 应为 1,hover 应 ≥3。
+        width_px: f32,
+    }
+
     fn divider_geometry(
         app: &mut LaterMdApp,
         ctx: &egui::Context,
         screen: Rect,
         events: Vec<Event>,
-    ) -> Option<(f32, egui::Color32, egui::Color32)> {
+    ) -> Option<DividerProbe> {
         // 线必须落在**预览面板边界**上,故以边界为锚来挑线,而不是「取最左的
         // 那根」。实测 hover/drag 帧里画面上会同时存在多根贯穿全高的竖线
         // —— 本模块的线在 `边界 - 0.5`,egui 自己在 resize 边界又画一根
@@ -2363,14 +2379,19 @@ mod tests {
         let content = ctx
             .data(|d| d.get_temp::<egui::Color32>(egui::Id::new("__divider_probe_content")))
             .expect("探针应在闭包里写入");
-        let mut spans: Vec<(f32, f32, egui::Color32)> = Vec::new();
-        fn spans_of(shape: &egui::Shape, out: &mut Vec<(f32, f32, egui::Color32)>) {
+        let mut spans: Vec<(f32, f32, egui::Color32, f32)> = Vec::new();
+        fn spans_of(shape: &egui::Shape, out: &mut Vec<(f32, f32, egui::Color32, f32)>) {
             match shape {
                 egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| spans_of(s, out)),
                 egui::Shape::LineSegment { points, stroke }
                     if (points[0].x - points[1].x).abs() < 0.01 && stroke.width > 0.0 =>
                 {
-                    out.push((points[0].x, (points[1].y - points[0].y).abs(), stroke.color))
+                    out.push((
+                        points[0].x,
+                        (points[1].y - points[0].y).abs(),
+                        stroke.color,
+                        stroke.width,
+                    ))
                 }
                 _ => {}
             }
@@ -2393,13 +2414,18 @@ mod tests {
         let (anchor, full) = (anchor?, full?);
         spans
             .into_iter()
-            .filter(|(_, len, _)| *len > screen.height() * 0.7)
-            .filter(|(x, _, color)| (*x - anchor).abs() <= 1.5 && color.a() > 0)
-            .find(|(_, _, color)| {
+            .filter(|(_, len, _, _)| *len > screen.height() * 0.7)
+            .filter(|(x, _, color, _)| (*x - anchor).abs() <= 1.5 && color.a() > 0)
+            .find(|(_, _, color, _)| {
                 let gap = luma_gap(*color, content);
                 gap > 0.05 && gap <= full
             })
-            .map(|(x, _, color)| (x, color, content))
+            .map(|(x, _, color, width)| DividerProbe {
+                x,
+                color,
+                content,
+                width_px: width * ctx.pixels_per_point(),
+            })
     }
 
     /// 建一个「只有预览栏」的三栏应用实例,并空跑到布局稳定。
@@ -2473,14 +2499,22 @@ mod tests {
             for (w, h) in [(1400.0_f32, 900.0_f32), (900.0, 700.0)] {
                 let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(w, h));
                 let (ctx, mut app) = preview_only_app(screen, dark);
-                let (x, color, content) = divider_geometry(&mut app, &ctx, screen, vec![])
+                let probe = divider_geometry(&mut app, &ctx, screen, vec![])
                     .unwrap_or_else(|| panic!("dark={dark} {w}x{h}: 预览左缘应有分隔线"));
                 let full = shell_full_gap(&ctx);
-                let ratio = luma_gap(color, content) / full * 100.0;
+                let ratio = luma_gap(probe.color, probe.content) / full * 100.0;
                 assert!(
                     (25.0..=60.0).contains(&ratio),
-                    "dark={dark} {w}x{h}: 空闲线深度 {ratio:.0}%(x={x:.1},全距 {full:.2} 灰阶)\
-                     应落在 25..=60% —— 太浅等于没有线,太深把面板切成两半"
+                    "dark={dark} {w}x{h}: 空闲线深度 {ratio:.0}%(x={:.1},全距 {full:.2} 灰阶)\
+                     应落在 25..=60% —— 太浅等于没有线,太深把面板切成两半",
+                    probe.x
+                );
+                // 空闲必须是 1 物理像素:「hover 加粗」要有对比基准,空闲若也
+                // 是 3px,加粗就没有意义了(且面板会被切成两半)。
+                assert!(
+                    (probe.width_px - 1.0).abs() < 0.01,
+                    "dark={dark} {w}x{h}: 空闲线宽应为 1 物理像素,实得 {:.2}",
+                    probe.width_px
                 );
             }
         }
@@ -2497,32 +2531,65 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1400.0, 900.0));
         for dark in [false, true] {
             let (ctx, mut app) = preview_only_app(screen, dark);
-            let (edge, idle, content) =
-                divider_geometry(&mut app, &ctx, screen, vec![]).expect("应有分隔线");
+            let idle_probe = divider_geometry(&mut app, &ctx, screen, vec![]).expect("应有分隔线");
+            let (edge, idle, content) = (idle_probe.x, idle_probe.color, idle_probe.content);
             let y = screen.height() / 2.0;
             let at = |app: &mut LaterMdApp, ctx: &egui::Context, x: f32| {
                 divider_geometry(app, ctx, screen, vec![Event::PointerMoved(Pos2::new(x, y))])
                     .expect("hover 帧应有线")
-                    .1
             };
             for d in [0.0_f32, 3.0, 5.5] {
                 let (in_pos, in_neg) = (at(&mut app, &ctx, edge + d), at(&mut app, &ctx, edge - d));
-                assert_eq!(
-                    luma_gap(in_pos, content),
-                    luma_gap(in_neg, content),
-                    "dark={dark}: 距边 {d}px 应两侧对称(命中带以边界为中心)"
-                );
+
+                // ① **加粗是主通道,先断它**。2026-10-13 坤哥实测「没看见
+                // hover 加粗」时颜色通道明明是生效的 —— 1px 线的深浅变化要
+                // 「盯住看」才分辨得出,指针扫过时每帧只停几十毫秒。故这条
+                // 断言独立于颜色,少一个通道就红。
+                //
+                // 硬编码 ≥2.5 而不引用 `PREVIEW_DIVIDER_HOT_W`:后者就是被
+                // 断言的实现,拿它当期望值 = 断言自我满足(同 2026-10-08
+                // nav 段高度 / 2026-10-13 hot_zone 两处事故)。2.5 是「肉眼
+                // 一眼可辨为变粗」的下沿,留出量化余量。
                 assert!(
-                    luma_gap(in_pos, content) > luma_gap(idle, content),
+                    in_pos.width_px >= 2.5,
+                    "dark={dark}: 距边 {d}px 在带内应已**加粗**(≥2.5 物理像素),\
+                     实得 {:.2}(空闲 {:.2})。加粗是 hover 的主通道,颜色只是辅助",
+                    in_pos.width_px,
+                    idle_probe.width_px
+                );
+                // 加粗必须仍**以边界为中心**:线心 `x` 不该因加粗而偏移。
+                assert!(
+                    (in_pos.x - in_neg.x).abs() <= 0.01 && (in_pos.x - edge).abs() <= 1.5,
+                    "dark={dark}: 距边 {d}px 两侧的线心应重合于边界({edge:.1}),\
+                     实得 +{:.2} / {:.2}",
+                    in_pos.x,
+                    in_neg.x
+                );
+
+                // ② 色深是辅助通道,方向不得反。
+                assert!(
+                    luma_gap(in_pos.color, content) > luma_gap(idle, content),
                     "dark={dark}: 距边 {d}px 在带内应已提亮。若反了,说明线色用了朝黑\
                      缩放的 gamma_multiply 而非朝底色 lerp"
                 );
-            }
-            for d in [9.0_f32, 40.0] {
                 assert_eq!(
-                    at(&mut app, &ctx, edge + d),
-                    idle,
+                    in_pos.color, in_neg.color,
+                    "dark={dark}: 距边 {d}px 应两侧对称(命中带以边界为中心)"
+                );
+            }
+            // 出带必须**完全回落**:线宽回 1px 且色回 idle,否则线会在半屏
+            // 范围内乱亮。
+            for d in [9.0_f32, 40.0] {
+                let far = at(&mut app, &ctx, edge + d);
+                assert_eq!(
+                    far.color, idle,
                     "dark={dark}: 距边 {d}px 已超出命中带,应回落到空闲色"
+                );
+                assert!(
+                    (far.width_px - idle_probe.width_px).abs() < 0.01,
+                    "dark={dark}: 距边 {d}px 应把线宽收回到空闲的 {:.2},实得 {:.2}",
+                    idle_probe.width_px,
+                    far.width_px
                 );
             }
         }
@@ -2596,7 +2663,7 @@ mod tests {
 
         let start_x = divider_geometry(&mut app, &ctx, screen, vec![])
             .expect("三栏布局下预览左缘应有分隔线")
-            .0;
+            .x;
         // 线的位置 = 预览面板左缘;据此算出指针起点(压在边界上)。
         let press_y = screen.height() / 2.0;
         let press = Pos2::new(start_x, press_y);
@@ -2623,7 +2690,7 @@ mod tests {
             );
             let x = divider_geometry(&mut app, &ctx, screen, vec![])
                 .expect("拖动过程中线仍在")
-                .0;
+                .x;
             xs.push(x);
         }
         frame(
