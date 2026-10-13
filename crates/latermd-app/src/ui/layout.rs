@@ -461,6 +461,21 @@ impl LaterMdApp {
             .clamp(tokens::PREVIEW_MIN_W, 880.0);
         crate::ui::workbench::restore_panel_width(ui, "preview", self.state.layout.right_width);
         let right = &mut self.state.layout.right;
+        // 拖动命中半径**只在预览面板这一帧**局部抬高(出厂 3.0 → 6.0,
+        // 命中带宽 6px → 12px)。理由与取值见
+        // [`crate::ui::tokens::PREVIEW_DIVIDER_GRAB`]:6px 带宽落在同底色的
+        // 面板之间,没有任何视觉线索指向它,实测完全找不到可拖处。
+        //
+        // **必须局部改而不是改全局 `Style`**:egui 的 resize 半径是
+        // `Style.interaction` 上的单值,全局抬高会连带 nav 右缘 ——
+        // 那里紧贴编辑区正文,凭空多出 6px 误吞点击的窗口(选中文字会
+        // 失手)。这里在 `show_collapsible` 前打一个临时 style,面板读完
+        // 即恢复,nav 与后续 panel 拿到的仍是出厂值。
+        let grab_radius = ui.style().interaction.resize_grab_radius_side;
+        let restore_grab = grab_radius != tokens::PREVIEW_DIVIDER_GRAB;
+        if restore_grab {
+            ui.style_mut().interaction.resize_grab_radius_side = tokens::PREVIEW_DIVIDER_GRAB;
+        }
         egui::Panel::right("preview")
             .resizable(true)
             .show_separator_line(false)
@@ -478,6 +493,10 @@ impl LaterMdApp {
                     // 保留字面量(设计系统 T2b 判例;inset::MD 另有 OVERLAY_MARGIN 消费)。
                     .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
                     .fill(crate::theme::shell(ui).content)
+                    // 左缘那根常显细线走 [`crate::ui::workbench::preview_divider`]
+                    // 自绘(画在面板内容之外的 layer 上),故此处仍为 NONE:
+                    // `Frame::stroke` 是**四边**描边,会给预览的顶/右/底也描上,
+                    // 而那三边紧贴标题栏/窗口缘,是多余的线。
                     .stroke(egui::Stroke::NONE),
             )
             .show_collapsible(ui, right, |ui| {
@@ -501,6 +520,12 @@ impl LaterMdApp {
                     &mut self.outbox,
                 );
             });
+        if restore_grab {
+            // nav 在本函数里**更早** show(③ 在 ④ 之前),它读到的已经是出厂值,
+            // 临时 style 全程没碰过它。这里恢复后,受影响的只有后续 panel
+            // ——而它们都不 resizable,故这行等价于「不留任何全局副作用」。
+            ui.style_mut().interaction.resize_grab_radius_side = grab_radius;
+        }
         crate::ui::workbench::remember_panel_width(
             ui,
             "preview",
@@ -687,6 +712,15 @@ impl LaterMdApp {
         // 不参与 panel 嵌套,画在 panel 之后取语义上的「最上层」。三栏与
         // 禅定两条布局路径共用,理由见 [`Self::draw_overlay_dialogs`]。
         self.draw_overlay_dialogs(ui);
+
+        // ⑥「对照预览」左缘的常显分隔线。**必须在全部 panel 之后**:
+        // 它走 `layer_painter` 在所有 panel 的 painter 之上单画一根线,
+        // 而同一 `Order::Middle` 内层序按 id 排,独立 id 天然压过 panel。
+        // 若挪到 ④ 之后立刻调,中央编辑区(⑤)的 `Frame::fill` 会盖掉整根线。
+        //
+        // 这条线与 egui 自带的 hover/drag 高亮线**并存且不冲突**:后者画在
+        // `parent_ui.painter()` 上(本函数下就是这层之下),且只在交互时出现。
+        crate::ui::workbench::preview_divider(ui, self.state.layout.right);
 
         // ⑥ 自绘窗口骨架之二:屏幕四边/四角的透明缩放命令区。**必须在
         // 全部 panel 之后分配**(机制见 ui::titlebar::edge_resize_zones 的
