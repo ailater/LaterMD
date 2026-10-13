@@ -326,17 +326,23 @@ pub fn header(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
     let search_width = if bar.width() < 1100.0 { 28.0 } else { 196.0 };
     let right_start = right - (HEADER_RIGHT_W - 196.0 + search_width);
     let sidebar_x = bar.left() + TRAFFIC_LIGHTS_W + 6.0;
+    let divider_x = sidebar_x + 40.0;
     let logo_size = crate::ui::tokens::BRAND_LOGO;
     let logo_y = center_y - logo_size / 2.0;
     let logo = Rect::from_min_size(
         egui::pos2(sidebar_x + 40.0 + 12.0, logo_y),
         egui::vec2(logo_size, logo_size),
     );
-    crate::ui::titlebar::paint_brand_logo(ui, logo);
-    let menu_rect = Rect::from_min_size(
-        egui::pos2(logo.right() + crate::ui::tokens::SPACE_SM, center_y - 12.0),
-        crate::ui::tokens::WINDOW_BTN,
-    );
+    // macOS 已经由系统标题栏提供应用身份，工作台标题栏不再重复显示
+    // LaterMD 品牌图标；Windows/Linux 保留原有品牌区布局。
+    if !cfg!(target_os = "macos") {
+        crate::ui::titlebar::paint_brand_logo(ui, logo);
+    }
+    let title_left = if cfg!(target_os = "macos") {
+        divider_x
+    } else {
+        logo.right() + crate::ui::tokens::SPACE_SM
+    };
     if action(
         ui,
         slot(sidebar_x, 28.0),
@@ -346,7 +352,6 @@ pub fn header(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
     ) {
         outbox.push(Command::ToggleSidebar.message());
     }
-    let divider_x = sidebar_x + 40.0;
     ui.painter().line_segment(
         [
             egui::pos2(divider_x, center_y - 8.0),
@@ -355,10 +360,7 @@ pub fn header(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
         separator(ui),
     );
     let title_rect = Rect::from_min_max(
-        egui::pos2(
-            menu_rect.left() - crate::ui::tokens::SPACE_SM,
-            center_y - 14.0,
-        ),
+        egui::pos2(title_left, center_y - 14.0),
         egui::pos2(right_start - HEADER_DRAG_W, center_y + 14.0),
     );
     if !state.layout.zen && crate::ui::tabs::visible(&state.tabs) {
