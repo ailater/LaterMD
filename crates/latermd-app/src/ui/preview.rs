@@ -16,6 +16,7 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 
 /// ai:// 链接的样式色(紫罗兰,与默认超链接色区分),按明暗主题取两档。
 /// `pub(crate)`:选区 AI 浮标(#61)同源取色 —— AI 专属色只有一个真源。
@@ -320,8 +321,24 @@ enum AiCardStatus {
 /// outbox(下一帧归约执行)。返回 true 拦下 vendored 层的默认
 /// `open_url`;非 ai:// 前缀返回 false,链接照常走系统浏览器。协议语义见
 /// `ai_link` 模块文档。
+/// 链接是否「可打开」(右键菜单挂点判定,context-menu-plan §3 M3):
+/// 排除应用内协议(`ai://` `wiki://` `emoji://` `task://` `hl://`
+/// `latermd://` 等)—— 它们的 click 各有归属(AI 流/开文档/字形/checkbox/
+/// 底色),菜单挂上去只会误导;`http(s)://`、`file://`、外部绝对地址与
+/// 相对路径(会被 `resolve_relative_images` 改写成 `file://`)可开。
+pub(crate) fn is_openable_href(href: &str) -> bool {
+    let schemes = [
+        crate::ai_link::SCHEME,
+        latermd_md::WIKI_SCHEME,
+        latermd_md::EMOJI_SCHEME,
+        latermd_md::TASK_SCHEME,
+        latermd_md::HIGHLIGHT_SCHEME,
+    ];
+    !schemes.iter().any(|scheme| href.starts_with(scheme))
+}
+
 struct AiLinkHandler {
-    clicked: RefCell<Vec<Message>>,
+    clicked: Rc<RefCell<Vec<Message>>>,
     color: egui::Color32,
     /// 当前明暗(wikilink 取色用,与 ai:// 走两套色)。
     dark_mode: bool,
@@ -348,7 +365,7 @@ struct AiLinkHandler {
 impl AiLinkHandler {
     fn new(color: egui::Color32, dark_mode: bool, text_color: egui::Color32, ai: &AiState) -> Self {
         Self {
-            clicked: RefCell::new(Vec::new()),
+            clicked: Rc::new(RefCell::new(Vec::new())),
             color,
             dark_mode,
             text_color,
@@ -555,6 +572,50 @@ impl LinkHandler for AiLinkHandler {
                 egui::Color32::WHITE,
             );
         }
+    }
+
+    /// 右键菜单(context-menu-plan §3 M3,vendor ①类暴露的 Response):
+    /// 普通链接(与 http/https 同类的可打开目标)弹「打开 / 复制链接地址」;
+    /// **协议链接不弹** —— `ai://` 在 `click` 里有流语义、`emoji://`/
+    /// `task://`/`hl://` 是字形/checkbox/底色标记不是链接,菜单挂在它们上
+    /// 只会制造「可点」的错觉(与 click 吞掉口径一致)。
+    ///
+    /// 挂点由 vendored galley 主路径驱动(secondary click → 指针下链接 →
+    /// 弹层打开期间逐帧回调),这里的判定只管「要不要挂」:
+    /// 协议一律返回;菜单打开期间闭包逐帧重入,消息只由点击产出。
+    ///
+    /// 注意 `Rc` 克隆:`clicked` 是 `Rc<RefCell<…>>`(不是裸 `RefCell`),
+    /// 闭包捕获的是共享句柄 —— 裸 `RefCell` 的 `clone()` 会给出独立副本,
+    /// 点击消息将被推进当帧即弃的副本(实测踩过)。
+    fn link_response(&self, _ui: &egui::Ui, _text: &str, href: &str, response: &egui::Response) {
+        if !is_openable_href(href) {
+            return;
+        }
+        let clicked = Rc::clone(&self.clicked);
+        response.context_menu(|ui| {
+            if ui.button("打开链接").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(href.to_owned()));
+            }
+            if ui.button("复制链接地址").clicked() {
+                clicked
+                    .borrow_mut()
+                    .push(Message::CopyText(href.to_owned()));
+            }
+        });
+    }
+
+    /// 图片右键:「在浏览器打开 / 复制图片地址」。`resolve_relative_images`
+    /// 已把相对地址改写为 `file://` 绝对 URI,系统浏览器直接可用。
+    fn image_response(&self, _ui: &egui::Ui, _alt: &str, url: &str, response: &egui::Response) {
+        let clicked = Rc::clone(&self.clicked);
+        response.context_menu(|ui| {
+            if ui.button("在浏览器打开").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url.to_owned()));
+            }
+            if ui.button("复制图片地址").clicked() {
+                clicked.borrow_mut().push(Message::CopyText(url.to_owned()));
+            }
+        });
     }
 
     fn is_block_code_widget(&self, language: Option<&str>) -> bool {
@@ -3711,5 +3772,187 @@ mod tests {
                 "既有 inline 构造照常渲染,缺 {piece}:{all:?}"
             );
         }
+    }
+
+    /// 测试构造:默认参数的 handler(颜色值不影响消息产出)。
+    fn handler_for_test() -> AiLinkHandler {
+        AiLinkHandler::new(
+            egui::Color32::WHITE,
+            false,
+            egui::Color32::BLACK,
+            &AiState::default(),
+        )
+    }
+
+    /// 测试渲染:与生产同构的 MarkdownLabel(展开 wikilink 后的单行渲染)。
+    fn render_doc(ui: &mut egui::Ui, doc: &str, handler: &AiLinkHandler) {
+        MarkdownLabel::new(egui::Id::new("preview-md"), doc)
+            .link_handler(handler)
+            .show(ui);
+    }
+
+    /// 右键菜单 M3(context-menu-plan §3 M3):`is_openable_href` 判定矩阵
+    /// —— 协议链接(流/字形/checkbox/标记)不弹菜单,普通 URL 弹。
+    #[test]
+    fn openable_href_matrix() {
+        assert!(is_openable_href("https://example.com/a"));
+        assert!(is_openable_href("http://example.com"));
+        assert!(is_openable_href("file:///tmp/x.png"));
+        assert!(is_openable_href("relative/doc.md"));
+        assert!(!is_openable_href(&format!(
+            "{}润色",
+            crate::ai_link::SCHEME
+        )));
+        assert!(!is_openable_href(&format!(
+            "{}架构",
+            latermd_md::WIKI_SCHEME
+        )));
+        assert!(!is_openable_href(&format!(
+            "{}😀",
+            latermd_md::EMOJI_SCHEME
+        )));
+        assert!(!is_openable_href(&format!("{}0", latermd_md::TASK_SCHEME)));
+        assert!(!is_openable_href(&format!(
+            "{}x",
+            latermd_md::HIGHLIGHT_SCHEME
+        )));
+    }
+
+    /// 预览链接右键菜单:右键链接 → 菜单在场 → 点「复制链接地址」产出
+    /// `Message::CopyText`。走真实 MarkdownLabel 渲染(vendored galley 主
+    /// 路径的 secondary-click 钩子),点击位置按字形量出。
+    #[test]
+    fn link_context_menu_copies_href() {
+        let doc = "前文 [链接甲](https://example.com/target) 后文\n";
+        let ctx = egui::Context::default();
+        let handler = handler_for_test();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 600.0));
+
+        // 帧一:量「链接甲」的中心
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(screen));
+                render_doc(&mut child, doc, &handler);
+            },
+        );
+        let target = output
+            .shapes
+            .iter()
+            .find_map(|clipped| {
+                let egui::epaint::Shape::Text(text) = &clipped.shape else {
+                    return None;
+                };
+                let char_index = text.galley.job.text.chars().position(|c| c == '链')?;
+                let rect = text
+                    .galley
+                    .pos_from_cursor(egui::text::CCursor::new(char_index));
+                Some(
+                    egui::pos2(0.0, 0.0)
+                        + (text.galley.mesh_bounds.min.to_vec2()
+                            + rect.min.to_vec2()
+                            + egui::vec2(2.0, rect.height() / 2.0)
+                            + text.pos.to_vec2()),
+                )
+            })
+            .expect("「链接甲」已渲染");
+        output.textures_delta.clear();
+
+        // 帧二/三:右键(按下 + 释放)
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![egui::Event::PointerMoved(target), press(target, true)],
+                ..Default::default()
+            },
+            |ui| {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(screen));
+                render_doc(&mut child, doc, &handler);
+            },
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![press(target, false)],
+                ..Default::default()
+            },
+            |ui| {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(screen));
+                render_doc(&mut child, doc, &handler);
+            },
+        );
+        output.textures_delta.clear();
+        assert!(
+            handler.clicked.borrow().is_empty(),
+            "右键只弹菜单,不产出消息"
+        );
+
+        // 菜单打开期间(指针已离开链接,galley 主路径逐帧重挂):帧四渲出
+        // 菜单条目,量「复制链接地址」中心;帧五/六左键点击。
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(screen));
+                render_doc(&mut child, doc, &handler);
+            },
+        );
+        let copy_pos = output
+            .shapes
+            .iter()
+            .find_map(|clipped| {
+                let egui::epaint::Shape::Text(text) = &clipped.shape else {
+                    return None;
+                };
+                (text.galley.job.text == "复制链接地址").then(|| {
+                    text.galley
+                        .mesh_bounds
+                        .translate(text.pos.to_vec2())
+                        .center()
+                })
+            })
+            .expect("菜单条目已渲染(弹层打开期间逐帧重挂)");
+        output.textures_delta.clear();
+
+        let primary = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        for events in [
+            vec![egui::Event::PointerMoved(copy_pos)],
+            vec![primary(copy_pos, true)],
+            vec![primary(copy_pos, false)],
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(screen));
+                    render_doc(&mut child, doc, &handler);
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(
+            handler.clicked.borrow().clone(),
+            vec![Message::CopyText("https://example.com/target".to_owned())]
+        );
     }
 }

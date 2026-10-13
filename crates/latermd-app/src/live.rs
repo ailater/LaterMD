@@ -323,7 +323,7 @@ struct LiveRichHandler<'a> {
     /// handler 同一纪律 —— 不用 `Visuals::dark()/light()` 推)。
     text_color: egui::Color32,
     dark_mode: bool,
-    clicked: std::cell::RefCell<Vec<Message>>,
+    clicked: std::rc::Rc<std::cell::RefCell<Vec<Message>>>,
 }
 
 impl<'a> LiveRichHandler<'a> {
@@ -338,7 +338,7 @@ impl<'a> LiveRichHandler<'a> {
             task_base,
             text_color,
             dark_mode,
-            clicked: std::cell::RefCell::new(Vec::new()),
+            clicked: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         }
     }
 
@@ -348,6 +348,40 @@ impl<'a> LiveRichHandler<'a> {
 }
 
 impl LinkHandler for LiveRichHandler<'_> {
+    /// 右键菜单(context-menu-plan §3 M3,与右栏预览同一挂点/同一判定):
+    /// Live 富渲染块的普通链接弹「打开 / 复制链接地址」,协议链接不弹。
+    /// 图片菜单不挂 —— 富渲染块的图片走 MarkdownLabel 同一 images 臂,
+    /// vendored 的 image_response 同样会回调到这里;Live 是编辑视图,
+    /// 「复制图片地址」的用场与预览一致,一并挂上。
+    fn link_response(&self, _ui: &egui::Ui, _text: &str, href: &str, response: &egui::Response) {
+        if !crate::ui::preview::is_openable_href(href) {
+            return;
+        }
+        let clicked = std::rc::Rc::clone(&self.clicked);
+        response.context_menu(|ui| {
+            if ui.button("打开链接").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(href.to_owned()));
+            }
+            if ui.button("复制链接地址").clicked() {
+                clicked
+                    .borrow_mut()
+                    .push(Message::CopyText(href.to_owned()));
+            }
+        });
+    }
+
+    fn image_response(&self, _ui: &egui::Ui, _alt: &str, url: &str, response: &egui::Response) {
+        let clicked = std::rc::Rc::clone(&self.clicked);
+        response.context_menu(|ui| {
+            if ui.button("在浏览器打开").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url.to_owned()));
+            }
+            if ui.button("复制图片地址").clicked() {
+                clicked.borrow_mut().push(Message::CopyText(url.to_owned()));
+            }
+        });
+    }
+
     fn is_block_code_widget(&self, language: Option<&str>) -> bool {
         self.mermaid.is_block_code_widget(language)
     }

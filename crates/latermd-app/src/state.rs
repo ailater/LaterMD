@@ -368,9 +368,9 @@ pub struct State {
     /// 的当帧末被清空(时序红线,`edit_events` 模块文档)。取走即清,
     /// 跨帧不滞留;同帧多条动作(连点菜单)按序排队,不互相顶掉。
     pub(crate) pending_edit_action: Vec<crate::edit_events::EditAction>,
-    /// 待写入系统剪贴板的文本(`Message::FileTreeCopyPath` 的落点):
-    /// state 没有 `egui::Context`,`LaterMdApp::reduce` 每帧取走
-    /// `ctx.copy_text`,取走即清。M3 预览「复制链接/图片地址」同走这条。
+    /// 待写入系统剪贴板的文本(`Message::FileTreeCopyPath` /
+    /// `Message::CopyText` 的落点):state 没有 `egui::Context`,
+    /// `LaterMdApp::reduce` 每帧取走 `ctx.copy_text`,取走即清。
     pub(crate) pending_copy_text: Option<String>,
     /// 在途流的插入点(#61 M2,选区续写专用);`None` = chunk 写发起标签
     /// 文档末尾(既有语义,存量入口不挂它)。与 [`State::ai_active_tab`]
@@ -806,6 +806,10 @@ pub enum Message {
     },
     /// 在系统文件管理器中显示(Linux 打开父目录,mac/win 定位文件)。
     FileTreeReveal(PathBuf),
+    /// 通用「复制文本到剪贴板」出口(state 无 `egui::Context`,
+    /// `LaterMdApp::reduce` 每帧取走 `ctx.copy_text`)。预览右键
+    /// 「复制链接/图片地址」同走这条。
+    CopyText(String),
     /// 文件栏「刷新」按钮:重扫**根 + 当前展开中的全部目录**(树是懒加载
     /// 缓存,外部增删改文件在 UI 层看不出来),并按新状态刷新 Git 角标 ——
     /// 外部 `git add/commit` 后角标同样滞后。归约里同步做完,UI 无状态。
@@ -1231,6 +1235,7 @@ impl State {
             Message::FileTreeDeleteCancelled => self.file_tree.delete_confirm = None,
             Message::FileTreeCopyPath { path, relative } => self.copy_path(path, relative),
             Message::FileTreeReveal(path) => self.reveal_path(path),
+            Message::CopyText(text) => self.pending_copy_text = Some(text),
 
             Message::FileTreeRefreshRequested => self.refresh_file_tree(),
             Message::FileTreeToggled(dir) => self.file_tree.toggle(&dir),
