@@ -262,31 +262,55 @@ pub(crate) fn preview_divider(ui: &egui::Ui, preview_open: bool) {
     if !preview_open {
         return;
     }
-    let Some(panel) = egui::PanelState::load(ui.ctx(), egui::Id::new("preview")) else {
+    let id = egui::Id::new("preview");
+    // **边界位置的取法是三段递降,每一段都是被实测逼出来的**(2026-10-13
+    // 坤哥反馈「线不跟着我拉的框走」):
+    //
+    // ① 拖动中 → 用 `interact_pointer_pos()`,**不能用** `Response.rect`
+    //    也不能用 `PanelState`。egui 的执行顺序是
+    //    「`resize_panel(old_outer_rect)` 交互 → 若在拖则按 pointer 重算
+    //    `outer_size`」(`panel.rs` 735-800),两者**都不是**本帧的新边界:
+    //    `PanelState` 在拖动期间被 `resize_drag_in_progress` 守卫跳过写入
+    //    (存的是拖动前的宽度,以支持「拖到最小再拖回来」),`Response.rect`
+    //    又是拿旧 `outer_rect` 算的。实测探针:五步拖动两者恒为 980.0。
+    //    而 `Panel::right` 的左缘**在拖动时就是指针 x 本身**,故直接取之。
+    // ② 空闲 → 用 `PanelState` 的左缘(response 交互带在上一帧算完,同样滞后,
+    //    且 `size_range` 的 clamp 会让实际左缘 ≠ 指针 x)。
+    // ③ 都不成(panel 尚未 show 过)→ 不画线。
+    let resize = ui.read_response(id.with("__resize"));
+    let dragging = resize
+        .as_ref()
+        .is_some_and(|r| r.dragged() || r.drag_stopped());
+    let pointer_x = resize
+        .as_ref()
+        .filter(|_| dragging)
+        .and_then(|r| r.interact_pointer_pos())
+        .map(|p| p.x);
+    // 纵向范围始终取 PanelState:resize rect 的 y 跨面板全高,但它是拿旧
+    // `outer_rect` 算的,拖动中同样滞后(横向滞后才致命,纵向一像素之差看不
+    // 出,且拖动只改宽度不改高度)。
+    let Some(panel) = egui::PanelState::load(ui.ctx(), id) else {
         return;
     };
-    // 收起动画中面板整体右移,线要跟着走,故取当帧实测的左缘而非算出来的。
-    let rect = panel.outer_rect;
-    if rect.width() <= 0.0 || !ui.clip_rect().intersects(rect) {
+    let edge = pointer_x.unwrap_or(panel.outer_rect.left());
+    let (top, bottom) = (panel.outer_rect.top(), panel.outer_rect.bottom());
+    if bottom - top <= 0.0
+        || !ui.clip_rect().intersects(egui::Rect::from_min_max(
+            egui::pos2(edge, top),
+            egui::pos2(edge, bottom),
+        ))
+    {
         return;
     }
     let colors = crate::theme::shell(ui);
-    // hot 用**几何判定**(指针是否落在命中带内或正在拖),不读 egui 的
-    // resize response。理由:① 响应里的 `hovered` 与线该亮的时机不完全
-    // 对齐 —— egui 只在指针进入 resize_rect 后才置位,而线是常显的,
-    // 提前一点提亮正好当「预告」;② 更要紧的是可测性 —— 读 response
-    // 就必须真的跑一遍 `Panel::right`,守门测试得把整个 App 拖起来才能
-    // 验一根线的颜色,那样的测试没人写得出来。
+    // hot 用**几何判定**(指针是否落在命中带内)。`Response::hovered` 在这里
+    // 可靠(交互带位置不随拖动变),但仍以几何为准:它与「线该亮」是两件事,
+    // 让几何说了算,测试才能在裸调路径下也成立。
     let grab = crate::ui::tokens::PREVIEW_DIVIDER_GRAB;
     let hot = ui
         .ctx()
         .input(|input| input.pointer.hover_pos())
-        .is_some_and(|p| {
-            (p.x - rect.left()).abs() <= grab && p.y >= rect.top() && p.y <= rect.bottom()
-        })
-        || ui
-            .read_response(egui::Id::new("preview").with("__resize"))
-            .is_some_and(|response| response.dragged() || response.drag_stopped());
+        .is_some_and(|p| (p.x - edge).abs() <= grab && p.y >= top && p.y <= bottom);
     let stroke = egui::Stroke::new(
         1.0 / ui.ctx().pixels_per_point(),
         // 朝**底色**插值而非 `gamma_multiply` —— 后者朝黑缩放,浅色皮肤上
@@ -301,13 +325,13 @@ pub(crate) fn preview_divider(ui: &egui::Ui, preview_open: bool) {
             },
         ),
     );
-    let x = rect.left() - 0.5 * stroke.width;
+    let x = edge - 0.5 * stroke.width;
     ui.ctx()
         .layer_painter(egui::LayerId::new(
             egui::Order::Middle,
-            egui::Id::new("preview").with("__divider"),
+            id.with("__divider"),
         ))
-        .vline(x, rect.y_range(), stroke);
+        .vline(x, egui::Rangef::new(top, bottom), stroke);
 }
 
 /// 浮窗统一的 macOS 风格卡片：柔和边界、内容色底和充足内距。
@@ -1137,308 +1161,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// 收集本帧画出的**竖直**线段(只取 `x` 不变的 `Shape::LineSegment`)。
-    fn vertical_lines(output: &egui::FullOutput) -> Vec<([Pos2; 2], egui::Stroke)> {
-        fn walk(shape: &egui::Shape, out: &mut Vec<([Pos2; 2], egui::Stroke)>) {
-            match shape {
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
-                egui::Shape::LineSegment { points, stroke }
-                    if (points[0].x - points[1].x).abs() < 0.01 =>
-                {
-                    out.push((*points, *stroke));
-                }
-                _ => {}
-            }
-        }
-        let mut out = Vec::new();
-        output.shapes.iter().for_each(|s| walk(&s.shape, &mut out));
-        out
-    }
-
-    /// 亮度落差:两色之间绝对差多少(以 `intensity × 100` 为单位,
-    /// 1 单位 ≈ 1/255 灰阶)。
-    ///
-    /// **取绝对差而非相对百分比**:`Color32::intensity()` 是 0..1 的感知
-    /// 亮度,暗色皮肤下底色本身就在 0.1 附近,除以它会把几级灰差放大成
-    /// 几十个百分点,阈值无法跨深浅两套皮肤复用。
-    fn luma_gap(a: egui::Color32, b: egui::Color32) -> f32 {
-        (a.intensity() - b.intensity()).abs() * 100.0
-    }
-
-    /// 跑一帧,交回「预览左缘那根线的**实际画出的颜色**」。
-    ///
-    /// `pointer_x = None` 表示指针不在命中带内(空闲态);`dark` 切皮肤。
-    ///
-    /// **刻意不调 `crate::fonts::install`**:`preview_divider` 只画一根线、
-    /// 一个字符都不渲染,而 `install` 每次都要读 CJK `.ttc` 并抢 epaint 的
-    /// 全局字体图集互斥锁 —— 同文件里四个测试各建五六个 `Context` 时会
-    /// 互相堵死(实测 `mutex.rs:81` 10 秒 RwLock 超时,三个测试齐死)。
-    fn divider_stroke_color(
-        dark: bool,
-        ppp: f32,
-        edge: f32,
-        pointer_x: Option<f32>,
-    ) -> (egui::Color32, egui::Color32) {
-        let ctx = egui::Context::default();
-        ctx.set_visuals(if dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        });
-        ctx.set_pixels_per_point(ppp);
-        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
-        let events: Vec<Event> = pointer_x
-            .map(|x| vec![Event::PointerMoved(Pos2::new(x, screen.height() / 2.0))])
-            .unwrap_or_default();
-        let output = ctx.run_ui(
-            egui::RawInput {
-                events,
-                screen_rect: Some(screen),
-                ..Default::default()
-            },
-            |ui| {
-                let id = egui::Id::new("preview");
-                let rect = Rect::from_min_max(
-                    Pos2::new(edge, 0.0),
-                    Pos2::new(screen.width(), screen.height()),
-                );
-                ui.ctx()
-                    .data_mut(|d| d.insert_persisted(id, egui::PanelState { outer_rect: rect }));
-                // 同上:取色在 `data_mut` 之外,否则自死锁。
-                let probe = id.with("__probe_shell");
-                let shell = crate::theme::shell(ui);
-                ui.data_mut(|d| d.insert_temp(probe, shell));
-                preview_divider(ui, true);
-            },
-        );
-        let mut output = output;
-        // 字体图集纹理本帧无人消费,不 clear 会在 FullOutput drop 时 panic
-        // (`textures.rs`:Dropped TexturesDelta)。
-        output.textures_delta.clear();
-        let shell = ctx
-            .data(|d| {
-                d.get_temp::<crate::theme::ShellTokens>(
-                    egui::Id::new("preview").with("__probe_shell"),
-                )
-            })
-            .expect("探针应在闭包里写入");
-        // 线的 x 用当帧实测左缘反推(1 物理像素宽,居中在左缘外侧),
-        // 故按 ppp 放宽命中窗。
-        let at_edge: Vec<_> = vertical_lines(&output)
-            .into_iter()
-            .filter(|(pts, _)| (pts[0].x - edge).abs() <= 1.0 / ppp)
-            .collect();
-        assert_eq!(
-            at_edge.len(),
-            1,
-            "dark={dark} ppp={ppp} edge={edge}: 预览左缘应恰有一根竖线,实得 {} 根",
-            at_edge.len()
-        );
-        let (pts, stroke) = at_edge.into_iter().next().expect("刚断言过恰有一根");
-        assert!(
-            pts[1].y - pts[0].y > screen.height() * 0.9,
-            "dark={dark} ppp={ppp}: 线应贯穿面板全高,实得 {} / {}",
-            pts[1].y - pts[0].y,
-            screen.height()
-        );
-        (stroke.color, shell.content)
-    }
-
-    /// 空闲态就要看得见一条界 —— 这就是本次改动的全部要点。
-    ///
-    /// 2026-10-13 坤哥反馈「不知道在哪里可以拉宽宽度」。根因不是拖不动,
-    /// 而是无任何视觉线索指向那条命中带。故断言的是**线的存在 + 它相对
-    /// 底色/边框色的深度**,不是「线有多粗」。
-    ///
-    /// **判据不引用 `PREVIEW_DIVIDER_IDLE`**:后者就是被断言的那个实现,
-    /// 拿它当期望值 = 断言自我满足(改 token 时线与断言一起变淡,测试
-    /// 照绿 —— 2026-10-08 在 nav 段高度上界上踩过同款)。
-    ///
-    /// 25%..=60% 的含义:下限「退到底色去但仍看得见」,上限「别退化成
-    /// 一条硬边把面板切成两半」。hover 档留到下一条测。
-    #[test]
-    fn preview_divider_is_visible_while_idle() {
-        for dark in [false, true] {
-            for ppp in [1.0_f32, 2.0] {
-                for edge in [700.0_f32, 480.0] {
-                    let ctx = egui::Context::default();
-                    ctx.set_visuals(if dark {
-                        egui::Visuals::dark()
-                    } else {
-                        egui::Visuals::light()
-                    });
-                    ctx.set_pixels_per_point(ppp);
-                    let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
-                    let output = ctx.run_ui(
-                        egui::RawInput {
-                            screen_rect: Some(screen),
-                            ..Default::default()
-                        },
-                        |ui| {
-                            let id = egui::Id::new("preview");
-                            let rect = Rect::from_min_max(
-                                Pos2::new(edge, 0.0),
-                                Pos2::new(screen.width(), screen.height()),
-                            );
-                            ui.ctx().data_mut(|d| {
-                                d.insert_persisted(id, egui::PanelState { outer_rect: rect })
-                            });
-                            // 取色必须在 `data_mut` **之外**:`data_mut` 已持
-                            // Context 写锁,闭包里再调 `theme::shell`(内部
-                            // `ctx.data` 取读锁)会自死锁 —— parking_lot 的
-                            // RwLock 不可重入,实测 `epaint/mutex.rs:81`
-                            // 10 秒超时。
-                            let probe = id.with("__probe_shell");
-                            let shell = crate::theme::shell(ui);
-                            ui.data_mut(|d| d.insert_temp(probe, shell));
-                            preview_divider(ui, true);
-                        },
-                    );
-                    let mut output = output;
-                    output.textures_delta.clear();
-                    let shell = ctx
-                        .data(|d| {
-                            d.get_temp::<crate::theme::ShellTokens>(
-                                egui::Id::new("preview").with("__probe_shell"),
-                            )
-                        })
-                        .expect("探针应在闭包里写入");
-                    let full = luma_gap(shell.border, shell.content);
-                    let at_edge: Vec<_> = vertical_lines(&output)
-                        .into_iter()
-                        .filter(|(pts, _)| (pts[0].x - edge).abs() <= 1.0 / ppp)
-                        .collect();
-                    assert_eq!(
-                        at_edge.len(),
-                        1,
-                        "dark={dark} ppp={ppp} edge={edge}: 预览左缘应恰有一根竖线,实得 {} 根",
-                        at_edge.len()
-                    );
-                    let (pts, stroke) = at_edge.into_iter().next().expect("刚断言过恰有一根");
-                    assert!(
-                        pts[1].y - pts[0].y > screen.height() * 0.9,
-                        "dark={dark} ppp={ppp} edge={edge}: 线应贯穿面板全高,实得 {} / {}",
-                        pts[1].y - pts[0].y,
-                        screen.height()
-                    );
-                    let ratio = luma_gap(stroke.color, shell.content) / full * 100.0;
-                    assert!(
-                        (25.0..=60.0).contains(&ratio),
-                        "dark={dark} ppp={ppp} edge={edge}: 空闲线深度 {ratio:.0}% \
-                         (border↔content 全距 = {full:.2} 灰阶)应落在 25..=60% —— \
-                         太浅等于没有线(用户找不到可拖处),太深就把面板切成两半"
-                    );
-                }
-            }
-        }
-    }
-
-    /// hover 时线要**明显比空闲更深**(朝边框色靠),否则「抓住了吗」
-    /// 没有反馈。
-    ///
-    /// 同样断言**两者之差**并硬编码下界,不各自比绝对值。
-    ///
-    /// 特别加一条**反向断言**:hover 不得比空闲更浅。第一版实现用
-    /// `gamma_multiply`(朝黑缩放),在浅色皮肤上正好触这条 —— 空闲 0.32
-    /// 反而比 hover 0.72 更显眼,整条交互反馈是反的。这条断言就是为拦住
-    /// 那个方向错误而存在。
-    #[test]
-    fn preview_divider_deepens_when_hovered() {
-        for dark in [false, true] {
-            let edge = 700.0_f32;
-            let (idle, content) = divider_stroke_color(dark, 1.0, edge, None);
-            let (hot, _) = divider_stroke_color(dark, 1.0, edge, Some(edge + 1.0));
-            let idle_gap = luma_gap(idle, content);
-            let hot_gap = luma_gap(hot, content);
-            assert_ne!(
-                idle, hot,
-                "dark={dark}: 指针落在边界上时线色应变化(hover 反馈)"
-            );
-            assert!(
-                hot_gap > idle_gap,
-                "dark={dark}: hover 应比空闲**更深**(更远离底色),实得 idle={idle_gap:.2} \
-                 hot={hot_gap:.2} 灰阶 —— 若反了,说明线色用了朝黑缩放的 \
-                 gamma_multiply 而非朝底色 lerp"
-            );
-            assert!(
-                hot_gap - idle_gap >= 1.2,
-                "dark={dark}: hover 与空闲的亮度落差之差应 ≥1.2 灰阶(一档能分辨),\
-                 实得 {:.2}",
-                hot_gap - idle_gap
-            );
-        }
-    }
-
-    /// 命中带宽度:「抓得到」的直接度量。
-    ///
-    /// **判据全部硬编码像素,不引用 `PREVIEW_DIVIDER_GRAB`** —— 首版就是
-    /// 拿 token 当期望值写的,红绿验证时把半径 6.0 改成 egui 出厂 3.0,
-    /// 这条测试**照样全绿**:越界点取 `GRAB + 3`,半径缩一半后它依然在带
-    /// 外,断言自我满足(与 2026-10-08 nav 段高度上界同款事故)。
-    /// 现在改成两个写死的像素点,谁改半径谁红。
-    ///
-    /// 硬编码的两档怎么定的:
-    /// - **5.5px 必须亮**:「指针离边 5px 就抓得到」是用户能感知的下限。
-    ///   半径退回 egui 出厂 3.0 时这点会落到带外 → 红。
-    /// - **9px 必须不亮**:命中带再宽也不该让半屏范围内的鼠标都点亮线,
-    ///   否则线与命中区脱节,拖动时会出现「线亮了但拖不动」。
-    #[test]
-    fn preview_divider_hot_zone_matches_grab_radius() {
-        let dark = false;
-        let edge = 700.0_f32;
-        let (idle, _) = divider_stroke_color(dark, 1.0, edge, None);
-        let inside = |d: f32| divider_stroke_color(dark, 1.0, edge, Some(edge + d)).0;
-        let outside = |d: f32| divider_stroke_color(dark, 1.0, edge, Some(edge - d)).0;
-        // 抓得到:离边 5.5px 内(两侧对称)就该是 hot 色,**且不同于空闲**。
-        for d in [0.0_f32, 3.0, 5.5] {
-            let (in_pos, in_neg) = (inside(d), outside(d));
-            assert_eq!(in_pos, in_neg, "距边 {d}px 应同属带内,命中带两侧对称");
-            assert_ne!(
-                in_pos, idle,
-                "距边 {d}px 仍在命中带内,线应已提亮 —— 若与空闲同色,说明 \
-                 命中半径小到抓不到(实测退回 egui 出厂 3.0 时此处会红)"
-            );
-        }
-        // 抓不到:离边 9px 必须回落到空闲,线不许在半屏范围内乱亮。
-        assert_eq!(
-            inside(9.0),
-            idle,
-            "距边 9px 已超出命中带,应回落到空闲色 —— 否则线与命中区脱节"
-        );
-        assert_eq!(outside(9.0), idle, "距边 9px(另一侧)同样应回落到空闲色");
-    }
-
-    /// 预览收起时**不得**留下悬空的线 —— 否则关掉预览,编辑区右缘凭空
-    /// 多一道竖线,像没删干净的边框。
-    #[test]
-    fn preview_divider_disappears_when_panel_is_closed() {
-        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
-        let edge = 700.0_f32;
-        let ctx = egui::Context::default();
-        let output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(screen),
-                ..Default::default()
-            },
-            |ui| {
-                let id = egui::Id::new("preview");
-                let rect = Rect::from_min_max(
-                    Pos2::new(edge, 0.0),
-                    Pos2::new(screen.width(), screen.height()),
-                );
-                ui.ctx()
-                    .data_mut(|d| d.insert_persisted(id, egui::PanelState { outer_rect: rect }));
-                preview_divider(ui, false);
-            },
-        );
-        let mut output = output;
-        output.textures_delta.clear();
-        assert!(
-            vertical_lines(&output).is_empty(),
-            "预览已收起,实得竖线 {:?}",
-            vertical_lines(&output)
-        );
     }
 }
