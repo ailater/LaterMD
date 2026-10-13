@@ -2404,8 +2404,11 @@ mod tests {
 
     /// 建一个「只有预览栏」的三栏应用实例,并空跑到布局稳定。
     fn preview_only_app(screen: Rect, dark: bool) -> (egui::Context, LaterMdApp) {
+        // **刻意不调 `crate::fonts::install`**:本组只量分隔线,一个字符都
+        // 不渲染。装字体不只是多余 —— CI runner 上没有 CJK 字体,
+        // `install` 返回 `None`,那个 `.expect` 会让 4 条测试在 CI 上齐红
+        // (2026-10-13 实测 run 38360023782:本地全绿、CI Gate 失败)。
         let ctx = egui::Context::default();
-        crate::fonts::install(&ctx).expect("divider test requires installed CJK fonts");
         ctx.set_visuals(if dark {
             egui::Visuals::dark()
         } else {
@@ -2564,8 +2567,8 @@ mod tests {
     /// 逐步量线的 x,断言它**单调跟随**指针。
     #[test]
     fn preview_divider_follows_the_drag() {
+        // 同上:只量线,不渲染文字,故不装字体(CI runner 无 CJK 字体)。
         let ctx = egui::Context::default();
-        crate::fonts::install(&ctx).expect("drag test requires installed CJK fonts");
         let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1400.0, 900.0));
         let mut app = LaterMdApp {
             frameless: true,
