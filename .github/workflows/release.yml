@@ -339,7 +339,8 @@ jobs:
           gh release download "$env:TAG" --pattern 'latermd-x86_64-pc-windows-msvc.zip' --dir win
           Expand-Archive win/latermd-x86_64-pc-windows-msvc.zip -DestinationPath win/unpacked
           $exe = Get-ChildItem win/unpacked -Recurse -Filter latermd.exe | Select-Object -First 1
-          Copy-Item $exe.FullName latermd.exe
+          # .iss 的 Source 相对 iss 目录解析,exe 必须拷进 packaging/windows/
+          Copy-Item $exe.FullName packaging/windows/latermd.exe
       - name: 打 Inno Setup 安装器
         shell: pwsh
         run: |
