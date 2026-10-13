@@ -21,11 +21,12 @@ hosting = "github"
 # macOS 走自建 cask(crazykun/homebrew-ailater,universal2 dmg + postflight 去 quarantine),
 # dist 自带的 homebrew installer 产 formula(引 tar.xz)而非 cask,故关闭。
 installers = []
-# 三平台五目标矩阵(AGENTS.md §5):Linux x64 / macOS 双架构(由 merge-tasks 合并
-# 到 macos-14 单 job,见下)/ Windows x64 + ARM64(ARM64 走原生 runner,见下)
+# 三平台四目标矩阵:Linux x64 / macOS 双架构(由 merge-tasks 合并到
+# macos-14 单 job,见下)/ Windows x64。Win ARM64 不再出包(2026-10-12
+# 坤哥:资产面收敛,ARM64 机器经 Windows 的 x64 模拟运行 x64 包);
+# 源码级测试矩阵(rust.yml)仍保留 aarch64-pc-windows-msvc。
 targets = [
   "aarch64-apple-darwin",
-  "aarch64-pc-windows-msvc",
   "x86_64-apple-darwin",
   "x86_64-unknown-linux-gnu",
   "x86_64-pc-windows-msvc",
@@ -37,12 +38,8 @@ targets = [
 # dmg 合成由后续模块的自建 custom job 完成。
 merge-tasks = true
 
-# Win ARM64:dist 默认走 ubuntu + cargo-xwin 容器交叉编,但 ring 0.17 的
-# ARM64 汇编在容器内编不过(容器 clang 不认 cc-rs 的 /imsvc 参数形式,
-# 2026-09-26 v0.0.1 首发实测踩中)。改指 GitHub 公共仓库免费的
-# windows-11-arm 原生 runner,MSVC 工具链直编,不经 xwin。
-[dist.github-custom-runners.aarch64-pc-windows-msvc]
-runner = "windows-11-arm"
+# (曾有的 Win ARM64 自定义 runner 段随目标移除一并退役:2026-09-26 起
+# windows-11-arm 原生 runner 曾绕开 ring 0.17 的 cargo-xwin 容器编不过问题。)
 
 [dist.github-custom-runners.x86_64-apple-darwin]
 runner = "macos-14"
