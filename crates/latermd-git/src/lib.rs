@@ -433,6 +433,99 @@ pub fn commit_file_diff(root: &Path, commit_hash: &str, path: &str) -> Result<Co
     Ok(CommitDiff { text, lines })
 }
 
+/// 单文件历史：列出改动过 `path` 的提交，新在前。
+///
+/// 语义对齐 `git log -- <path>`（**不带 `--follow`**）：按提交 diff 的新旧
+/// 路径精确匹配（与 [`commit_file_diff`] 同一判定），重命名之后的历史不跨
+/// 名跟踪 —— 改名前的提交不在结果里。merge 提交只与第一父提交比较（与
+/// [`commit_files`] 同口径）。
+///
+/// 路径在仓库里从未出现过（含未跟踪的新文件）返回**空列表**而不是错误；
+/// 空仓库同样返回空列表。
+///
+/// `limit` 是结果条数上限。为避免「一个冷门文件」在超大仓库上把整条历史
+/// 走完，遍历另受 [`FILE_LOG_SCAN_LIMIT`] 限制：扫够这么多提交仍没凑满
+/// `limit` 条就按已有结果返回（结果可能少于 `limit`，也可能为空）。
+///
+/// # Errors
+///
+/// 仓库不可读、HEAD 不可解析或提交树 diff 失败时返回面向用户的错误字符串。
+pub fn file_log(root: &Path, path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
+    let repo = open_repo(root)?;
+    match repo.head() {
+        Ok(_) => {}
+        Err(error) if error.code() == git2::ErrorCode::UnbornBranch => return Ok(Vec::new()),
+        Err(error) => return Err(format!("读取提交历史失败: {error}")),
+    }
+    let mut revwalk = repo
+        .revwalk()
+        .map_err(|error| format!("读取提交历史失败: {error}"))?;
+    revwalk
+        .push_head()
+        .map_err(|error| format!("读取提交历史失败: {error}"))?;
+    revwalk
+        .set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)
+        .map_err(|error| format!("读取提交历史失败: {error}"))?;
+    let mut commits = Vec::new();
+    for oid in revwalk.take(FILE_LOG_SCAN_LIMIT) {
+        if commits.len() >= limit {
+            break;
+        }
+        let oid = oid.map_err(|error| format!("遍历提交历史失败: {error}"))?;
+        let commit = repo
+            .find_commit(oid)
+            .map_err(|error| format!("读取提交失败: {error}"))?;
+        if commit_touches_path(&repo, &commit, path)? {
+            commits.push(commit_info(&commit)?);
+        }
+    }
+    Ok(commits)
+}
+
+/// [`file_log`] 遍历提交数的上限。
+///
+/// 命中提交往往稀疏（一个文件可能几百笔提交才动一次），不设上限时「查
+/// 一个 2019 年改过的文件」会把整条历史走完。2000 是「够覆盖日常仓库的
+/// 全生命周期」与「单次查询不卡 UI」的折中——与 status/log 的截断同精神，
+/// 只是这里的代价是结果不完整而非列表不完整。
+pub const FILE_LOG_SCAN_LIMIT: usize = 2_000;
+
+/// 提交相对第一父提交是否改动了 `path`。
+///
+/// 先用 pathspec 让 libgit2 剪掉无关子树（只比 pathspec 覆盖的路径），再
+/// 按 [`delta_matches_path`] 精确判定——pathspec 是 glob 语义，路径里带
+/// `*`/`?` 时只靠它会误命中。初始提交没有父提交，与空树比较。
+fn commit_touches_path<'repo>(
+    repo: &'repo Repository,
+    commit: &git2::Commit<'repo>,
+    path: &str,
+) -> Result<bool, String> {
+    let parent_tree = if commit.parent_count() == 0 {
+        None
+    } else {
+        let parent = commit
+            .parent(0)
+            .map_err(|error| format!("读取提交第一父提交失败: {error}"))?;
+        Some(
+            parent
+                .tree()
+                .map_err(|error| format!("读取提交父 tree 失败: {error}"))?,
+        )
+    };
+    let tree = commit
+        .tree()
+        .map_err(|error| format!("读取提交 tree 失败: {error}"))?;
+    let mut options = DiffOptions::new();
+    options
+        .pathspec(path)
+        .skip_binary_check(true)
+        .include_typechange(true);
+    let diff = repo
+        .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))
+        .map_err(|error| format!("计算提交 tree diff 失败: {error}"))?;
+    Ok(diff.deltas().any(|delta| delta_matches_path(&delta, path)))
+}
+
 /// 将提交 hash 限定为完整或短十六进制对象名，再解析为提交对象。
 fn resolve_commit<'repo>(
     repo: &'repo Repository,
@@ -1220,6 +1313,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 单文件历史只含改动过该文件的提交,新在前;limit 生效;路径从未在
+    /// 仓库里出现过是空列表(不是错误)。
+    #[test]
+    fn file_log_lists_only_commits_touching_path() {
+        let dir = temp_repo("file-log");
+        std::fs::write(dir.join("a.md"), "一\n").unwrap();
+        std::fs::write(dir.join("b.md"), "一\n").unwrap();
+        commit_all(&dir, "init");
+        std::fs::write(dir.join("b.md"), "一\n二\n").unwrap();
+        commit_all(&dir, "改 b");
+        std::fs::write(dir.join("a.md"), "一\n二\n").unwrap();
+        commit_all(&dir, "改 a");
+
+        let subjects = |path: &str, limit: usize| -> Vec<String> {
+            file_log(&dir, path, limit)
+                .unwrap()
+                .into_iter()
+                .map(|commit| commit.subject)
+                .collect()
+        };
+        assert_eq!(subjects("a.md", DEFAULT_LOG_LIMIT), vec!["改 a", "init"]);
+        assert_eq!(subjects("b.md", DEFAULT_LOG_LIMIT), vec!["改 b", "init"]);
+        assert_eq!(subjects("a.md", 1), vec!["改 a"], "limit 生效");
+        assert!(
+            subjects("no-such.md", DEFAULT_LOG_LIMIT).is_empty(),
+            "未出现过的路径是空列表"
+        );
+        assert_eq!(file_log(&dir, "a.md", 0).unwrap().len(), 0, "limit 0 是空");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空仓库的单文件历史是空列表(与 log 同款降级,不是错误)。
+    #[test]
+    fn file_log_on_repo_without_commits_is_empty() {
+        let dir = temp_repo("empty-file-log");
+        assert!(file_log(&dir, "a.md", DEFAULT_LOG_LIMIT)
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 现状钉子:file_log 不带 --follow,重命名前的提交不属于新名。改名
+    /// 那一笔仍在新名的历史里(该提交删除旧名、新增新名)。
+    #[test]
+    fn file_log_does_not_follow_renames() {
+        let dir = temp_repo("file-log-rename");
+        std::fs::write(dir.join("old.md"), "一\n").unwrap();
+        commit_all(&dir, "init old");
+        run_git(&dir, &["mv", "old.md", "new.md"]);
+        commit_all(&dir, "改名");
+
+        let new: Vec<String> = file_log(&dir, "new.md", DEFAULT_LOG_LIMIT)
+            .unwrap()
+            .into_iter()
+            .map(|commit| commit.subject)
+            .collect();
+        assert_eq!(new, vec!["改名"], "{new:?}");
+        let old: Vec<String> = file_log(&dir, "old.md", DEFAULT_LOG_LIMIT)
+            .unwrap()
+            .into_iter()
+            .map(|commit| commit.subject)
+            .collect();
+        assert_eq!(old, vec!["改名", "init old"], "旧名历史含改名那一笔");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// diff 是 HEAD 对工作区;干净文件返回空串。
     #[test]
     fn diff_file_shows_head_vs_workdir_and_clean_is_empty() {
@@ -1689,6 +1848,7 @@ mod tests {
 
         assert!(status(&dir, DEFAULT_STATUS_LIMIT).is_err());
         assert!(log(&dir, DEFAULT_LOG_LIMIT).is_err());
+        assert!(file_log(&dir, "a.md", DEFAULT_LOG_LIMIT).is_err());
         assert!(diff_file(&dir, "a.md").is_err());
         assert!(diff_file_lines(&dir, "a.md").is_err());
         assert!(blame_file(&dir, "a.md").is_err());

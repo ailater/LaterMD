@@ -29,7 +29,7 @@ use crate::command::Command;
 use crate::export;
 use crate::file::{self, FileCmd};
 use crate::filetree::{FileTreeSettings, FileTreeState};
-use crate::git_panel::GitPanelState;
+use crate::git_panel::{GitPanelState, HistoryScope};
 use crate::keymap::{Keymap, Shortcut};
 use crate::layout::LayoutSettings;
 use crate::live::RenderMode;
@@ -1079,6 +1079,14 @@ pub enum Message {
     GitDiffViewChanged(crate::git_panel::DiffView),
     /// 关闭主工作区 Git 审阅,返回当前编辑器。
     GitDiffWorkspaceClosed,
+    /// 查看单个文件的全部修改记录,载荷为**绝对路径**(文件树右键 / 标签
+    /// 右键的入口手上只有绝对路径):归约换成相对仓库根的路径后查询,并
+    /// 把侧栏切到 Git 页、历史区切到「本文件」。文件不在仓库内时留提示
+    /// 行,不查。
+    GitFileHistoryRequested(PathBuf),
+    /// Git 页历史区范围切换(「全部 / 本文件」)。切到「本文件」时由归约
+    /// 定目标文件:改动列表选中项优先,其次当前打开的文档。
+    GitHistoryScopeChanged(crate::git_panel::HistoryScope),
     /// 保存 MCP 配置(设置页 MCP 页「保存」):归一化 → 落 `mcp.json` → 按
     /// 开关起停后台服务(**默认关闭**,开了才监听回环端口)。
     McpConfigSaved(McpConfig),
@@ -1510,6 +1518,35 @@ impl State {
             Message::GitCheckoutCancelled => self.git.cancel_checkout(),
             Message::GitDiffViewChanged(view) => self.git.diff_view = view,
             Message::GitDiffWorkspaceClosed => self.git.close_diff_workspace(),
+            Message::GitFileHistoryRequested(path) => {
+                // 与切到 Git 页同一口径:先刷新拿到 repo_root(页签可能停
+                // 了很久),再换相对路径查询
+                self.layout.left_view = SidebarTab::Git;
+                self.refresh_git();
+                match self.git.relative_path(&path) {
+                    Some(relative) => self.git.load_file_history(&relative),
+                    None => {
+                        self.git.set_history_scope(HistoryScope::File, None);
+                        self.tabs.current_mut().document.notice =
+                            Some("该文件不在当前 Git 仓库内,查不到修改记录".to_owned());
+                    }
+                }
+            }
+            Message::GitHistoryScopeChanged(scope) => {
+                // 「本文件」的目标文件:选中项优先,其次当前打开的文档
+                let target = match scope {
+                    HistoryScope::File => self.git.selected.clone().or_else(|| {
+                        self.tabs
+                            .current()
+                            .document
+                            .path
+                            .clone()
+                            .and_then(|doc| self.git.relative_path(&doc))
+                    }),
+                    HistoryScope::Repo => None,
+                };
+                self.git.set_history_scope(scope, target.as_deref());
+            }
         }
     }
 
@@ -8966,6 +9003,71 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&settings_dir);
+    }
+
+    /// 文件历史入口:右键「查看文件历史」→ 侧栏切到 Git 页 + 历史区切到
+    /// 「本文件」+ 结果就位;仓库外的文件不查,只留提示行。切到「本文件」
+    /// 时没有选中项则回落当前打开的文档。
+    #[test]
+    fn git_file_history_request_loads_commits_and_falls_back_to_document() {
+        let dir = git_repo_with_dirty_file("git-file-history");
+        let settings_dir = temp_path("git-file-history-settings");
+        let mut state = State {
+            settings_dir: Some(settings_dir.clone()),
+            ..State::default()
+        };
+        state.apply(Message::FileTreeRootSelected(dir.clone()));
+
+        state.apply(Message::GitFileHistoryRequested(dir.join("a.md")));
+        assert_eq!(state.layout.left_view, SidebarTab::Git, "顺带切到 Git 页");
+        assert_eq!(state.git.history_scope, HistoryScope::File);
+        let history = state.git.file_history.as_ref().expect("文件历史就位");
+        assert_eq!(history.path, "a.md");
+        assert_eq!(history.error, None);
+        assert_eq!(
+            history
+                .commits
+                .iter()
+                .map(|commit| commit.subject.as_str())
+                .collect::<Vec<_>>(),
+            vec!["init"],
+            "a.md 只被 init 改过"
+        );
+
+        // 仓库外文件:不查,提示行说明
+        let outside = temp_path("git-file-history-outside").join("x.md");
+        state.apply(Message::GitFileHistoryRequested(outside));
+        assert!(
+            state
+                .tabs
+                .current()
+                .document
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("不在当前 Git 仓库")),
+            "{:?}",
+            state.tabs.current().document.notice
+        );
+
+        // 切回「全部」
+        state.apply(Message::GitHistoryScopeChanged(HistoryScope::Repo));
+        assert_eq!(state.git.history_scope, HistoryScope::Repo);
+
+        // 没有选中项时切「本文件」:回落当前打开的文档
+        state.git.selected = None;
+        state.git.file_history = None;
+        state.tabs.current_mut().editor.clear_dirty(); // 放行 open_from 的 unsaved_guard
+        state.apply(Message::FileSelected(dir.join("a.md")));
+        state.apply(Message::GitHistoryScopeChanged(HistoryScope::File));
+        assert_eq!(
+            state.git.file_history.as_ref().map(|h| h.path.as_str()),
+            Some("a.md"),
+            "回落当前文档"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&settings_dir);
+        let _ = std::fs::remove_dir_all(temp_path("git-file-history-outside"));
     }
 
     /// 回滚目标正是编辑器当前文档(非 dirty):确认后编辑器重读磁盘的
