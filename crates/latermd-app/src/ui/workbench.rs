@@ -367,6 +367,7 @@ pub fn header(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
             title_rect,
             &state.tabs,
             state.theme.tab_title_width,
+            state.file_tree.root.as_deref(),
             outbox,
         );
     } else {
