@@ -303,6 +303,14 @@ pub(crate) fn preview_divider(ui: &egui::Ui, preview_open: bool) {
         return;
     }
     let colors = crate::theme::shell(ui);
+    // hover 用**两个通道**反馈,不是只改颜色:
+    // ① **线宽** 1px → 3px(主信号,一眼可辨)
+    // ② **色深** 朝 `border` 本色靠(辅助信号)
+    //
+    // 2026-10-13 坤哥实测「没看见 hover 加粗」—— 此前**只有 ②**,而 1px
+    // 线的深浅变化要「盯住看」才分辨得出,指针扫过时每帧只停几十毫秒。
+    // VS Code 的 sash 正是靠加粗给主反馈,颜色只是辅助。
+    //
     // hot 用**几何判定**(指针是否落在命中带内)。`Response::hovered` 在这里
     // 可靠(交互带位置不随拖动变),但仍以几何为准:它与「线该亮」是两件事,
     // 让几何说了算,测试才能在裸调路径下也成立。
@@ -311,8 +319,13 @@ pub(crate) fn preview_divider(ui: &egui::Ui, preview_open: bool) {
         .ctx()
         .input(|input| input.pointer.hover_pos())
         .is_some_and(|p| (p.x - edge).abs() <= grab && p.y >= top && p.y <= bottom);
+    let ppp = ui.ctx().pixels_per_point();
     let stroke = egui::Stroke::new(
-        1.0 / ui.ctx().pixels_per_point(),
+        if hot {
+            crate::ui::tokens::PREVIEW_DIVIDER_HOT_W
+        } else {
+            1.0
+        } / ppp,
         // 朝**底色**插值而非 `gamma_multiply` —— 后者朝黑缩放,浅色皮肤上
         // 「变淡」会变成「变深」,空闲态反比 hover 态显眼(实测 8.7 vs 1.3
         // 灰阶)。理由与取值见 [`crate::ui::tokens::PREVIEW_DIVIDER_IDLE`]。
