@@ -362,6 +362,12 @@ pub struct State {
     /// (成功/失败/作废)清除 —— [`Message::AiChunk`] / [`Message::AiDone`]
     /// 的写入目标由它决定,与 `tabs.active` 无关:切标签不中断也不改道。
     pub ai_active_tab: Option<u64>,
+    /// 编辑器右键菜单的在途编辑动作(`Message::EditAction` 的记账队列,
+    /// context-menu-plan §3 M1):归约只入队,`LaterMdApp::reduce` 每帧
+    /// 取走推合成事件 —— 事件必须进 logic() 阶段的输入流,ui() 阶段推
+    /// 的当帧末被清空(时序红线,`edit_events` 模块文档)。取走即清,
+    /// 跨帧不滞留;同帧多条动作(连点菜单)按序排队,不互相顶掉。
+    pub(crate) pending_edit_action: Vec<crate::edit_events::EditAction>,
     /// 在途流的插入点(#61 M2,选区续写专用);`None` = chunk 写发起标签
     /// 文档末尾(既有语义,存量入口不挂它)。与 [`State::ai_active_tab`]
     /// 同生命周期:发起时置入,成功/失败/作废一并清除。
@@ -530,6 +536,7 @@ impl Default for State {
             goto: GotoBarState::default(),
             quick_open: QuickOpenState::default(),
             ai_active_tab: None,
+            pending_edit_action: Vec::new(),
             ai_insert_at: None,
             ai_polish: None,
             file_tree: FileTreeState::default(),
@@ -666,6 +673,11 @@ pub enum Message {
     /// [`crate::compose::apply`],归约侧只负责取选区、调它、把结果写回
     /// 缓冲并把新选区挂到 `TabState::pending_selection`。
     FormatRequested(crate::compose::FormatAction),
+    /// 编辑器右键菜单的编辑动作(撤销/重做/剪切/复制/粘贴/全选,
+    /// context-menu-plan §3 M1)。归约只记账到 `pending_edit_action`,
+    /// 合成事件的推入留在持有 `egui::Context` 的 `LaterMdApp::reduce`
+    /// (logic() 阶段,时序红线见 `edit_events` 模块文档)。
+    EditAction(crate::edit_events::EditAction),
     /// 打开「图片框」对话框(工具条 Image 按钮 / `Cmd/Ctrl+Shift+I` 产出,
     /// docs/image-plan.md A 段)。归约置 `image_dialog.open` 并按选区预填
     /// alt —— 选中文字就是要保留的替代文字(`compose::insert_image` 的约定)。
@@ -1131,6 +1143,7 @@ impl State {
                 }
             }
             Message::FileCommand(cmd) => self.run_file_cmd(cmd),
+            Message::EditAction(action) => self.pending_edit_action.push(action),
             Message::NoticeDismissed => self.tabs.current_mut().document.notice = None,
             Message::ExportHtml => self.run_export_html(),
             Message::ExportPdf => self.run_export_pdf(),
@@ -2038,6 +2051,25 @@ impl State {
         } else {
             self.layout.enter_zen();
         }
+    }
+
+    /// 当前编辑目标的 widget id(`Message::EditAction` 推合成事件前归还
+    /// 焦点的对象,context-menu-plan §3 M1):源码模式 = 源码 TextEdit;
+    /// Live = 活动块 TextEdit,无活动块 = 空文档块,浏览态 = `None`
+    /// (无处还焦,动作作废 —— 浏览态没有可消费事件的编辑器)。
+    pub(crate) fn editor_focus_id(&self) -> Option<eframe::egui::Id> {
+        let tab = self.tabs.current();
+        let base = crate::ui::editor::tab_editor_id(tab.id);
+        if self.render_mode != crate::live::RenderMode::Live {
+            return Some(base);
+        }
+        if tab.live.browse_only {
+            return None;
+        }
+        Some(match tab.live.active {
+            Some(index) => base.with(("live-block", index)),
+            None => base.with("live-empty"),
+        })
     }
 
     /// 请求一次 Markdown 格式动作(§6.4 链路)。
@@ -3929,6 +3961,55 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("latermd-state-{}-{name}", std::process::id()))
+    }
+
+    /// 右键菜单编辑动作(context-menu-plan §3 M1):归约只记账到
+    /// `pending_edit_action`,合成事件的推入由 `LaterMdApp::reduce` 在
+    /// 持有 `egui::Context` 的层完成(layout.rs 侧有对应的出口测试)。
+    #[test]
+    fn edit_action_message_parks_into_pending() {
+        let mut state = State::default();
+        assert!(state.pending_edit_action.is_empty());
+        state.apply(Message::EditAction(crate::edit_events::EditAction::Undo));
+        state.apply(Message::EditAction(crate::edit_events::EditAction::Paste));
+        assert_eq!(
+            state.pending_edit_action,
+            vec![
+                crate::edit_events::EditAction::Undo,
+                crate::edit_events::EditAction::Paste,
+            ],
+            "同帧多条动作按序排队,不互相顶掉"
+        );
+    }
+
+    /// 焦点目标矩阵:源码 = 源码 TextEdit;Live = 活动块 / 空文档块;
+    /// 浏览态 = None(动作作废,无可消费事件的编辑器)。
+    #[test]
+    fn editor_focus_id_follows_render_mode() {
+        use crate::live::RenderMode;
+        let mut state = State::default();
+        let base = crate::ui::editor::tab_editor_id(state.tabs.current().id);
+
+        state.render_mode = RenderMode::Source;
+        assert_eq!(state.editor_focus_id(), Some(base));
+
+        state.render_mode = RenderMode::Live;
+        state.tabs.current_mut().live.browse_only = true;
+        assert_eq!(state.editor_focus_id(), None, "浏览态无处还焦");
+
+        state.tabs.current_mut().live.browse_only = false;
+        assert_eq!(
+            state.editor_focus_id(),
+            Some(base.with("live-empty")),
+            "无活动块 = 空文档块"
+        );
+
+        state.tabs.current_mut().live.active = Some(2);
+        assert_eq!(
+            state.editor_focus_id(),
+            Some(base.with(("live-block", 2))),
+            "活动块 id 与 live.rs 的 TextEdit id 同构"
+        );
     }
 
     #[test]

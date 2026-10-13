@@ -2,6 +2,7 @@
 
 pub mod about;
 pub mod editor;
+pub mod editor_menu;
 pub mod emoji_data;
 pub mod emoji_panel;
 pub mod fade;

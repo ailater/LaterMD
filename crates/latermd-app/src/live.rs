@@ -617,6 +617,7 @@ pub fn ui(
     editor_id: egui::Id,
     show_typewriter: bool,
     show_focus: bool,
+    keymap: &crate::keymap::Keymap,
     outbox: &mut Vec<Message>,
 ) -> egui::Response {
     live.sync(editor, cursor.byte);
@@ -742,6 +743,9 @@ pub fn ui(
                         .cursor
                         .char_range()
                         .map(|range| editor.char_to_byte(range.primary.index.0));
+                    // 右键菜单:空文档块与活动块同一挂点(条目表共用)。
+                    // 排在 active_response 之前 —— 那条会移走 response。
+                    crate::ui::editor_menu::attach(ui, &output, keymap, true, outbox);
                     active_response = Some(output.response.response);
                 }
             }
@@ -790,6 +794,10 @@ pub fn ui(
                     let edit =
                         edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)));
                     let output = edit.show(ui);
+                    // 右键菜单(context-menu-plan §3 M1):活动块与源码
+                    // 编辑器同一挂点,条目表共用;块内坐标落光标见
+                    // editor_menu::attach。
+                    crate::ui::editor_menu::attach(ui, &output, keymap, true, outbox);
                     let focused_now = ui.ctx().memory(|mem| mem.has_focus(response_id));
                     let ime_event = ui.ctx().input(|input| {
                         input
@@ -1795,6 +1803,7 @@ mod tests {
                 egui::Id::new("live-test"),
                 false,
                 false,
+                &crate::keymap::Keymap::builtin(),
                 &mut outbox,
             );
         });
@@ -1956,6 +1965,7 @@ mod tests {
                     egui::Id::new("live-copy-test"),
                     false,
                     false,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
             },
@@ -2516,6 +2526,7 @@ mod tests {
                     egui::Id::new(FADE_EDITOR_ID),
                     false,
                     false,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
                 let bg = ui.visuals().text_edit_bg_color();
@@ -3188,6 +3199,7 @@ mod tests {
                     egui::Id::new(SCROLL_EDITOR_ID),
                     show_typewriter,
                     show_focus,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 )
                 .id;
@@ -4442,6 +4454,7 @@ mod tests {
                     egui::Id::new(FOCUS_EDITOR_ID),
                     false,
                     show_focus,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
                 let bg = ui.visuals().text_edit_bg_color();
@@ -4677,6 +4690,7 @@ mod tests {
                     egui::Id::new(FOCUS_EDITOR_ID),
                     typewriter,
                     focus,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
                 let bg = ui.visuals().text_edit_bg_color();
@@ -4854,6 +4868,7 @@ mod tests {
                 egui::Id::new("live-highlight-test"),
                 false,
                 false,
+                &crate::keymap::Keymap::builtin(),
                 &mut outbox,
             );
         });
@@ -4982,6 +4997,7 @@ mod tests {
                 egui::Id::new("gap-test"),
                 false,
                 false,
+                &crate::keymap::Keymap::builtin(),
                 &mut outbox,
             );
         });

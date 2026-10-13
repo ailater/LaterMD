@@ -97,6 +97,25 @@ impl LaterMdApp {
         for message in std::mem::take(outbox) {
             state.apply(message);
         }
+        // 编辑器右键菜单的合成事件出口(context-menu-plan §3 M1):归约
+        // 只把 `Message::EditAction` 记账到 `pending_edit_action`,事件
+        // 推入留在这层 —— 必须 logic() 阶段进输入流(ui() 阶段推的当帧
+        // 末被清空),且归约在 ui() 之前,同帧 TextEdit 即可消费。粘贴的
+        // 剪贴板文本在推之前同步读(mac_menu 先例,风险面同注);兜底
+        // 消息(无文本回落图片粘贴)当帧照常归约。浏览态无处还焦,动作
+        // 作废(没有可消费事件的编辑器)。
+        for action in std::mem::take(&mut state.pending_edit_action) {
+            let paste = action
+                .needs_paste_text()
+                .then(crate::edit_events::system_paste_text)
+                .flatten();
+            if let Some(fallback) = state
+                .editor_focus_id()
+                .and_then(|focus| crate::edit_events::dispatch(action, ctx, paste, focus))
+            {
+                state.apply(fallback);
+            }
+        }
         // 长按修饰键检测(#54 M1):与命令快捷键同层的顶层输入处理,但
         // 扫描必须排在 poll_shortcuts / poll_capture 之前——快捷键消费会
         // 从事件流删掉 Key 事件,后扫会把「按过 Ctrl+S」看成「只在按
@@ -620,6 +639,8 @@ impl LaterMdApp {
                     // 活动块,源码模式不接线 —— 边界见 decisions-pending #122;
                     // 关闭 = 现状零变化)。
                     state.theme.show_focus_mode,
+                    // 右键菜单条目的键位标注与菜单栏同源(context-menu-plan §3 M1)。
+                    &state.keymap,
                     outbox,
                     &find_marks,
                 );
@@ -3790,6 +3811,49 @@ mod tests {
             repeat: false,
             modifiers,
         }
+    }
+
+    /// 右键菜单编辑动作的合成事件出口(context-menu-plan §3 M1 验收 3
+    /// 的消息侧):outbox 里的 `Message::EditAction` 在同一 logic 帧内
+    /// 变成输入流里的合成事件,记账位取走即清;粘贴无文本回落图片粘贴
+    /// 消息当帧归约。
+    #[test]
+    fn edit_action_message_pushes_synthetic_event_same_frame() {
+        use crate::edit_events::EditAction;
+
+        let mut app = LaterMdApp::default();
+        app.outbox.push(Message::EditAction(EditAction::Undo));
+        app.outbox.push(Message::EditAction(EditAction::Paste));
+
+        let ctx = egui::Context::default();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen_in = seen.clone();
+        let output = ctx.run_ui(RawInput::default(), |ui| {
+            app.reduce(ui.ctx());
+            *seen_in.borrow_mut() = ui.input(|input| input.events.clone());
+        });
+        output.drop_without_applying_deltas();
+
+        let events = seen.borrow();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Z,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.command && !modifiers.shift
+            )),
+            "撤销应变成 Cmd/Ctrl+Z 合成按键"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Paste(_))),
+            "粘贴的合成事件应已入流(测试环境读到的系统剪贴板内容不定,只验事件形态)"
+        );
+        assert!(app.state.pending_edit_action.is_empty(), "记账队列取走即清");
     }
 
     /// 跑一帧归约(与 eframe 同序:begin_pass 之后调 logic),返回该帧下发的

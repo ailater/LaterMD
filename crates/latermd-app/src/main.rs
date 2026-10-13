@@ -20,6 +20,7 @@ mod bed;
 mod clipboard;
 mod command;
 mod compose;
+mod edit_events;
 #[cfg(test)]
 mod editor_typography_acceptance;
 mod export;
