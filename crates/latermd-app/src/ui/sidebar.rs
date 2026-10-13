@@ -18,7 +18,7 @@
 use crate::backlink_panel::{jump_target, Backlink, BacklinkState, BacklinkStatus};
 use crate::command::Command;
 use crate::filetree::{DirChildren, FileTreeState, TreeEntry};
-use crate::git_panel::{DiffView, GitPanelState};
+use crate::git_panel::{DiffView, GitPanelState, HistoryScope};
 use crate::git_split_diff::{inline_segments, line_no_text, split_rows, SplitRow, MAX_SPLIT_PAIRS};
 use crate::keymap::Keymap;
 use crate::search::{SearchResult, SearchState, SearchStatus, MAX_HITS};
@@ -1548,6 +1548,9 @@ pub(crate) fn tree_context_menu(ui: &mut egui::Ui, entry: &TreeEntry, outbox: &m
         outbox.push(Message::FileTreeDeleteRequested(entry.path.clone()));
     }
     ui.separator();
+    if !entry.is_dir && ui.button("查看文件历史").clicked() {
+        outbox.push(Message::GitFileHistoryRequested(entry.path.clone()));
+    }
     if ui.button("复制路径").clicked() {
         outbox.push(Message::FileTreeCopyPath {
             path: entry.path.clone(),
@@ -1686,48 +1689,118 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
 
     // diff 区/历史折叠区之间的节间留白。
     panel.add_space(tokens::gap::XS);
-    egui::CollapsingHeader::new(format!("历史({})", git.commits.len()))
+    let count = match git.history_scope {
+        HistoryScope::Repo => git.commits.len(),
+        HistoryScope::File => git.file_history.as_ref().map_or(0, |h| h.commits.len()),
+    };
+    egui::CollapsingHeader::new(format!("历史({count})"))
         .id_salt("git-history")
         .default_open(true)
         .show(panel, |ui| {
+            history_scope_toggle(ui, git.history_scope, outbox);
             egui::ScrollArea::vertical()
                 .id_salt("git-log-scroll")
                 .auto_shrink([false, false])
                 .max_height(220.0)
-                .show(ui, |ui| {
-                    if git.commits.is_empty() {
-                        ui.weak("没有提交历史");
-                    }
-                    for commit in &git.commits {
-                        commit_row(
-                            ui,
-                            commit,
-                            git.fetched_at,
-                            git.history
-                                .as_ref()
-                                .is_some_and(|history| history.commit.hash == commit.hash),
-                            outbox,
-                        );
-                        if git
-                            .history
-                            .as_ref()
-                            .is_some_and(|history| history.commit.hash == commit.hash)
-                        {
-                            if let Some(history) = &git.history {
-                                if let Some(error) = &history.error {
-                                    ui.weak(format!("⚠ {error}"));
-                                }
-                                for file in &history.files {
-                                    commit_file_row(ui, file, &commit.hash, outbox);
-                                }
-                                if history.truncated > 0 {
-                                    ui.weak(format!("…还有 {} 个文件未显示", history.truncated));
-                                }
-                            }
-                        }
-                    }
+                .show(ui, |ui| match git.history_scope {
+                    HistoryScope::Repo => repo_history_rows(ui, git, outbox),
+                    HistoryScope::File => file_history_rows(ui, git, outbox),
                 });
         });
+}
+
+/// 历史区范围切换(「全部 / 本文件」):当前态高亮,点击发
+/// [`Message::GitHistoryScopeChanged`]。返回 (全部, 本文件) 的响应矩形供
+/// 测试定位点击(与 `diff_view_toggle` 同手法)。
+fn history_scope_toggle(
+    ui: &mut egui::Ui,
+    current: HistoryScope,
+    outbox: &mut Vec<Message>,
+) -> (egui::Rect, egui::Rect) {
+    let repo = ui.selectable_label(
+        current == HistoryScope::Repo,
+        egui::RichText::new("全部").small(),
+    );
+    if repo.clicked() {
+        outbox.push(Message::GitHistoryScopeChanged(HistoryScope::Repo));
+    }
+    let file = ui.selectable_label(
+        current == HistoryScope::File,
+        egui::RichText::new("本文件").small(),
+    );
+    if file.clicked() {
+        outbox.push(Message::GitHistoryScopeChanged(HistoryScope::File));
+    }
+    (repo.rect, file.rect)
+}
+
+/// 「全部」范围:仓库近期提交 + 点击展开的文件清单(既有口径原样)。
+fn repo_history_rows(ui: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message>) {
+    if git.commits.is_empty() {
+        ui.weak("没有提交历史");
+    }
+    for commit in &git.commits {
+        let expanded = git
+            .history
+            .as_ref()
+            .is_some_and(|history| history.commit.hash == commit.hash);
+        commit_row(ui, commit, git.fetched_at, expanded, outbox);
+        commit_files_expansion(ui, git, &commit.hash, outbox);
+    }
+}
+
+/// 「本文件」范围:单文件的全部修改记录(`FileHistory`)。行与「全部」范围
+/// 同一套 `commit_row`,点开同样是那笔提交的文件清单。
+fn file_history_rows(ui: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message>) {
+    let Some(history) = &git.file_history else {
+        ui.weak("右键文件树里的文件 → 查看文件历史");
+        return;
+    };
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let shown =
+        crate::ui::tabs::elide_text(ui, &history.path, &font, ui.available_width().max(1.0));
+    ui.monospace(shown).on_hover_text(&history.path);
+    if let Some(error) = &history.error {
+        ui.weak(format!("⚠ {error}"));
+        return;
+    }
+    if history.commits.is_empty() {
+        ui.weak("该文件还没有提交记录");
+        return;
+    }
+    for commit in &history.commits {
+        let expanded = git
+            .history
+            .as_ref()
+            .is_some_and(|selected| selected.commit.hash == commit.hash);
+        commit_row(ui, commit, git.fetched_at, expanded, outbox);
+        commit_files_expansion(ui, git, &commit.hash, outbox);
+    }
+}
+
+/// 展开的提交文件清单(两个范围共用):错误文案 / 文件行 / 截断提示。
+fn commit_files_expansion(
+    ui: &mut egui::Ui,
+    git: &GitPanelState,
+    hash: &str,
+    outbox: &mut Vec<Message>,
+) {
+    let Some(history) = git
+        .history
+        .as_ref()
+        .filter(|history| history.commit.hash == hash)
+    else {
+        return;
+    };
+    if let Some(error) = &history.error {
+        ui.weak(format!("⚠ {error}"));
+    }
+    for file in &history.files {
+        commit_file_row(ui, file, hash, outbox);
+    }
+    if history.truncated > 0 {
+        ui.weak(format!("…还有 {} 个文件未显示", history.truncated));
+    }
 }
 
 /// Git 行的统一高度(与旧 `Button` 行一致的 interact 尺寸,行盒恒定)。
@@ -3627,6 +3700,101 @@ mod tests {
             git_panel(ui, &truncated, &mut Vec::new());
         })
         .drop_without_applying_deltas();
+    }
+
+    /// 历史区范围切换:点「本文件」发范围消息;File 范围渲染文件名与该
+    /// 文件自己的提交,仓库的其他提交不出现。
+    #[test]
+    fn git_history_scope_toggle_sends_message_and_file_history_renders_own_commits() {
+        let ctx = egui::Context::default();
+        let mut outbox = Vec::new();
+        let rects = Cell::new((Rect::NOTHING, Rect::NOTHING));
+        ctx.run_ui(RawInput::default(), |ui| {
+            rects.set(history_scope_toggle(ui, HistoryScope::Repo, &mut outbox));
+        })
+        .drop_without_applying_deltas();
+        assert!(outbox.is_empty(), "仅渲染不产生消息");
+
+        let center = rects.get().1.center();
+        let click = |pressed| Event::PointerButton {
+            pos: center,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        ctx.run_ui(
+            RawInput {
+                events: vec![Event::PointerMoved(center), click(true), click(false)],
+                ..Default::default()
+            },
+            |ui| {
+                history_scope_toggle(ui, HistoryScope::Repo, &mut outbox);
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            outbox,
+            vec![Message::GitHistoryScopeChanged(HistoryScope::File)]
+        );
+
+        // File 范围:文件名行 + 该文件自己的提交
+        let mut git = GitPanelState::default();
+        git.commits.push(CommitInfo {
+            hash: "1111111111111111111111111111111111111111".to_owned(),
+            short_hash: "1111111".to_owned(),
+            subject: "别的文件的提交".to_owned(),
+            author: "LaterMD <latermd@test>".to_owned(),
+            time: 1_700_000_000,
+        });
+        git.history_scope = HistoryScope::File;
+        git.file_history = Some(crate::git_panel::FileHistory {
+            path: "docs/note.md".to_owned(),
+            commits: vec![CommitInfo {
+                hash: "2222222222222222222222222222222222222222".to_owned(),
+                short_hash: "2222222".to_owned(),
+                subject: "改笔记".to_owned(),
+                author: "LaterMD <latermd@test>".to_owned(),
+                time: 1_700_000_001,
+            }],
+            error: None,
+        });
+        let output = ctx.run_ui(RawInput::default(), |ui| {
+            git_panel(ui, &git, &mut Vec::new());
+        });
+        let texts = shape_texts(&output);
+        output.drop_without_applying_deltas();
+        assert!(
+            texts.iter().any(|text| text.contains("note.md")),
+            "文件名行:{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("改笔记")),
+            "该文件的提交:{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("别的文件的提交")),
+            "本文件范围不含无关提交:{texts:?}"
+        );
+
+        // 空态:查过但没有提交记录 → 引导文案,不 panic
+        let empty = GitPanelState {
+            history_scope: HistoryScope::File,
+            file_history: Some(crate::git_panel::FileHistory {
+                path: "fresh.md".to_owned(),
+                commits: Vec::new(),
+                error: None,
+            }),
+            ..GitPanelState::default()
+        };
+        let output = ctx.run_ui(RawInput::default(), |ui| {
+            git_panel(ui, &empty, &mut Vec::new());
+        });
+        let texts = shape_texts(&output);
+        output.drop_without_applying_deltas();
+        assert!(
+            texts.iter().any(|text| text.contains("还没有提交记录")),
+            "{texts:?}"
+        );
     }
 
     /// Git 行命中区:整行点击发选中/展开消息;行尾回滚图标是独立命中区
