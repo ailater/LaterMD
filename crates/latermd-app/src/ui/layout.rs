@@ -454,77 +454,81 @@ impl LaterMdApp {
             &mut self.state.layout.left_width,
         );
 
-        // ④ 右栏:只读预览。 `Panel::right` 必须在 `CentralPanel` 之前加
-        // (先加的最外层),编辑器因此是吃剩余宽度的那个 —— 左右任意开合
-        // 都只是让中间伸缩,不会挤掉谁。
+        // ④ 右栏:只读预览。审阅 Git diff 时临时让出空间,不改写用户的
+        // layout.right 或保存的 preview 宽度;退出审阅后原样恢复。
+        // 判定走 diff_target(工作区或历史文件),两者都把中央区交给 diff。
+        let git_diff_workspace =
+            self.state.git.diff_workspace_open && self.state.git.diff_target.is_some();
         let preview_max = (ui.available_width() - crate::ui::workbench::EDITOR_MIN_W)
             .clamp(tokens::PREVIEW_MIN_W, 880.0);
         crate::ui::workbench::restore_panel_width(ui, "preview", self.state.layout.right_width);
         let right = &mut self.state.layout.right;
-        // 拖动命中半径**只在预览面板这一帧**局部抬高(出厂 3.0 → 6.0,
-        // 命中带宽 6px → 12px)。理由与取值见
-        // [`crate::ui::tokens::PREVIEW_DIVIDER_GRAB`]:6px 带宽落在同底色的
-        // 面板之间,没有任何视觉线索指向它,实测完全找不到可拖处。
-        //
-        // **必须局部改而不是改全局 `Style`**:egui 的 resize 半径是
-        // `Style.interaction` 上的单值,全局抬高会连带 nav 右缘 ——
-        // 那里紧贴编辑区正文,凭空多出 6px 误吞点击的窗口(选中文字会
-        // 失手)。这里在 `show_collapsible` 前打一个临时 style,面板读完
-        // 即恢复,nav 与后续 panel 拿到的仍是出厂值。
-        let grab_radius = ui.style().interaction.resize_grab_radius_side;
-        let restore_grab = grab_radius != tokens::PREVIEW_DIVIDER_GRAB;
-        if restore_grab {
-            ui.style_mut().interaction.resize_grab_radius_side = tokens::PREVIEW_DIVIDER_GRAB;
-        }
-        egui::Panel::right("preview")
-            .resizable(true)
-            .show_separator_line(false)
-            .default_size(if workbench {
-                ((ui.available_width() - 32.0) * 0.5).max(crate::ui::tokens::PREVIEW_MIN_W)
-            } else {
-                crate::ui::tokens::PREVIEW_DEFAULT_W
-            })
-            .size_range(crate::ui::tokens::PREVIEW_MIN_W..=preview_max)
-            .frame(
-                egui::Frame::default()
-                    // 预览正文到面板边界的贴边:workbench 16 / 经典 8(main 的
-                    // workbench 外观分支)。16 无 inset 档(SM4/MD8/LG12),一半换
-                    // 一半留更乱 → 与 nav 的 Margin::symmetric(8,2) 同判,整处
-                    // 保留字面量(设计系统 T2b 判例;inset::MD 另有 OVERLAY_MARGIN 消费)。
-                    .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
-                    .fill(crate::theme::shell(ui).content)
-                    // 左缘那根常显细线走 [`crate::ui::workbench::preview_divider`]
-                    // 自绘(画在面板内容之外的 layer 上),故此处仍为 NONE:
-                    // `Frame::stroke` 是**四边**描边,会给预览的顶/右/底也描上,
-                    // 而那三边紧贴标题栏/窗口缘,是多余的线。
-                    .stroke(egui::Stroke::NONE),
-            )
-            .show_collapsible(ui, right, |ui| {
-                crate::ui::workbench::pane_heading(ui, "对照预览", "只读");
-                let tab = self.state.tabs.current_mut();
-                // heal 只在 AI 流式写入本标签时开:补闭合是流式残缺帧的
-                // 必需品,完整文档上是恒等变换但逐行全文扫描,稳态帧不该付。
-                let streaming_here =
-                    self.state.ai.is_streaming() && self.state.ai_active_tab == Some(tab.id);
-                crate::ui::preview::ui(
-                    ui,
-                    &mut tab.preview,
-                    &self.state.ai,
-                    tab.id,
-                    streaming_here,
-                    // 相对图片以文档所在目录为锚拼 file://(未落盘为 None)
-                    tab.document
-                        .path
-                        .as_deref()
-                        .and_then(std::path::Path::parent),
-                    &mut self.outbox,
-                );
-            });
-        if restore_grab {
-            // nav 在本函数里**更早** show(③ 在 ④ 之前),它读到的已经是出厂值,
-            // 临时 style 全程没碰过它。这里恢复后,受影响的只有后续 panel
-            // ——而它们都不 resizable,故这行等价于「不留任何全局副作用」。
-            ui.style_mut().interaction.resize_grab_radius_side = grab_radius;
+        if !git_diff_workspace {
+            // 拖动命中半径**只在预览面板这一帧**局部抬高(出厂 3.0 → 6.0,
+            // 命中带宽 6px → 12px)。理由与取值见
+            // [`crate::ui::tokens::PREVIEW_DIVIDER_GRAB`]:6px 带宽落在同底色的
+            // 面板之间,没有任何视觉线索指向它,实测完全找不到可拖处。
+            //
+            // **必须局部改而不是改全局 `Style`**:egui 的 resize 半径是
+            // `Style.interaction` 上的单值,全局抬高会连带 nav 右缘 ——
+            // 那里紧贴编辑区正文,凭空多出 6px 误吞点击的窗口(选中文字会
+            // 失手)。这里在 `show_collapsible` 前打一个临时 style,面板读完
+            // 即恢复,nav 与后续 panel 拿到的仍是出厂值。
+            let grab_radius = ui.style().interaction.resize_grab_radius_side;
+            let restore_grab = grab_radius != tokens::PREVIEW_DIVIDER_GRAB;
+            if restore_grab {
+                ui.style_mut().interaction.resize_grab_radius_side = tokens::PREVIEW_DIVIDER_GRAB;
+            }
+            egui::Panel::right("preview")
+                .resizable(true)
+                .show_separator_line(false)
+                .default_size(if workbench {
+                    ((ui.available_width() - 32.0) * 0.5).max(crate::ui::tokens::PREVIEW_MIN_W)
+                } else {
+                    crate::ui::tokens::PREVIEW_DEFAULT_W
+                })
+                .size_range(crate::ui::tokens::PREVIEW_MIN_W..=preview_max)
+                .frame(
+                    egui::Frame::default()
+                        // 预览正文到面板边界的贴边:workbench 16 / 经典 8(main 的
+                        // workbench 外观分支)。16 无 inset 档(SM4/MD8/LG12),一半换
+                        // 一半留更乱 → 与 nav 的 Margin::symmetric(8,2) 同判,整处
+                        // 保留字面量(设计系统 T2b 判例;inset::MD 另有 OVERLAY_MARGIN 消费)。
+                        .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
+                        .fill(crate::theme::shell(ui).content)
+                        // 左缘那根常显细线走 [`crate::ui::workbench::preview_divider`]
+                        // 自绘(画在面板内容之外的 layer 上),故此处仍为 NONE:
+                        // `Frame::stroke` 是**四边**描边,会给预览的顶/右/底也描上,
+                        // 而那三边紧贴标题栏/窗口缘,是多余的线。
+                        .stroke(egui::Stroke::NONE),
+                )
+                .show_collapsible(ui, right, |ui| {
+                    crate::ui::workbench::pane_heading(ui, "对照预览", "只读");
+                    let tab = self.state.tabs.current_mut();
+                    // heal 只在 AI 流式写入本标签时开:补闭合是流式残缺帧的
+                    // 必需品,完整文档上是恒等变换但逐行全文扫描,稳态帧不该付。
+                    let streaming_here =
+                        self.state.ai.is_streaming() && self.state.ai_active_tab == Some(tab.id);
+                    crate::ui::preview::ui(
+                        ui,
+                        &mut tab.preview,
+                        &self.state.ai,
+                        tab.id,
+                        streaming_here,
+                        // 相对图片以文档所在目录为锚拼 file://(未落盘为 None)
+                        tab.document
+                            .path
+                            .as_deref()
+                            .and_then(std::path::Path::parent),
+                        &mut self.outbox,
+                    );
+                });
+            if restore_grab {
+                // nav 在本函数里**更早** show(③ 在 ④ 之前),它读到的已经是出厂值,
+                // 临时 style 全程没碰过它。这里恢复后,受影响的只有后续 panel
+                // ——而它们都不 resizable,故这行等价于「不留任何全局副作用」。
+                ui.style_mut().interaction.resize_grab_radius_side = grab_radius;
+            }
         }
         crate::ui::workbench::remember_panel_width(
             ui,
@@ -571,6 +575,47 @@ impl LaterMdApp {
                     if let Some(recover) = current.recover.as_ref() {
                         recovery_bar(ui, recover, current.id, outbox);
                     }
+                }
+                if git_diff_workspace {
+                    let git = &state.git;
+                    ui.horizontal(|ui| {
+                        ui.heading("Git 差异");
+                        match git.diff_target.as_ref() {
+                            Some(crate::git_panel::DiffTarget::WorkingTree { path }) => {
+                                ui.monospace(path);
+                            }
+                            Some(crate::git_panel::DiffTarget::Commit { hash, path }) => {
+                                let parent = git
+                                    .history
+                                    .as_ref()
+                                    .and_then(|history| history.parent.as_ref())
+                                    .map(|commit| commit.short_hash.as_str())
+                                    .unwrap_or("空树");
+                                let subject = git
+                                    .history
+                                    .as_ref()
+                                    .map(|history| history.commit.subject.as_str())
+                                    .unwrap_or_default();
+                                ui.weak(format!(
+                                    "{parent} → {} · {subject}",
+                                    hash.chars().take(7).collect::<String>()
+                                ));
+                                ui.monospace(path);
+                            }
+                            None => {}
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("返回编辑器").clicked() {
+                                outbox.push(Message::GitDiffWorkspaceClosed);
+                            }
+                            crate::ui::sidebar::diff_view_toggle(ui, git.diff_view, outbox);
+                        });
+                    });
+                    ui.add_space(crate::ui::tokens::SPACE_XS);
+                    ui.weak("HEAD → 工作区 · 只读审阅");
+                    ui.add_space(crate::ui::tokens::SPACE_XS);
+                    crate::ui::sidebar::render_git_diff(ui, git, ui.available_height());
+                    return;
                 }
                 let tab = state.tabs.current_mut();
                 let crate::tabs::TabState {
@@ -720,7 +765,11 @@ impl LaterMdApp {
         //
         // 这条线与 egui 自带的 hover/drag 高亮线**并存且不冲突**:后者画在
         // `parent_ui.painter()` 上(本函数下就是这层之下),且只在交互时出现。
-        crate::ui::workbench::preview_divider(ui, self.state.layout.right);
+        // Git diff 审阅帧没有右预览面板:跳过分隔线,否则 PanelState 里
+        // 残留的上一次矩形会把线画进 diff 区。
+        if !git_diff_workspace {
+            crate::ui::workbench::preview_divider(ui, self.state.layout.right);
+        }
 
         // ⑥ 自绘窗口骨架之二:屏幕四边/四角的透明缩放命令区。**必须在
         // 全部 panel 之后分配**(机制见 ui::titlebar::edge_resize_zones 的

@@ -21,7 +21,31 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use latermd_git::{CommitInfo, FileDiff, FileStatus, StatusKind};
+use latermd_git::{CommitFileChange, CommitInfo, FileDiff, FileStatus, StatusKind};
+
+/// 主工作区当前正在审阅的 diff 来源。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiffTarget {
+    /// 当前工作区相对 HEAD 的未提交改动。
+    WorkingTree { path: String },
+    /// 某次历史提交相对其第一父提交的改动。
+    Commit { hash: String, path: String },
+}
+
+/// 当前展开的历史提交及其文件清单。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistorySelection {
+    /// 提交元数据。
+    pub commit: CommitInfo,
+    /// 比较基准；初始提交没有父提交，表示空树。
+    pub parent: Option<CommitInfo>,
+    /// 该提交涉及的文件。
+    pub files: Vec<CommitFileChange>,
+    /// 超出列表上限的文件数。
+    pub truncated: usize,
+    /// 加载失败时的用户可见文案。
+    pub error: Option<String>,
+}
 
 /// Git 状态自动刷新间隔。3s 在「角标足够新」与「零感开销」之间取中:
 /// 每次刷新是两次毫秒级本地读(status + log),空闲时每 3s 唤醒一帧。
@@ -77,6 +101,12 @@ pub struct GitPanelState {
     pub diff_lines: Option<FileDiff>,
     /// diff 区视图模式(#53 M2):双栏(默认)/统一;会话内切换,不持久化。
     pub diff_view: DiffView,
+    /// 主工作区当前 diff 来源;`None` 表示尚未选中文件。
+    pub diff_target: Option<DiffTarget>,
+    /// 当前展开的历史提交及其文件清单。
+    pub history: Option<HistorySelection>,
+    /// 是否把选中的 diff 放进主工作区审阅。会话内状态,重启回编辑器。
+    pub diff_workspace_open: bool,
     /// 待确认回滚的文件(相对仓库根);`Some` = 确认模态可见。
     pub confirm_checkout: Option<String>,
     /// 下次自动刷新时刻;到点由归约侧轮询触发(见模块文档)。
@@ -98,6 +128,9 @@ impl Default for GitPanelState {
             diff: String::new(),
             diff_lines: None,
             diff_view: DiffView::Split,
+            diff_target: None,
+            history: None,
+            diff_workspace_open: false,
             confirm_checkout: None,
             refresh_due: Instant::now(),
         }
@@ -153,6 +186,8 @@ impl GitPanelState {
                 self.selected = None;
                 self.diff.clear();
                 self.diff_lines = None;
+                self.diff_target = None;
+                self.diff_workspace_open = false;
             }
         }
         self.entries = snapshot.entries;
@@ -168,9 +203,80 @@ impl GitPanelState {
             return;
         }
         self.selected = Some(path.to_owned());
+        self.history = None;
+        self.diff_target = Some(DiffTarget::WorkingTree {
+            path: path.to_owned(),
+        });
+        self.diff_workspace_open = true;
         self.reload_diff();
     }
 
+    /// 加载一条历史提交的文件清单，不改变工作区文件选择。
+    pub fn select_commit(&mut self, root: &Path, hash: &str) {
+        match latermd_git::commit_files(root, hash, latermd_git::DEFAULT_STATUS_LIMIT) {
+            Ok(files) => {
+                self.history = Some(HistorySelection {
+                    commit: files.commit,
+                    parent: files.parent,
+                    files: files.entries,
+                    truncated: files.truncated,
+                    error: None,
+                });
+            }
+            Err(error) => {
+                self.history = Some(HistorySelection {
+                    commit: CommitInfo {
+                        hash: hash.to_owned(),
+                        short_hash: hash.chars().take(7).collect(),
+                        subject: String::new(),
+                        author: String::new(),
+                        time: 0,
+                    },
+                    parent: None,
+                    files: Vec::new(),
+                    truncated: 0,
+                    error: Some(error),
+                });
+            }
+        }
+    }
+
+    /// 选择历史提交中的文件并把其 parent → commit diff 放进主工作区。
+    pub fn select_commit_file(&mut self, root: &Path, hash: &str, path: &str) {
+        let Some(history) = self.history.as_ref() else {
+            return;
+        };
+        if history.commit.hash != hash || !history.files.iter().any(|file| file.path == path) {
+            return;
+        }
+        match latermd_git::commit_file_diff(root, hash, path) {
+            Ok(diff) => {
+                self.selected = None;
+                self.diff = diff.text;
+                self.diff_lines = Some(diff.lines);
+                self.diff_target = Some(DiffTarget::Commit {
+                    hash: hash.to_owned(),
+                    path: path.to_owned(),
+                });
+                self.diff_workspace_open = true;
+            }
+            Err(error) => {
+                self.selected = None;
+                self.diff = error;
+                self.diff_lines = None;
+                self.diff_target = Some(DiffTarget::Commit {
+                    hash: hash.to_owned(),
+                    path: path.to_owned(),
+                });
+                self.diff_workspace_open = true;
+            }
+        }
+    }
+
+    /// 关闭主工作区 Git 审阅,保留选中项与 diff 快照供再次打开。
+    pub fn close_diff_workspace(&mut self) {
+        self.diff_workspace_open = false;
+    }
     /// 点「回滚此文件」(`Message::GitCheckoutRequested` 的归约):只置确认
     /// 模态。真正的写操作在用户显式确认之后([`Self::confirm_checkout`])。
     pub fn request_checkout(&mut self, path: String) {
@@ -225,9 +331,12 @@ impl GitPanelState {
         self.truncated = 0;
         self.badges.clear();
         self.commits.clear();
+        self.history = None;
         self.selected = None;
         self.diff.clear();
         self.diff_lines = None;
+        self.diff_target = None;
+        self.diff_workspace_open = false;
         self.confirm_checkout = None;
     }
 
@@ -396,7 +505,14 @@ mod tests {
         git.refresh(Some(&dir));
         git.select("a.md");
         assert_eq!(git.selected.as_deref(), Some("a.md"));
+        assert!(git.diff_workspace_open, "选中文件自动进入主工作区审阅");
         assert!(git.diff.contains("+新行"), "{}", git.diff);
+
+        git.close_diff_workspace();
+        assert!(!git.diff_workspace_open, "关闭审阅不清除选中和 diff");
+        assert_eq!(git.selected.as_deref(), Some("a.md"));
+        git.select("a.md");
+        assert!(git.diff_workspace_open, "再次选中可重新打开审阅");
 
         git.select("not-in-list.md");
         assert_eq!(
@@ -440,6 +556,67 @@ mod tests {
         assert_eq!(git.selected, None);
         assert_eq!(git.diff, "");
         assert_eq!(git.diff_lines, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 历史链路:select_commit 展开文件清单(初始提交 parent=None);
+    /// select_commit_file 打开主工作区、来源标记为 Commit、工作区选中
+    /// 让位;坏 hash 留错误文案;切回工作区文件清历史展开。
+    #[test]
+    fn select_commit_expands_files_and_commit_file_opens_workspace() {
+        use latermd_git::CommitChangeKind;
+        let dir = temp_repo("history");
+        std::fs::write(dir.join("b.md"), "新增\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "第二笔"]);
+        std::fs::write(dir.join("a.md"), "改\n").unwrap();
+
+        let mut git_state = GitPanelState::default();
+        git_state.refresh(Some(&dir));
+        let hash = git_state.commits[0].hash.clone();
+
+        git_state.select_commit(&dir, &hash);
+        let history = git_state.history.as_ref().expect("历史展开就位");
+        assert_eq!(history.commit.subject, "第二笔");
+        assert!(history.parent.is_some(), "第二笔有父提交");
+        assert!(history.error.is_none());
+        assert!(
+            history
+                .files
+                .iter()
+                .any(|file| file.path == "b.md" && file.kind == CommitChangeKind::Added),
+            "{:?}",
+            history.files
+        );
+
+        git_state.select_commit_file(&dir, &hash, "b.md");
+        assert!(git_state.diff_workspace_open, "历史文件进入主工作区");
+        assert_eq!(
+            git_state.diff_target,
+            Some(DiffTarget::Commit {
+                hash: hash.clone(),
+                path: "b.md".to_owned()
+            })
+        );
+        assert_eq!(git_state.selected, None, "历史目标下工作区选中让位");
+        assert!(git_state.diff.contains("+新增"), "{}", git_state.diff);
+        assert!(git_state.diff_lines.is_some(), "双栏通道就位");
+
+        // 坏 hash:错误文案进历史展开,不清旧状态
+        git_state.select_commit(&dir, "not-a-hash");
+        let history = git_state.history.as_ref().expect("失败也保留展开位");
+        assert!(history.error.is_some(), "{:?}", history.error);
+
+        // 切回工作区文件:历史展开清空,来源切回 WorkingTree
+        git_state.refresh(Some(&dir));
+        git_state.select("a.md");
+        assert_eq!(git_state.history, None, "工作区选择清历史展开");
+        assert_eq!(
+            git_state.diff_target,
+            Some(DiffTarget::WorkingTree {
+                path: "a.md".to_owned()
+            })
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
