@@ -116,6 +116,11 @@ impl LaterMdApp {
                 state.apply(fallback);
             }
         }
+        // 「复制文本」出口(`Message::CopyText` / `Message::FileTreeCopyPath`
+        // 的落点):state 没有 `egui::Context`,写剪贴板留在这层。取走即清。
+        if let Some(text) = state.pending_copy_text.take() {
+            ctx.copy_text(text);
+        }
         // 长按修饰键检测(#54 M1):与命令快捷键同层的顶层输入处理,但
         // 扫描必须排在 poll_shortcuts / poll_capture 之前——快捷键消费会
         // 从事件流删掉 Key 事件,后扫会把「按过 Ctrl+S」看成「只在按
@@ -836,6 +841,43 @@ impl LaterMdApp {
             }
             if cancel.clicked() {
                 outbox.push(Message::FileTreeNewFileCancelled);
+            }
+        }
+
+        // 文件树右键「新建文件夹」浮窗(context-menu-plan §3 M2):与新建
+        // 文档同纪律 —— 只收草稿,落盘在归约(confirm_new_folder)。
+        if let Some(new_folder) = self.state.file_tree.new_folder.as_mut() {
+            let (confirm, cancel) = crate::ui::sidebar::new_folder_dialog(ui, new_folder);
+            if confirm.clicked() {
+                outbox.push(Message::FileTreeNewFolderConfirmed);
+            }
+            if cancel.clicked() {
+                outbox.push(Message::FileTreeNewFolderCancelled);
+            }
+        }
+
+        // 文件树右键「重命名」浮窗:草稿预填现名,确认走归约
+        // (confirm_rename:真实改名 + 标签换绑)。
+        if let Some(rename) = self.state.file_tree.rename.as_mut() {
+            let (confirm, cancel) = crate::ui::sidebar::rename_dialog(ui, rename);
+            if confirm.clicked() {
+                outbox.push(Message::FileTreeRenameConfirmed);
+            }
+            if cancel.clicked() {
+                outbox.push(Message::FileTreeRenameCancelled);
+            }
+        }
+
+        // 文件树右键「删除」确认浮窗:只收确认,删除在归约
+        // (confirm_delete:dirty 拒绝 / 干净关标签 / 废纸篓)。
+        if let Some(path) = self.state.file_tree.delete_confirm.as_ref() {
+            let is_dir = path.is_dir();
+            let (confirm, cancel) = crate::ui::sidebar::delete_confirm_dialog(ui, path, is_dir);
+            if confirm.clicked() {
+                outbox.push(Message::FileTreeDeleteConfirmed);
+            }
+            if cancel.clicked() {
+                outbox.push(Message::FileTreeDeleteCancelled);
             }
         }
 
@@ -1748,7 +1790,7 @@ fn selection_ai_polish_dialog(
 /// * 按钮右对齐:中性「取消」+ 危险实心确认钮([`danger_button`])。
 ///
 /// 返回(确认, 取消)按钮的响应,测试定位用;真正的动作都在归约。
-fn destructive_confirm_dialog(
+pub(crate) fn destructive_confirm_dialog(
     ui: &mut egui::Ui,
     title: &str,
     lead: &str,

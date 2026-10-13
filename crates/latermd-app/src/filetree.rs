@@ -56,8 +56,30 @@ pub struct FileTreeState {
     pub children: HashMap<PathBuf, DirChildren>,
     /// 新建文件浮窗的输入状态;`Some` 时 UI 显示浮窗。同一时间至多一个。
     pub new_file: Option<NewFileDraft>,
+    /// 新建文件夹浮窗的输入状态(context-menu-plan §3 M2);字段语义与
+    /// [`NewFileDraft`] 相同,只是确认走 `create_folder`(不补 `.md`)。
+    /// 同一时间至多一个,与 `new_file` 互斥由入口菜单天然保证(同一行
+    /// 的菜单一次只发一条请求)。
+    pub new_folder: Option<NewFileDraft>,
+    /// 重命名浮窗的输入状态(context-menu-plan §3 M2):目标按**稳定
+    /// 路径**存(浮窗开着期间树可以随便动,「改哪个」不漂移)。
+    pub rename: Option<RenameDraft>,
+    /// 删除确认的目标路径;`Some` 时 UI 显示确认浮窗。真正的删除在
+    /// 归约确认后经 `trash_delete` 走系统废纸篓。
+    pub delete_confirm: Option<PathBuf>,
     /// 「刷新」按钮的反馈窗口起点(见 [`FileTreeState::begin_refresh`])。
     pub refresh_started: Option<std::time::Instant>,
+}
+
+/// 重命名浮窗的输入状态(`Message::FileTreeRenameRequested` 的归约
+/// [`crate::filetree::rename_entry`]):`from` 是磁盘上的现路径,`draft`
+/// 是新名(纯名字,不含目录;改名固定在本目录内进行)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameDraft {
+    /// 改名前的完整路径(文件或目录)。
+    pub from: PathBuf,
+    /// 新名字草稿。
+    pub draft: String,
 }
 
 /// 新建文件浮窗的输入状态(#see `Message::FileTreeNewFileRequested` 的
@@ -362,6 +384,91 @@ pub fn create_markdown(dir: &Path, name: &str) -> Result<PathBuf, CreateError> {
 /// 同口径;此处另有一份是因为那是图片入库的私有判据,不该由它决定
 /// 文档能不能建)。UI 层用它给「创建」按钮判禁用,与 [`create_markdown`]
 /// 的拒绝条件是同一份判据 —— 两处各写一遍必然漂移。
+/// 在 `dir` 下新建一个文件夹(context-menu-plan §3 M2 右键菜单
+/// 「新建文件夹」):名字合法性同 [`valid_file_name`],已存在同名条目
+/// 拒绝(不像文件那样 `-1` 让开 —— 目录让开成 `新建文件夹-1` 反而
+/// 迷惑,菜单入口草稿由归约用 `unique_draft` 预填,撞名是用户手改的
+/// 后果,如实报错)。
+pub fn create_folder(dir: &Path, name: &str) -> Result<PathBuf, CreateDirError> {
+    let name = name.trim();
+    if !valid_file_name(name) {
+        return Err(CreateDirError {
+            path: dir.to_path_buf(),
+            source: "名字不能为空,也不能包含路径分隔符".into(),
+        });
+    }
+    let target = dir.join(name);
+    std::fs::create_dir(&target).map_err(|source| CreateDirError {
+        path: target.clone(),
+        source: Box::new(source),
+    })?;
+    Ok(target)
+}
+
+/// 真实改名(context-menu-plan §3 M2,与标签「重命名」的显示别名语义
+/// 相区分):新名合法性校验 + 同目录拼接 + 撞名拒绝,`fs::rename` 落盘。
+/// 文件与目录通用(目录改名整棵子树一起搬,同盘 rename 是常数成本)。
+/// 返回新路径;失败时磁盘不动,浮窗保留可改名重试。
+pub fn rename_entry(old: &Path, new_name: &str) -> Result<PathBuf, RenameError> {
+    let new_name = new_name.trim();
+    if !valid_file_name(new_name) {
+        return Err(RenameError::InvalidName);
+    }
+    let Some(parent) = old.parent() else {
+        return Err(RenameError::InvalidName);
+    };
+    let target = parent.join(new_name);
+    if target.exists() {
+        return Err(RenameError::Exists(target));
+    }
+    std::fs::rename(old, &target).map_err(|source| RenameError::Io {
+        path: old.to_path_buf(),
+        source: Box::new(source),
+    })?;
+    Ok(target)
+}
+
+/// 移入系统废纸篓(trash crate,freedesktop/回收站/废纸篓三平台各自
+/// 的标准位置)。**不是 unlink** —— 可恢复是删除确认之外的最后一道
+/// 保险。生产路径;无头测试经注入的 remover 走归约逻辑,不真调它
+/// (避免污染用户废纸篓 / CI 环境)。
+pub fn trash_delete(path: &Path) -> Result<(), String> {
+    trash::delete(path).map_err(|error| format!("删除失败 {}: {error}", path.display()))
+}
+
+/// 在系统文件管理器中显示该路径:macOS `open -R` 与 Windows
+/// `explorer /select,` 都能定位并选中文件;Linux 没有跨桌面环境的
+/// 「选中文件」标准(各 DE 各自的 D-Bus 接口),退而打开**父目录**。
+/// spawn 后即忘(不等待、不回收:一次定位一个短命子进程,僵尸进程
+/// 由 init 兜底,不值得为它立 reap 机制)。
+pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
+    reveal_command(path)
+        .map(|_| ())
+        .map_err(|error| format!("打开文件管理器失败: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_command(path: &Path) -> std::io::Result<std::process::Child> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_command(path: &Path) -> std::io::Result<std::process::Child> {
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn reveal_command(path: &Path) -> std::io::Result<std::process::Child> {
+    // Linux 没有跨桌面环境的「选中文件」标准,退而打开父目录
+    let dir = path.parent().unwrap_or(path);
+    std::process::Command::new("xdg-open").arg(dir).spawn()
+}
+
 pub fn valid_file_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
@@ -379,6 +486,43 @@ fn unique_name(dir: &Path, name: &str) -> String {
         };
     }
     candidate
+}
+
+/// 新建文件夹失败:与 [`CreateError`] 同形,文案区分动作。
+#[derive(Debug)]
+pub struct CreateDirError {
+    path: PathBuf,
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl fmt::Display for CreateDirError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "新建文件夹失败 {}: {}", self.path.display(), self.source)
+    }
+}
+
+/// 改名失败:名字非法 / 目标已存在 / 磁盘 IO,调用方原样落提示行。
+#[derive(Debug)]
+pub enum RenameError {
+    /// 新名非法(空、路径分隔符、`.`/`..`)。
+    InvalidName,
+    /// 同目录下已有同名条目(改名绝不覆盖)。
+    Exists(PathBuf),
+    /// 磁盘 IO 失败。
+    Io {
+        path: PathBuf,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+impl fmt::Display for RenameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidName => write!(f, "名字不能为空,也不能包含路径分隔符"),
+            Self::Exists(path) => write!(f, "同名条目已存在:{}", path.display()),
+            Self::Io { path, source } => write!(f, "改名失败 {}: {}", path.display(), source),
+        }
+    }
 }
 
 /// 新建 Markdown 失败:带路径与原因,调用方原样落提示行。
@@ -503,6 +647,63 @@ impl fmt::Display for SaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 右键菜单的文件操作(context-menu-plan §3 M2 验收 4)。
+    #[test]
+    fn create_folder_validates_and_persists() {
+        let dir = temp_tree("mkdir");
+        let made = create_folder(&dir, "笔记").expect("合法名可建");
+        assert_eq!(made, dir.join("笔记"));
+        assert!(made.is_dir());
+        // 非法名与撞名拒绝,磁盘不动
+        assert!(create_folder(&dir, "").is_err());
+        assert!(create_folder(&dir, "a/b").is_err());
+        assert!(create_folder(&dir, "笔记").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_entry_moves_and_rejects_collision() {
+        let dir = temp_tree("rename");
+        let file = dir.join("旧名.md");
+        std::fs::write(&file, "内容").unwrap();
+        let new_path = rename_entry(&file, "新名.md").expect("改名成功");
+        assert_eq!(new_path, dir.join("新名.md"));
+        assert!(new_path.exists());
+        assert!(!file.exists());
+        assert_eq!(std::fs::read_to_string(&new_path).unwrap(), "内容");
+        // 撞名 / 非法名 / 原文件缺失,磁盘不动
+        std::fs::write(dir.join("占位.md"), "").unwrap();
+        assert!(matches!(
+            rename_entry(&new_path, "占位.md"),
+            Err(RenameError::Exists(_))
+        ));
+        assert!(matches!(
+            rename_entry(&new_path, ""),
+            Err(RenameError::InvalidName)
+        ));
+        assert!(matches!(
+            rename_entry(&new_path, "x/y"),
+            Err(RenameError::InvalidName)
+        ));
+        let gone = dir.join("不存在.md");
+        assert!(matches!(
+            rename_entry(&gone, "随便.md"),
+            Err(RenameError::Io { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_entry_moves_directory_wholesale() {
+        let dir = temp_tree("rename-dir");
+        let sub = dir.join("旧目录");
+        std::fs::create_dir_all(sub.join("子")).unwrap();
+        std::fs::write(sub.join("子/文.md"), "x").unwrap();
+        let new_sub = rename_entry(&sub, "新目录").expect("目录改名成功");
+        assert!(new_sub.join("子/文.md").exists(), "子树整体搬移");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 进程内唯一的临时目录;测试自删。
     fn temp_tree(name: &str) -> PathBuf {
