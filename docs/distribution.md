@@ -108,6 +108,7 @@ bot 直推 main 改版本号会被分支保护拦截。版本号不变地合入 
 | macOS arm64 | dist | `latermd-aarch64-apple-darwin.tar.xz` | 无;**发布后清理**(仅 dmg 原料) |
 | Windows x64 | dist | `latermd-x86_64-pc-windows-msvc.zip` | 无 |
 | Windows x64 裸 exe | release.yml host 尾部 | `latermd.exe` | 无(从 x64 zip 提取补传) |
+| Windows 安装器 | release.yml windows-installer job | `latermd-{version}-setup.exe` | **有**(Inno Setup,同 GLMeter 形态) |
 | macOS universal2 | macos-dmg.yml | `latermd-v{version}-universal2-apple-darwin.dmg` | **有**(lscreen 同构,cask url 模板依赖) |
 | 校验和 | dist | 每资产附 `.sha256`,另有 `sha256.sum` | — |
 
