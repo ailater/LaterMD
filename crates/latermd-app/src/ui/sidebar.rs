@@ -25,7 +25,10 @@ use crate::search::{SearchResult, SearchState, SearchStatus, MAX_HITS};
 use crate::state::{Message, SidebarTab};
 use crate::ui::icons::Icon;
 use crate::ui::tokens::{self, RADIUS_SM, SPACE_XS};
-use latermd_git::{CommitInfo, DiffHunk, DiffLine, DiffLineKind, FileDiff, FileStatus, StatusKind};
+use latermd_git::{
+    CommitFileChange, CommitInfo, DiffHunk, DiffLine, DiffLineKind, FileDiff, FileStatus,
+    StatusKind,
+};
 use latermd_md::OutlineItem;
 
 use eframe::egui;
@@ -1681,24 +1684,7 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
             }
         });
 
-    if let Some(selected) = git.selected.as_deref() {
-        // 改动列表与选中文件 diff 区之间的节间留白:两侧都是内容 → gap 档。
-        panel.add_space(tokens::gap::XS);
-        // 文件名 + 视图切换同一行:文件名等宽,右侧「双栏/统一」两态
-        // 切换(#53 M2),点击发消息、归约写 `git.diff_view`(本层只读)
-        panel.horizontal(|ui| {
-            ui.monospace(selected);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                diff_view_toggle(ui, git.diff_view, outbox);
-            });
-        });
-        diff_area(panel, git);
-        if panel.button("回滚此文件…").clicked() {
-            outbox.push(Message::GitCheckoutRequested(selected.to_owned()));
-        }
-    }
-
-    // diff 区/回滚按钮与历史折叠区之间的节间留白:同上,gap 档。
+    // diff 区/历史折叠区之间的节间留白。
     panel.add_space(tokens::gap::XS);
     egui::CollapsingHeader::new(format!("历史({})", git.commits.len()))
         .id_salt("git-history")
@@ -1713,14 +1699,112 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
                         ui.weak("没有提交历史");
                     }
                     for commit in &git.commits {
-                        commit_row(ui, commit, git.fetched_at);
+                        commit_row(
+                            ui,
+                            commit,
+                            git.fetched_at,
+                            git.history
+                                .as_ref()
+                                .is_some_and(|history| history.commit.hash == commit.hash),
+                            outbox,
+                        );
+                        if git
+                            .history
+                            .as_ref()
+                            .is_some_and(|history| history.commit.hash == commit.hash)
+                        {
+                            if let Some(history) = &git.history {
+                                if let Some(error) = &history.error {
+                                    ui.weak(format!("⚠ {error}"));
+                                }
+                                for file in &history.files {
+                                    commit_file_row(ui, file, &commit.hash, outbox);
+                                }
+                                if history.truncated > 0 {
+                                    ui.weak(format!("…还有 {} 个文件未显示", history.truncated));
+                                }
+                            }
+                        }
                     }
                 });
         });
 }
 
-/// 单条改动:彩色状态字母 + 相对仓库根路径;点击选中(高亮当前选中项)。
-/// 返回行响应,独立成函数便于点击测试定位。
+/// Git 行的统一高度(与旧 `Button` 行一致的 interact 尺寸,行盒恒定)。
+fn git_row_height(ui: &egui::Ui) -> f32 {
+    ui.spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Body))
+}
+
+/// Git 自绘行的公共底:整行命中 + 选中/悬停底色。返回整行响应;文本由
+/// 调用方画在 rect 上(行尾图标区用 `ui.interact` 叠加,后注册者赢,点击
+/// 图标不会同时触发行点击)。
+fn git_row_base(ui: &mut egui::Ui, selected: bool) -> (egui::Rect, egui::Response) {
+    let height = git_row_height(ui);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    if selected || response.hovered() {
+        let fill = if selected {
+            ui.visuals().selection.bg_fill
+        } else {
+            ui.visuals().widgets.hovered.bg_fill
+        };
+        ui.painter().rect_filled(rect, RADIUS_SM, fill);
+    }
+    (rect, response)
+}
+
+/// 行尾回滚图标:独立命中区,后注册优先于整行。`enabled=false`(未跟踪
+/// 文件)只画灰图标、提示原因、不触发点击。
+fn git_rollback_icon(
+    ui: &egui::Ui,
+    row: egui::Rect,
+    path: &str,
+    enabled: bool,
+    outbox: &mut Vec<Message>,
+) {
+    let width = crate::ui::tokens::ICON + 2.0 * tokens::SPACE_XS;
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(row.right() - width, row.top()),
+        egui::pos2(row.right(), row.bottom()),
+    );
+    let tooltip = if enabled {
+        "回滚此文件"
+    } else {
+        "未跟踪文件不能回滚"
+    };
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("git-rollback", path)),
+        egui::Sense::click(),
+    );
+    let painter = ui.painter();
+    if response.hovered() && enabled {
+        painter.rect_filled(rect, RADIUS_SM, ui.visuals().widgets.hovered.bg_fill);
+    }
+    let color = if enabled {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    Icon::Reset.draw(painter, rect.center(), crate::ui::tokens::ICON, color);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tooltip));
+    if enabled {
+        response.clone().on_hover_text(tooltip);
+        if response.clicked() {
+            outbox.push(Message::GitCheckoutRequested(path.to_owned()));
+        }
+    } else {
+        response.on_disabled_hover_text(tooltip);
+    }
+}
+
+/// 单条改动:彩色状态字母 + 截断路径 + 行尾回滚图标。整行点击选中进
+/// 主工作区审阅;图标只发回滚确认(命中区独立,不触发选中)。
 fn git_status_row(
     ui: &mut egui::Ui,
     git: &GitPanelState,
@@ -1728,34 +1812,219 @@ fn git_status_row(
     outbox: &mut Vec<Message>,
 ) -> egui::Response {
     let selected = git.selected.as_deref() == Some(entry.path.as_str());
-    let response = badged_row_label(ui, selected, entry.path.clone(), Some(entry.code))
-        .on_hover_text(row_tooltip(&entry.path, Some(entry.code)));
+    let (rect, response) = git_row_base(ui, selected);
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let y = rect.center().y;
+    ui.painter().text(
+        egui::pos2(rect.left() + tokens::SPACE_XS, y),
+        egui::Align2::LEFT_CENTER,
+        entry.code.to_string(),
+        egui::FontId::monospace(12.0),
+        status_color(entry.code),
+    );
+    let icon_w = crate::ui::tokens::ICON + 2.0 * tokens::SPACE_XS;
+    let text_left = rect.left() + tokens::SPACE_XS + 14.0 + tokens::SPACE_XS;
+    let text_right = rect.right() - icon_w - tokens::SPACE_XS;
+    let path_font = egui::TextStyle::Body.resolve(ui.style());
+    let path = crate::ui::tabs::elide_text(
+        ui,
+        &entry.path,
+        &path_font,
+        (text_right - text_left).max(1.0),
+    );
+    ui.painter().text(
+        egui::pos2(text_left, y),
+        egui::Align2::LEFT_CENTER,
+        path,
+        path_font,
+        ui.visuals().text_color(),
+    );
+    let response = response
+        .on_hover_text(row_tooltip(&entry.path, Some(entry.code)))
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    git_rollback_icon(
+        ui,
+        rect,
+        &entry.path,
+        !matches!(entry.code, StatusKind::Untracked),
+        outbox,
+    );
     if response.clicked() {
         outbox.push(Message::GitFileSelected(entry.path.clone()));
     }
     response
 }
 
-/// 单条历史:短 hash + subject + 相对时间。P2 点击不跳转(工作区检出到
-/// 历史版本是 P3 以后的命题),纯展示。
-fn commit_row(ui: &mut egui::Ui, commit: &CommitInfo, now_epoch: i64) {
-    ui.horizontal(|ui| {
-        ui.monospace(egui::RichText::new(&commit.short_hash).weak());
-        ui.label(&commit.subject);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.weak(relative_time(commit.time, now_epoch));
-        });
-    });
+/// 单条历史:短 hash + 截断 subject + 右侧相对时间;整行点击展开该提交
+/// 的文件变更列表(选中态浅蓝底,与改动行同语言)。
+fn commit_row(
+    ui: &mut egui::Ui,
+    commit: &CommitInfo,
+    now_epoch: i64,
+    selected: bool,
+    outbox: &mut Vec<Message>,
+) -> egui::Response {
+    let (rect, response) = git_row_base(ui, selected);
+    if ui.is_rect_visible(rect) {
+        let y = rect.center().y;
+        let hash_font = egui::FontId::monospace(12.0);
+        let weak = ui.visuals().weak_text_color();
+        let hash_w = ui
+            .painter()
+            .layout_no_wrap(commit.short_hash.clone(), hash_font.clone(), weak)
+            .rect
+            .width();
+        let time = relative_time(commit.time, now_epoch);
+        let time_font = egui::FontId::proportional(11.0);
+        let time_w = ui
+            .painter()
+            .layout_no_wrap(time.clone(), time_font.clone(), weak)
+            .rect
+            .width();
+        let subject_left = rect.left() + tokens::SPACE_XS + hash_w + tokens::SPACE_XS;
+        let subject_right = rect.right() - tokens::SPACE_XS - time_w - tokens::SPACE_XS;
+        let subject_font = egui::TextStyle::Body.resolve(ui.style());
+        let subject = crate::ui::tabs::elide_text(
+            ui,
+            &commit.subject,
+            &subject_font,
+            (subject_right - subject_left).max(1.0),
+        );
+        let painter = ui.painter();
+        painter.text(
+            egui::pos2(rect.left() + tokens::SPACE_XS, y),
+            egui::Align2::LEFT_CENTER,
+            &commit.short_hash,
+            hash_font,
+            weak,
+        );
+        painter.text(
+            egui::pos2(rect.right() - tokens::SPACE_XS, y),
+            egui::Align2::RIGHT_CENTER,
+            time,
+            time_font,
+            weak,
+        );
+        painter.text(
+            egui::pos2(subject_left, y),
+            egui::Align2::LEFT_CENTER,
+            subject,
+            subject_font,
+            ui.visuals().text_color(),
+        );
+    }
+    let response = response
+        .on_hover_text(format!(
+            "查看 {} 的文件改动 · {}",
+            commit.short_hash, commit.author
+        ))
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        outbox.push(Message::GitHistorySelected(commit.hash.clone()));
+    }
+    response
 }
 
-/// 只读等宽 diff 视图:+ 行绿、- 行红、`@@` 行蓝、文件头弱化;横向不
-/// 折行(`ScrollArea::both`,长行滚动)。文本已由 latermd-git 截断在
-/// ~64KB,行数有界。
-fn diff_view(panel: &mut egui::Ui, diff: &str) {
+/// 历史提交文件行:彩色变更字母 + 截断路径(rename 的 tooltip 带旧路径)。
+/// 整行点击在主工作区打开 parent → commit diff。
+fn commit_file_row(
+    ui: &mut egui::Ui,
+    file: &CommitFileChange,
+    commit_hash: &str,
+    outbox: &mut Vec<Message>,
+) -> egui::Response {
+    use latermd_git::CommitChangeKind;
+    let (letter, color) = match file.kind {
+        CommitChangeKind::Added => ('A', DIFF_ADDED),
+        CommitChangeKind::Modified => ('M', egui::Color32::from_rgb(235, 180, 60)),
+        CommitChangeKind::Deleted => ('D', DIFF_REMOVED),
+        CommitChangeKind::Renamed => ('R', DIFF_HUNK),
+        CommitChangeKind::TypeChanged => ('T', ui.visuals().weak_text_color()),
+    };
+    let (rect, response) = git_row_base(ui, false);
+    if ui.is_rect_visible(rect) {
+        let y = rect.center().y;
+        ui.painter().text(
+            egui::pos2(rect.left() + tokens::SPACE_XS, y),
+            egui::Align2::LEFT_CENTER,
+            letter.to_string(),
+            egui::FontId::monospace(12.0),
+            color,
+        );
+        let text_left = rect.left() + tokens::SPACE_XS + 14.0 + tokens::SPACE_XS;
+        let path_font = egui::TextStyle::Body.resolve(ui.style());
+        let path = crate::ui::tabs::elide_text(
+            ui,
+            &file.path,
+            &path_font,
+            (rect.right() - tokens::SPACE_XS - text_left).max(1.0),
+        );
+        ui.painter().text(
+            egui::pos2(text_left, y),
+            egui::Align2::LEFT_CENTER,
+            path,
+            path_font,
+            ui.visuals().text_color(),
+        );
+    }
+    let tooltip = match (&file.old_path, file.kind) {
+        (Some(old), CommitChangeKind::Renamed) => format!("重命名 {old} → {}", file.path),
+        (Some(old), CommitChangeKind::Deleted) => format!("删除 {old}"),
+        _ => format!("{:?} {}", file.kind, file.path),
+    };
+    let response = response
+        .on_hover_text(tooltip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        outbox.push(Message::GitCommitFileSelected {
+            commit_hash: commit_hash.to_owned(),
+            path: file.path.clone(),
+        });
+    }
+    response
+}
+
+/// Git diff 区渲染入口。`max_height` 由承载它的布局决定:侧栏传小值,
+/// 主工作区传剩余高度,两处共用同一套结构化/统一渲染。
+pub(crate) fn render_git_diff(panel: &mut egui::Ui, git: &GitPanelState, max_height: f32) {
+    match git.diff_view {
+        DiffView::Unified => unified_diff_area(panel, git, max_height),
+        DiffView::Split => match &git.diff_lines {
+            Some(file) if file.binary => {
+                panel.weak(latermd_git::DIFF_BINARY_PLACEHOLDER);
+            }
+            Some(file) if file.hunks.is_empty() && !file.truncated => {
+                panel.weak("无文本改动");
+            }
+            Some(file) => split_diff_view(panel, file, max_height),
+            None => unified_diff_area(panel, git, max_height),
+        },
+    }
+}
+
+/// 兼容既有侧栏测试的固定高度回退渲染。
+#[cfg(test)]
+fn diff_area(panel: &mut egui::Ui, git: &GitPanelState) {
+    render_git_diff(panel, git, 200.0);
+}
+
+/// 统一视图的空态判定与动态高度。
+fn unified_diff_area(panel: &mut egui::Ui, git: &GitPanelState, max_height: f32) {
+    if git.diff.is_empty() {
+        panel.weak("无文本改动");
+    } else {
+        diff_view_with_height(panel, &git.diff, max_height);
+    }
+}
+
+/// 只读等宽 diff 视图，最大高度由父布局传入。
+fn diff_view_with_height(panel: &mut egui::Ui, diff: &str, max_height: f32) {
     egui::ScrollArea::both()
         .id_salt("git-diff-scroll")
         .auto_shrink([false, false])
-        .max_height(200.0)
+        .max_height(max_height.max(1.0))
         .show(panel, |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             for line in diff.lines() {
@@ -1773,41 +2042,10 @@ fn diff_view(panel: &mut egui::Ui, diff: &str) {
         });
 }
 
-/// diff 区(#53 M2):按 `diff_view` 分流。双栏吃结构化 `diff_lines`;
-/// 统一沿用既有 [`diff_view`] 文本路径,行为不变。双栏的兜底口径:结构化
-/// 未就位(选中后取失败)回落统一文本渲染——错误文案、截断提示都在
-/// `diff` 字符串里,可见性不降级(现状口径不破)。
-fn diff_area(panel: &mut egui::Ui, git: &GitPanelState) {
-    match git.diff_view {
-        DiffView::Unified => unified_diff_area(panel, git),
-        DiffView::Split => match &git.diff_lines {
-            Some(file) if file.binary => {
-                panel.weak(latermd_git::DIFF_BINARY_PLACEHOLDER);
-            }
-            // 空 hunks ⇔ 统一侧的空文本(两 API 同源);首行即超 64KB 的
-            // 病态 diff 会空 hunks + truncated,走下面整行渲染 + 提示
-            Some(file) if file.hunks.is_empty() && !file.truncated => {
-                panel.weak("无文本改动");
-            }
-            Some(file) => split_diff_view(panel, file),
-            None => unified_diff_area(panel, git),
-        },
-    }
-}
-
-/// 统一视图的空态判定(既有口径原样):空文本 = 无文本改动。
-fn unified_diff_area(panel: &mut egui::Ui, git: &GitPanelState) {
-    if git.diff.is_empty() {
-        panel.weak("无文本改动");
-    } else {
-        diff_view(panel, &git.diff);
-    }
-}
-
 /// 「双栏/统一」两态切换(#53 M2):当前态高亮,点击发
 /// [`Message::GitDiffViewChanged`]。返回 (双栏, 统一) 的响应矩形供
 /// 测试定位点击(right_to_left 布局里先加的在最右,视觉顺序「双栏 统一」)。
-fn diff_view_toggle(
+pub(crate) fn diff_view_toggle(
     ui: &mut egui::Ui,
     current: DiffView,
     outbox: &mut Vec<Message>,
@@ -1835,12 +2073,12 @@ fn diff_view_toggle(
 /// hunk 头 `@@` 跨双栏整行;长行单行截断(…)+ 悬停看全文;行对上限
 /// [`MAX_SPLIT_PAIRS`] 超限截断 + 显式提示,防大 diff 卡帧。行对来自
 /// `git_split_diff` 纯配对层;取舍见 docs/decisions-pending #100/#101。
-fn split_diff_view(panel: &mut egui::Ui, file: &FileDiff) {
+fn split_diff_view(panel: &mut egui::Ui, file: &FileDiff, max_height: f32) {
     let split = split_rows(file);
     egui::ScrollArea::vertical()
         .id_salt("git-diff-split-scroll")
         .auto_shrink([false, false])
-        .max_height(200.0)
+        .max_height(max_height.max(1.0))
         .show(panel, |ui| {
             let geom = RowGeometry::of(ui, file);
             for row in &split.rows {
@@ -3305,7 +3543,8 @@ mod tests {
     }
 
     /// Git 面板渲染矩阵:降级文案、干净工作区、改动列表 + 选中 diff +
-    /// 历史,三条路径都不 panic;点击改动行发 GitFileSelected。
+    /// 历史,三条路径都不 panic;点击改动行发 GitFileSelected;「打开审阅」
+    /// 按钮已废除,不得回流文本层。
     #[test]
     fn git_panel_renders_states_and_clicking_row_sends_message() {
         let mut git = GitPanelState::default();
@@ -3327,12 +3566,17 @@ mod tests {
         let mut outbox = Vec::new();
         let row_rect = Cell::new(Rect::NOTHING);
 
-        // 帧 1:正常态整体渲染 + 拿改动行位置
-        ctx.run_ui(RawInput::default(), |ui| {
+        // 帧 1:正常态整体渲染 + 拿改动行位置;文本层不得再有「打开审阅」
+        let panel_output = ctx.run_ui(RawInput::default(), |ui| {
             git_panel(ui, &git, &mut outbox);
-        })
-        .drop_without_applying_deltas();
+        });
+        let panel_texts = shape_texts(&panel_output);
+        panel_output.drop_without_applying_deltas();
         assert!(outbox.is_empty(), "仅渲染不产生消息");
+        assert!(
+            panel_texts.iter().all(|t| !t.contains("打开审阅")),
+            "「打开审阅」按钮应已废除:{panel_texts:?}"
+        );
         ctx.run_ui(RawInput::default(), |ui| {
             row_rect.set(git_status_row(ui, &git, &git.entries[0], &mut outbox).rect);
         })
@@ -3383,6 +3627,158 @@ mod tests {
             git_panel(ui, &truncated, &mut Vec::new());
         })
         .drop_without_applying_deltas();
+    }
+
+    /// Git 行命中区:整行点击发选中/展开消息;行尾回滚图标是独立命中区
+    /// ——已跟踪文件点图标只发回滚确认、不触发行选中;未跟踪文件图标
+    /// 禁用(点了什么都不发),行本身仍可选中。历史行与历史文件行各自发
+    /// 自己的消息。
+    #[test]
+    fn git_rows_and_icons_send_distinct_messages() {
+        let mut git = GitPanelState::default();
+        git.entries.push(FileStatus {
+            path: "a.md".to_owned(),
+            code: StatusKind::Modified,
+        });
+        git.entries.push(FileStatus {
+            path: "new.md".to_owned(),
+            code: StatusKind::Untracked,
+        });
+        let commit = CommitInfo {
+            hash: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            short_hash: "0123456".to_owned(),
+            subject: "第二笔".to_owned(),
+            author: "LaterMD <latermd@test>".to_owned(),
+            time: 1_700_000_000,
+        };
+        let change = latermd_git::CommitFileChange {
+            path: "b.md".to_owned(),
+            old_path: None,
+            kind: latermd_git::CommitChangeKind::Added,
+        };
+
+        let ctx = egui::Context::default();
+        let mut outbox = Vec::new();
+        let modified_row = Cell::new(Rect::NOTHING);
+        let untracked_row = Cell::new(Rect::NOTHING);
+        let commit_row_rect = Cell::new(Rect::NOTHING);
+        let file_row_rect = Cell::new(Rect::NOTHING);
+
+        // 帧 1:渲染三行,拿矩形
+        ctx.run_ui(RawInput::default(), |ui| {
+            modified_row.set(git_status_row(ui, &git, &git.entries[0], &mut outbox).rect);
+            untracked_row.set(git_status_row(ui, &git, &git.entries[1], &mut outbox).rect);
+            commit_row_rect.set(commit_row(ui, &commit, 1_700_000_060, false, &mut outbox).rect);
+            file_row_rect.set(commit_file_row(ui, &change, &commit.hash, &mut outbox).rect);
+        })
+        .drop_without_applying_deltas();
+        assert!(outbox.is_empty(), "仅渲染不产生消息");
+
+        let click_at = |rect: Rect| {
+            let center = rect.center();
+            let click = |pressed| Event::PointerButton {
+                pos: center,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            vec![Event::PointerMoved(center), click(true), click(false)]
+        };
+        // 行尾图标矩形(与 git_rollback_icon 的口径一致:右端 ICON+2*XS)
+        let icon_rect = |row: Rect| {
+            let width = crate::ui::tokens::ICON + 2.0 * crate::ui::tokens::SPACE_XS;
+            egui::Rect::from_min_max(
+                egui::pos2(row.right() - width, row.top()),
+                egui::pos2(row.right(), row.bottom()),
+            )
+        };
+        // 点击帧必须渲染与采样帧相同的行集合,几何才一致。
+        let render_rows = |ui: &mut egui::Ui, outbox: &mut Vec<Message>| {
+            git_status_row(ui, &git, &git.entries[0], outbox);
+            git_status_row(ui, &git, &git.entries[1], outbox);
+            commit_row(ui, &commit, 1_700_000_060, false, outbox);
+            commit_file_row(ui, &change, &commit.hash, outbox);
+        };
+
+        // 帧 2:点已跟踪行的图标 → 只发回滚确认,不发选中
+        ctx.run_ui(
+            RawInput {
+                events: click_at(icon_rect(modified_row.get())),
+                ..Default::default()
+            },
+            |ui| {
+                git_status_row(ui, &git, &git.entries[0], &mut outbox);
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            outbox,
+            vec![Message::GitCheckoutRequested("a.md".to_owned())],
+            "图标独立命中,不同时选中该行"
+        );
+
+        // 帧 3:点未跟踪行的图标 → 禁用,什么都不发
+        outbox.clear();
+        ctx.run_ui(
+            RawInput {
+                events: click_at(icon_rect(untracked_row.get())),
+                ..Default::default()
+            },
+            |ui| {
+                render_rows(ui, &mut outbox);
+            },
+        )
+        .drop_without_applying_deltas();
+        assert!(outbox.is_empty(), "未跟踪文件不能回滚:{outbox:?}");
+
+        // 帧 4:点未跟踪行的本体 → 仍可选中
+        ctx.run_ui(
+            RawInput {
+                events: click_at(untracked_row.get()),
+                ..Default::default()
+            },
+            |ui| {
+                render_rows(ui, &mut outbox);
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(outbox, vec![Message::GitFileSelected("new.md".to_owned())]);
+
+        // 帧 5:点历史行 → GitHistorySelected;点历史文件行 → GitCommitFileSelected
+        outbox.clear();
+        ctx.run_ui(
+            RawInput {
+                events: click_at(commit_row_rect.get()),
+                ..Default::default()
+            },
+            |ui| {
+                render_rows(ui, &mut outbox);
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            outbox,
+            vec![Message::GitHistorySelected(commit.hash.clone())]
+        );
+
+        outbox.clear();
+        ctx.run_ui(
+            RawInput {
+                events: click_at(file_row_rect.get()),
+                ..Default::default()
+            },
+            |ui| {
+                render_rows(ui, &mut outbox);
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            outbox,
+            vec![Message::GitCommitFileSelected {
+                commit_hash: commit.hash.clone(),
+                path: "b.md".to_owned()
+            }]
+        );
     }
 
     /// #53 M2 探针共享 fixture:1 个 hunk(上下文行 + 删除行 + 新增行)。
@@ -3901,7 +4297,7 @@ mod tests {
         let mut hint = None;
         ctx.run_ui(RawInput::default(), |panel| {
             let mut ui = panel.new_child(UiBuilder::new().max_rect(screen));
-            split_diff_view(&mut ui, &file);
+            split_diff_view(&mut ui, &file, 200.0);
             height = ui.min_rect().height();
             hint = split_overflow_hints(&mut ui, &file, split.dropped_pairs);
         })

@@ -1059,6 +1059,13 @@ pub enum Message {
     /// 点击 Git 页改动列表里的文件,载荷为相对仓库根的路径:归约里选中
     /// 并读它的 diff(列表外的过期路径被忽略)。
     GitFileSelected(String),
+    /// 点击历史提交行，展开该提交的文件变更列表。
+    GitHistorySelected(String),
+    /// 点击历史提交中的文件，加载 parent → commit diff。
+    GitCommitFileSelected {
+        commit_hash: String,
+        path: String,
+    },
     /// 点击「回滚此文件」,载荷为相对仓库根的路径:归约里只置确认模态,
     /// checkout 在用户显式确认之后。
     GitCheckoutRequested(String),
@@ -1070,6 +1077,8 @@ pub enum Message {
     /// 切换 Git 页 diff 区视图(#53 M2):双栏/统一。纯显示偏好,不落盘
     /// (会话内状态,重启回默认双栏),归约只写 `git.diff_view`。
     GitDiffViewChanged(crate::git_panel::DiffView),
+    /// 关闭主工作区 Git 审阅,返回当前编辑器。
+    GitDiffWorkspaceClosed,
     /// 保存 MCP 配置(设置页 MCP 页「保存」):归一化 → 落 `mcp.json` → 按
     /// 开关起停后台服务(**默认关闭**,开了才监听回环端口)。
     McpConfigSaved(McpConfig),
@@ -1178,6 +1187,9 @@ impl State {
         match message {
             Message::SidebarTabChanged(tab) => {
                 self.layout.left_view = tab;
+                if tab != SidebarTab::Git {
+                    self.git.close_diff_workspace();
+                }
                 // 切到 Git 页立即刷新:页签可能停了很久,轮询周期外的快照
                 // 会误导回滚决策
                 if tab == SidebarTab::Git {
@@ -1467,6 +1479,16 @@ impl State {
             Message::DraftRecovered { tab_id } => self.recover_draft(tab_id),
             Message::DraftDiscarded { tab_id } => self.discard_draft(tab_id),
             Message::GitFileSelected(path) => self.git.select(&path),
+            Message::GitHistorySelected(hash) => {
+                if let Some(root) = self.git.repo_root.clone() {
+                    self.git.select_commit(&root, &hash);
+                }
+            }
+            Message::GitCommitFileSelected { commit_hash, path } => {
+                if let Some(root) = self.git.repo_root.clone() {
+                    self.git.select_commit_file(&root, &commit_hash, &path);
+                }
+            }
             Message::GitCheckoutRequested(path) => self.git.request_checkout(path),
             Message::GitCheckoutConfirmed => {
                 // 回滚目标与仓库根在 confirm_checkout 内被 take,先留档供
@@ -1487,6 +1509,7 @@ impl State {
             }
             Message::GitCheckoutCancelled => self.git.cancel_checkout(),
             Message::GitDiffViewChanged(view) => self.git.diff_view = view,
+            Message::GitDiffWorkspaceClosed => self.git.close_diff_workspace(),
         }
     }
 
@@ -3395,10 +3418,12 @@ impl State {
     fn run_file_cmd(&mut self, cmd: FileCmd) {
         match cmd {
             FileCmd::New => {
+                self.git.close_diff_workspace();
                 // 多标签:新建永远开新标签,当前标签的未保存稿不受影响
                 self.spawn_tab(None, "");
             }
             FileCmd::Open => {
+                self.git.close_diff_workspace();
                 let start = file::start_dir(self.tabs.current().document.path.as_deref());
                 if let Some(path) = file::open_dialog(&start) {
                     self.open_path(&path);
@@ -3414,6 +3439,7 @@ impl State {
                 }
             }
             FileCmd::SaveAs => {
+                self.git.close_diff_workspace();
                 let start = file::start_dir(self.tabs.current().document.path.as_deref());
                 let default = self
                     .tabs
@@ -3455,6 +3481,7 @@ impl State {
     /// 该路径已在某标签打开则**激活它**(路径去重,同一路径至多一个标签),
     /// 否则读盘开新标签。返回是否成功(已开激活也算成功)。
     fn open_path(&mut self, path: &Path) -> bool {
+        self.git.close_diff_workspace();
         if let Some(index) = self.tabs.find_by_path(path) {
             self.switch_active(index);
             true
@@ -8887,7 +8914,14 @@ mod tests {
         // 选中:diff 就位
         state.apply(Message::GitFileSelected("a.md".to_owned()));
         assert_eq!(state.git.selected.as_deref(), Some("a.md"));
+        assert!(state.git.diff_workspace_open, "选中后进入主工作区审阅");
         assert!(state.git.diff.contains("+工作区乱改"), "{}", state.git.diff);
+
+        state.apply(Message::GitDiffWorkspaceClosed);
+        assert!(!state.git.diff_workspace_open, "关闭后返回编辑器");
+        assert_eq!(state.git.selected.as_deref(), Some("a.md"));
+        state.apply(Message::GitFileSelected("a.md".to_owned()));
+        assert!(state.git.diff_workspace_open, "再次选中重新打开审阅");
 
         // #53 M2 视图切换:纯显示偏好,归约只写字段,不动 diff 数据
         state.apply(Message::GitDiffViewChanged(
@@ -8899,6 +8933,10 @@ mod tests {
             crate::git_panel::DiffView::Split,
         ));
         assert_eq!(state.git.diff_view, crate::git_panel::DiffView::Split);
+
+        // 离开 Git 页只退出审阅,不影响已缓存的选中文件。
+        state.apply(Message::SidebarTabChanged(SidebarTab::Files));
+        assert!(!state.git.diff_workspace_open);
 
         // 过期路径:不顶掉选中
         state.apply(Message::GitFileSelected("stale.md".to_owned()));

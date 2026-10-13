@@ -20,7 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use git2::build::CheckoutBuilder;
-use git2::{DiffOptions, Patch, Repository, Signature, StatusOptions};
+use git2::{Delta, DiffFindOptions, DiffOptions, Patch, Repository, Signature, StatusOptions};
 
 /// diff 输出的字节上限(截断保护,~64KB)。
 const MAX_DIFF_BYTES: usize = 64 * 1024;
@@ -261,15 +261,293 @@ pub fn log(root: &Path, limit: usize) -> Result<Vec<CommitInfo>, String> {
         let commit = repo
             .find_commit(oid)
             .map_err(|error| format!("读取提交失败: {error}"))?;
-        commits.push(CommitInfo {
-            hash: commit.id().to_string(),
-            short_hash: short_hash(&commit)?,
-            subject: commit.summary().ok().flatten().unwrap_or("").to_owned(),
-            author: signature_display(&commit.author()),
-            time: commit.time().seconds(),
-        });
+        commits.push(commit_info(&commit)?);
     }
     Ok(commits)
+}
+
+/// 一条提交树 diff 中的文件变更类型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitChangeKind {
+    /// 文件在提交中新增。
+    Added,
+    /// 文件内容或模式被修改。
+    Modified,
+    /// 文件在提交中删除。
+    Deleted,
+    /// 文件被重命名，可同时包含内容修改。
+    Renamed,
+    /// 文件类型在提交中改变，例如普通文件变为目录。
+    TypeChanged,
+}
+
+/// 一条提交树 diff 中的文件变更。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitFileChange {
+    /// 变更后的路径；删除变更使用删除前的路径。
+    pub path: String,
+    /// 重命名变更的旧路径；其他变更为 `None`。
+    pub old_path: Option<String>,
+    /// 变更类型。
+    pub kind: CommitChangeKind,
+}
+
+/// 一次提交的文件变更列表及其提交上下文。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitFiles {
+    /// 被查询的提交。
+    pub commit: CommitInfo,
+    /// 提交的第一父提交；初始提交没有父提交。
+    pub parent: Option<CommitInfo>,
+    /// 按路径排序的文件变更，最多包含调用方指定的 `limit` 条。
+    pub entries: Vec<CommitFileChange>,
+    /// 排序后因 `limit` 被省略的剩余文件数。
+    pub truncated: usize,
+}
+
+/// 一次提交中单个文件的 unified 与结构化 diff。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitDiff {
+    /// unified diff 文本，沿用约 64 KiB 的截断保护。
+    pub text: String,
+    /// 与 unified 文本同一份 patch 产生的行级结构化 diff。
+    pub lines: FileDiff,
+}
+
+/// 列出提交相对第一父提交的文件变更。
+///
+/// 提交对象支持完整或短十六进制 hash。初始提交相对空树比较；merge
+/// 提交只比较第一父提交。重命名检测在本函数和 [`commit_file_diff`]
+/// 中使用同一套显式配置。列举文件只读取 diff delta，不为每个文件生成
+/// patch 或做二进制内容检测。
+///
+/// `limit` 在排序之后生效；`truncated` 是未返回的剩余条数，可通过增大
+/// `limit` 再次调用获取后续文件。
+///
+/// # Errors
+///
+/// 仓库、hash、提交对象或提交树不可读时返回面向用户的错误字符串。
+pub fn commit_files(root: &Path, commit_hash: &str, limit: usize) -> Result<CommitFiles, String> {
+    let repo = open_repo(root)?;
+    let commit = resolve_commit(&repo, commit_hash)?;
+    let parent = if commit.parent_count() == 0 {
+        None
+    } else {
+        Some(
+            commit
+                .parent(0)
+                .map_err(|error| format!("读取提交第一父提交失败: {error}"))?,
+        )
+    };
+    let parent_info = parent
+        .as_ref()
+        .map(|parent| commit_info(parent))
+        .transpose()?;
+    let commit_info = commit_info(&commit)?;
+    let diff = commit_tree_diff(&repo, &commit, true)?;
+
+    let mut entries = Vec::with_capacity(diff.deltas().len());
+    for delta in diff.deltas() {
+        let old_path = delta.old_file().path_bytes().map(path_bytes_to_string);
+        let new_path = delta.new_file().path_bytes().map(path_bytes_to_string);
+        let path = new_path.or_else(|| old_path.clone());
+        let Some(path) = path else {
+            // A tree entry without a UTF-8-compatible path cannot be represented
+            // by the public String DTO. Keep the rest of the diff usable.
+            continue;
+        };
+        let kind = commit_change_kind(delta.status());
+        entries.push(CommitFileChange {
+            path,
+            old_path: (delta.status() == Delta::Renamed)
+                .then_some(old_path)
+                .flatten(),
+            kind,
+        });
+    }
+    entries.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.old_path.cmp(&right.old_path))
+    });
+    let truncated = entries.len().saturating_sub(limit);
+    entries.truncate(limit);
+
+    Ok(CommitFiles {
+        commit: commit_info,
+        parent: parent_info,
+        entries,
+        truncated,
+    })
+}
+
+/// 读取提交中一个文件的 unified 与结构化 diff。
+///
+/// `path` 按完整路径字符串精确匹配提交 diff 的新路径；删除文件匹配
+/// 旧路径，重命名还接受旧路径作为别名。不会把 `*`、`?` 或路径前缀当作
+/// glob/pathspec。返回的两个视图由同一个 libgit2 patch 生成，保留现有
+/// [`FileDiff`] 的 UTF-8、CJK、行边界和约 64 KiB 截断口径。
+///
+/// # Errors
+///
+/// 仓库、hash、提交对象或提交树不可读，或提交中没有精确匹配的路径时，
+/// 返回面向用户的错误字符串。
+pub fn commit_file_diff(root: &Path, commit_hash: &str, path: &str) -> Result<CommitDiff, String> {
+    let repo = open_repo(root)?;
+    let commit = resolve_commit(&repo, commit_hash)?;
+    let diff = commit_tree_diff(&repo, &commit, false)?;
+    let index = diff
+        .deltas()
+        .enumerate()
+        .find_map(|(index, delta)| delta_matches_path(&delta, path).then_some(index))
+        .ok_or_else(|| format!("提交中不存在文件路径: {path}"))?;
+    let delta = diff
+        .get_delta(index)
+        .ok_or_else(|| "读取提交文件变更失败: delta 不存在".to_owned())?;
+    let mut lines = FileDiff {
+        hunks: Vec::new(),
+        binary: false,
+        truncated: false,
+    };
+    let mut text = String::new();
+    match Patch::from_diff(&diff, index).map_err(|error| format!("生成提交 diff 失败: {error}"))?
+    {
+        None => {
+            // Some libgit2 versions represent a binary patch as None. The
+            // selected diff was created with binary checking enabled, so this
+            // fallback distinguishes it from a metadata-only rename/mode
+            // change without inspecting patches for unrelated files.
+            if delta.flags().contains(git2::DiffFlags::BINARY) {
+                lines.binary = true;
+                text.push_str(BINARY_NOTICE);
+            }
+        }
+        Some(mut patch) => {
+            let buf = patch
+                .to_buf()
+                .map_err(|error| format!("生成提交 diff 失败: {error}"))?;
+            text = truncate_diff(&String::from_utf8_lossy(&buf));
+            let _ = collect_diff_lines(&mut patch, &mut lines, 0)?;
+        }
+    }
+    Ok(CommitDiff { text, lines })
+}
+
+/// 将提交 hash 限定为完整或短十六进制对象名，再解析为提交对象。
+fn resolve_commit<'repo>(
+    repo: &'repo Repository,
+    commit_hash: &str,
+) -> Result<git2::Commit<'repo>, String> {
+    let commit_hash = commit_hash.trim();
+    if commit_hash.is_empty()
+        || commit_hash.len() > 40
+        || !commit_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(format!("无效的提交 hash: {commit_hash:?}"));
+    }
+    let commit = if commit_hash.len() == 40 {
+        let oid = git2::Oid::from_str(commit_hash)
+            .map_err(|error| format!("无效的提交 hash {commit_hash:?}: {error}"))?;
+        repo.find_commit(oid)
+    } else {
+        repo.find_commit_by_prefix(commit_hash)
+    };
+    commit.map_err(|error| format!("找不到提交 {commit_hash:?}: {error}"))
+}
+
+/// 生成提交信息 DTO；与历史列表保持同一元数据口径。
+fn commit_info(commit: &git2::Commit<'_>) -> Result<CommitInfo, String> {
+    Ok(CommitInfo {
+        hash: commit.id().to_string(),
+        short_hash: short_hash(commit)?,
+        subject: commit.summary().ok().flatten().unwrap_or("").to_owned(),
+        author: signature_display(&commit.author()),
+        time: commit.time().seconds(),
+    })
+}
+
+/// 生成提交第一父树到提交树的 diff，并统一启用重命名检测。
+///
+/// `skip_binary_check` 让列举 delta 的路径只经过 tree diff，不为所有文件
+/// 计算二进制状态；单文件 API 在选中 delta 后再由 `Patch` 读取该文件。
+fn commit_tree_diff<'repo>(
+    repo: &'repo Repository,
+    commit: &git2::Commit<'repo>,
+    skip_binary_check: bool,
+) -> Result<git2::Diff<'repo>, String> {
+    let parent_tree = if commit.parent_count() == 0 {
+        None
+    } else {
+        let parent = commit
+            .parent(0)
+            .map_err(|error| format!("读取提交第一父提交失败: {error}"))?;
+        Some(
+            parent
+                .tree()
+                .map_err(|error| format!("读取提交父 tree 失败: {error}"))?,
+        )
+    };
+    let commit_tree = commit
+        .tree()
+        .map_err(|error| format!("读取提交 tree 失败: {error}"))?;
+    let mut options = DiffOptions::new();
+    options
+        .include_typechange(true)
+        .include_typechange_trees(true)
+        .ignore_filemode(false);
+    if skip_binary_check {
+        options.skip_binary_check(true);
+    }
+    let mut diff = repo
+        .diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut options))
+        .map_err(|error| format!("计算提交 tree diff 失败: {error}"))?;
+
+    // Keep this configuration explicit. Both public history APIs call this
+    // helper, so a rename with edits has exactly one classification threshold
+    // and copies never turn into surprising extra entries.
+    let mut find_options = DiffFindOptions::new();
+    find_options
+        .renames(true)
+        .copies(false)
+        .renames_from_rewrites(false)
+        .break_rewrites(false)
+        .rename_threshold(50);
+    diff.find_similar(Some(&mut find_options))
+        .map_err(|error| format!("检测提交重命名失败: {error}"))?;
+    Ok(diff)
+}
+
+/// 将 libgit2 路径字节转换为 DTO 可传输的字符串。
+fn path_bytes_to_string(path: &[u8]) -> String {
+    String::from_utf8_lossy(path).into_owned()
+}
+
+/// 将一个 delta 映射为公开的提交变更分类。
+fn commit_change_kind(delta: Delta) -> CommitChangeKind {
+    match delta {
+        Delta::Added => CommitChangeKind::Added,
+        Delta::Deleted => CommitChangeKind::Deleted,
+        Delta::Renamed => CommitChangeKind::Renamed,
+        Delta::Typechange => CommitChangeKind::TypeChanged,
+        Delta::Modified
+        | Delta::Copied
+        | Delta::Unmodified
+        | Delta::Ignored
+        | Delta::Unreadable
+        | Delta::Untracked
+        | Delta::Conflicted => CommitChangeKind::Modified,
+    }
+}
+
+/// 以新路径为主精确匹配 delta；删除只匹配旧路径，重命名额外接受旧路径。
+fn delta_matches_path(delta: &git2::DiffDelta<'_>, path: &str) -> bool {
+    let old_path = delta.old_file().path_bytes().map(path_bytes_to_string);
+    let new_path = delta.new_file().path_bytes().map(path_bytes_to_string);
+    match delta.status() {
+        Delta::Deleted => old_path.as_deref() == Some(path),
+        Delta::Renamed => new_path.as_deref() == Some(path) || old_path.as_deref() == Some(path),
+        _ => new_path.as_deref() == Some(path),
+    }
 }
 
 /// 单文件 HEAD 与工作区(含暂存区)的 unified diff。
@@ -710,7 +988,231 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 没有任何提交的仓库:历史为空列表而非错误。
+    /// 提交文件历史 API 覆盖初始提交、排序/limit、父提交元数据与短 hash。
+    #[test]
+    fn commit_files_initial_and_sorted_limit() {
+        let dir = temp_repo("history-files");
+        std::fs::write(dir.join("z.md"), "旧 z\n").unwrap();
+        std::fs::write(dir.join("a.md"), "旧 a\n").unwrap();
+        commit_all(&dir, "initial");
+        let initial_hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let initial = commit_files(&dir, &initial_hash, usize::MAX).unwrap();
+        assert!(initial.parent.is_none(), "初始提交相对空树没有父提交");
+        assert_eq!(initial.entries.len(), 2);
+        assert_eq!(initial.entries[0].path, "a.md");
+        assert_eq!(initial.entries[0].kind, CommitChangeKind::Added);
+        assert_eq!(initial.entries[1].path, "z.md");
+        assert!(initial.entries.iter().all(|entry| entry.old_path.is_none()));
+
+        std::fs::write(dir.join("m.md"), "新增 m\n").unwrap();
+        std::fs::write(dir.join("a.md"), "修改 a\n").unwrap();
+        std::fs::remove_file(dir.join("z.md")).unwrap();
+        commit_all(&dir, "sorted changes");
+        let hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let limited = commit_files(&dir, &hash, 2).unwrap();
+        assert_eq!(limited.entries.len(), 2);
+        assert_eq!(limited.truncated, 1);
+        assert_eq!(limited.entries[0].path, "a.md");
+        assert_eq!(limited.entries[0].kind, CommitChangeKind::Modified);
+        assert_eq!(limited.entries[1].path, "m.md");
+        assert_eq!(limited.entries[1].kind, CommitChangeKind::Added);
+        assert_eq!(commit_files(&dir, &hash, 0).unwrap().truncated, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重命名检测对含内容修改的实际 rename 生效,新旧路径均可读取同一 patch。
+    #[test]
+    fn commit_history_detects_rename_with_edits_and_old_alias() {
+        let dir = temp_repo("history-rename");
+        std::fs::write(dir.join("old name.md"), "第一行\n第二行\n第三行\n第四行\n").unwrap();
+        commit_all(&dir, "before rename");
+        run_git(&dir, &["mv", "old name.md", "new name.md"]);
+        std::fs::write(
+            dir.join("new name.md"),
+            "第一行\n第二行已改\n第三行\n第四行\n",
+        )
+        .unwrap();
+        commit_all(&dir, "rename with edit");
+        let hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let files = commit_files(&dir, &hash, 10).unwrap();
+        assert_eq!(files.entries.len(), 1, "应合并成一个 rename delta");
+        assert_eq!(
+            files.entries[0],
+            CommitFileChange {
+                path: "new name.md".to_owned(),
+                old_path: Some("old name.md".to_owned()),
+                kind: CommitChangeKind::Renamed,
+            }
+        );
+
+        let new_diff = commit_file_diff(&dir, &hash, "new name.md").unwrap();
+        let old_diff = commit_file_diff(&dir, &hash, "old name.md").unwrap();
+        assert!(new_diff.text.contains("第二行已改"), "{new_diff:?}");
+        assert_eq!(new_diff, old_diff, "重命名旧路径别名应复用同一 delta");
+        assert!(commit_file_diff(&dir, &hash, "new").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// metadata-only rename 与 mode-only 变更都保留 unified 元信息,不会被当作 binary。
+    #[test]
+    #[cfg(unix)]
+    fn commit_file_diff_handles_metadata_only_changes_without_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_repo("history-metadata");
+        std::fs::write(dir.join("old.md"), "同一内容\n").unwrap();
+        commit_all(&dir, "before metadata changes");
+        run_git(&dir, &["mv", "old.md", "new.md"]);
+        commit_all(&dir, "metadata rename");
+        let rename_hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let rename_files = commit_files(&dir, &rename_hash, 10).unwrap();
+        assert_eq!(rename_files.entries.len(), 1);
+        assert_eq!(rename_files.entries[0].kind, CommitChangeKind::Renamed);
+        let rename_diff = commit_file_diff(&dir, &rename_hash, "new.md").unwrap();
+        assert!(!rename_diff.lines.binary, "{rename_diff:?}");
+        assert!(
+            rename_diff.text.contains("rename from"),
+            "{}",
+            rename_diff.text
+        );
+        assert!(rename_diff.lines.hunks.is_empty(), "{rename_diff:?}");
+
+        let mut permissions = std::fs::metadata(dir.join("new.md")).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(dir.join("new.md"), permissions).unwrap();
+        commit_all(&dir, "mode change");
+        let mode_hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let mode_diff = commit_file_diff(&dir, &mode_hash, "new.md").unwrap();
+        assert!(!mode_diff.lines.binary, "{mode_diff:?}");
+        assert!(mode_diff.text.contains("old mode"), "{}", mode_diff.text);
+        assert!(mode_diff.lines.hunks.is_empty(), "{mode_diff:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_history_reports_binary_only_for_selected_diff() {
+        let dir = temp_repo("history-binary");
+        std::fs::write(dir.join("data.bin"), [1u8, 0, 2, 0]).unwrap();
+        commit_all(&dir, "binary before");
+        std::fs::write(dir.join("data.bin"), [3u8, 0, 4, 0]).unwrap();
+        commit_all(&dir, "binary after");
+        let hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let files = commit_files(&dir, &hash, 10).unwrap();
+        assert_eq!(files.entries.len(), 1);
+        assert_eq!(files.entries[0].kind, CommitChangeKind::Modified);
+        let diff = commit_file_diff(&dir, &hash, "data.bin").unwrap();
+        assert!(diff.lines.binary, "{diff:?}");
+        assert!(diff.lines.hunks.is_empty(), "{diff:?}");
+        assert!(diff.text.contains("Binary files"), "{}", diff.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 提交文件 diff 沿用统一文本与行级结构的 64 KiB 截断及 UTF-8 逻辑。
+    #[test]
+    fn commit_file_diff_truncates_large_utf8_patch() {
+        let dir = temp_repo("history-cap");
+        std::fs::write(dir.join("big.md"), "旧\n").unwrap();
+        commit_all(&dir, "small");
+        let contents: Vec<String> = (0..30_000).map(|i| format!("长行内容{i:05} 🚀")).collect();
+        std::fs::write(dir.join("big.md"), format!("{}\n", contents.join("\n"))).unwrap();
+        commit_all(&dir, "large");
+        let hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let diff = commit_file_diff(&dir, &hash, "big.md").unwrap();
+        assert!(diff.text.len() <= MAX_DIFF_BYTES + TRUNCATION_NOTICE.len());
+        assert!(diff.text.contains("已截断"));
+        assert!(diff.lines.truncated);
+        assert!(!diff.lines.binary);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 路径匹配是字面精确匹配,支持中文/emoji/括号与通配符字面量文件名。
+    #[test]
+    fn commit_file_diff_matches_literal_unicode_metacharacter_path() {
+        let dir = temp_repo("history-path");
+        let name = "中文🚀[x]*(y)?.md";
+        std::fs::write(dir.join(name), "旧内容\n").unwrap();
+        commit_all(&dir, "path before");
+        std::fs::write(dir.join(name), "新内容 👨‍👩‍👧\n").unwrap();
+        commit_all(&dir, "path after");
+        let hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let diff = commit_file_diff(&dir, &hash, name).unwrap();
+        assert!(diff.text.contains("新内容 👨‍👩‍👧"), "{}", diff.text);
+        assert!(commit_file_diff(&dir, &hash, "中文🚀[x]*").is_err());
+        assert!(commit_file_diff(&dir, &hash, "中文🚀[x]*(y)?.md/child").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// hash 解析支持完整/短十六进制值,坏 hash 与缺失路径均返回明确错误。
+    #[test]
+    fn commit_history_rejects_bad_hash_and_missing_path() {
+        let dir = temp_repo("history-errors");
+        std::fs::write(dir.join("a.md"), "a\n").unwrap();
+        commit_all(&dir, "one");
+        let full = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let short = &full[..7];
+        assert_eq!(commit_files(&dir, short, 10).unwrap().commit.hash, full);
+        assert!(commit_files(&dir, "not-a-hash", 10)
+            .unwrap_err()
+            .contains("无效的提交 hash"));
+        assert!(commit_files(&dir, &format!("{full}0"), 10)
+            .unwrap_err()
+            .contains("无效的提交 hash"));
+        assert!(commit_file_diff(&dir, &full, "missing.md")
+            .unwrap_err()
+            .contains("不存在文件路径"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// merge 提交只比较第一父提交,不把第二父分支的独有文件误列入。
+    #[test]
+    fn commit_history_merge_uses_first_parent() {
+        let dir = temp_repo("history-merge");
+        std::fs::write(dir.join("base.md"), "base\n").unwrap();
+        commit_all(&dir, "base");
+        run_git(&dir, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(dir.join("side.md"), "side\n").unwrap();
+        commit_all(&dir, "side");
+        run_git(&dir, &["checkout", "-q", "main"]);
+        std::fs::write(dir.join("main.md"), "main\n").unwrap();
+        commit_all(&dir, "main");
+        run_git(&dir, &["merge", "--no-ff", "-q", "side", "-m", "merge"]);
+        let merge_hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let files = commit_files(&dir, &merge_hash, 10).unwrap();
+        assert_eq!(files.parent.as_ref().unwrap().subject, "main");
+        assert_eq!(
+            files
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["side.md"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 历史 API 只读对象数据库,不受未提交工作区影响且不改 HEAD/index。
+    #[test]
+    fn commit_history_ignores_worktree_and_preserves_head_index() {
+        let dir = temp_repo("history-read-only");
+        std::fs::write(dir.join("doc.md"), "提交内容\n").unwrap();
+        commit_all(&dir, "committed");
+        let hash = git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let head_before = hash.clone();
+        let index_before = std::fs::read(dir.join(".git/index")).unwrap();
+        std::fs::write(dir.join("doc.md"), "工作区未提交内容\n").unwrap();
+        std::fs::write(dir.join("untracked.md"), "未跟踪\n").unwrap();
+
+        let files = commit_files(&dir, &hash, 10).unwrap();
+        assert_eq!(files.entries.len(), 1);
+        assert_eq!(files.entries[0].path, "doc.md");
+        let diff = commit_file_diff(&dir, &hash, "doc.md").unwrap();
+        assert!(diff.text.contains("提交内容"), "{}", diff.text);
+        assert!(!diff.text.contains("工作区未提交内容"), "{}", diff.text);
+        assert_eq!(git_stdout(&dir, &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), index_before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn log_on_repo_without_commits_is_empty() {
         let dir = temp_repo("empty-log");
@@ -766,7 +1268,10 @@ mod tests {
             "git {args:?} 失败: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8(output.stdout).expect("git 输出应为 UTF-8")
+        String::from_utf8(output.stdout)
+            .expect("git 输出应为 UTF-8")
+            .trim_end_matches(['\r', '\n'])
+            .to_owned()
     }
 
     /// 解析 `git diff --no-color HEAD -- <path>`(单文件输出)的 unified
