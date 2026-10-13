@@ -3857,15 +3857,18 @@ mod tests {
 
     /// 右键菜单编辑动作的合成事件出口(context-menu-plan §3 M1 验收 3
     /// 的消息侧):outbox 里的 `Message::EditAction` 在同一 logic 帧内
-    /// 变成输入流里的合成事件,记账位取走即清;粘贴无文本回落图片粘贴
-    /// 消息当帧归约。
+    /// 变成输入流里的合成事件,记账位取走即清。**不读真剪贴板**——
+    /// CI runner 与本机的系统剪贴板内容不定(2026-10-13 main 实测红:
+    /// Gate/macOS 剪贴板无文本,Paste 走回落分支不产事件);粘贴的两条
+    /// 分支(有文本 → Event::Paste / 无文本 → 回落图片粘贴)均已由
+    /// edit_events 单测(注入文本/注入空)钉住,本测试只验 Undo 的
+    /// 事件形态与记账清空,不引入环境依赖。
     #[test]
     fn edit_action_message_pushes_synthetic_event_same_frame() {
         use crate::edit_events::EditAction;
 
         let mut app = LaterMdApp::default();
         app.outbox.push(Message::EditAction(EditAction::Undo));
-        app.outbox.push(Message::EditAction(EditAction::Paste));
 
         let ctx = egui::Context::default();
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -3889,13 +3892,13 @@ mod tests {
             )),
             "撤销应变成 Cmd/Ctrl+Z 合成按键"
         );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, egui::Event::Paste(_))),
-            "粘贴的合成事件应已入流(测试环境读到的系统剪贴板内容不定,只验事件形态)"
-        );
         assert!(app.state.pending_edit_action.is_empty(), "记账队列取走即清");
+
+        // 粘贴(Paste)的两种分支都不在本测试断言:有文本 → Event::Paste
+        // 已由 edit_events 单测注入文本钉住;无文本 → 回落
+        // ImagePasteRequested 也由 edit_events 单测(dispatch 传 None/空)
+        // 钉住。这里若跟着真剪贴板走,CI runner 与本机的系统剪贴板内容
+        // 不定(2026-10-13 main 实测红),不引入环境依赖。
     }
 
     /// 跑一帧归约(与 eframe 同序:begin_pass 之后调 logic),返回该帧下发的
