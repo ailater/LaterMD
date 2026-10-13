@@ -198,6 +198,7 @@ pub fn ui(
     show_minimap: bool,
     show_typewriter: bool,
     show_focus: bool,
+    keymap: &crate::keymap::Keymap,
     outbox: &mut Vec<Message>,
     find_marks: &[std::ops::Range<usize>],
 ) -> egui::Response {
@@ -225,6 +226,7 @@ pub fn ui(
             editor_id,
             show_typewriter,
             show_focus,
+            keymap,
             outbox,
         );
     }
@@ -338,6 +340,10 @@ pub fn ui(
             });
             gutter::paint(ui, &output, slot, cursor_line);
             paint_find_marks(ui, &output, find_marks);
+
+            // 右键菜单(context-menu-plan §3 M1):落光标 + 菜单挂点,
+            // 与 Live 活动块共用一份实现(条目表与口径见 editor_menu)。
+            crate::ui::editor_menu::attach(ui, &output, keymap, false, outbox);
 
             // 进来:格式动作/大纲跳转产出的新选区,写回 TextEdit 持久 cursor
             // 并把焦点还给编辑器 —— 否则用户还得自己点回编辑区才能继续打字。
@@ -1086,6 +1092,7 @@ mod tests {
                         false,
                         show_typewriter,
                         false,
+                        &crate::keymap::Keymap::builtin(),
                         outbox,
                         &[],
                     )
@@ -1746,6 +1753,194 @@ mod tests {
         assert_eq!(editor.revision(), rev);
         assert_eq!(preview.synced_rev, rev);
         assert_eq!(preview.text.as_ptr(), text_ptr, "空闲帧未重建快照字符串");
+    }
+
+    /// 右键菜单的落光标(context-menu-plan §3 M1 验收 2):选区**内**右键
+    /// 保留选区,选区**外**右键塌缩到落点。点击位置按 TextEdit 矩形量出
+    /// (左缘 +60 落在正文前中段,右缘 -100 落在文本尾之外),不硬编码字体
+    /// 度量;y 取首行内 —— TextEdit 按面板剩余高度铺满,中点远在文本行外,
+    /// cursor_from_pos 会把 y 超出钳到行尾。egui 对 secondary press 有原生
+    /// 塌缩(any_pressed 不分键),「保留」分支走的是 attach 的上一帧快照
+    /// 回写,注入选区后须先跑一帧空事件让快照刷新(真实交互里选区总在
+    /// 右键之前至少存在一帧)。
+    #[test]
+    fn secondary_click_keeps_selection_inside_and_collapses_outside() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("hello world");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+
+        fn secondary_click(pos: egui::Pos2) -> Vec<Event> {
+            let press_release = |pressed| Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            vec![
+                Event::PointerMoved(pos),
+                press_release(true),
+                press_release(false),
+            ]
+        }
+
+        let inject = |ctx: &egui::Context, id: egui::Id, a: usize, b: usize| {
+            let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(a),
+                    egui::text::CCursor::new(b),
+                )));
+            state.store(ctx, id);
+        };
+
+        fn selection_now(ctx: &egui::Context, id: egui::Id) -> Option<(usize, usize)> {
+            TextEditState::load(ctx, id)?
+                .cursor
+                .char_range()
+                .map(|range| {
+                    (
+                        range.primary.index.0.min(range.secondary.index.0),
+                        range.primary.index.0.max(range.secondary.index.0),
+                    )
+                })
+        }
+
+        // 帧一:量出 TextEdit 矩形(只定位,选区断言不依赖它)
+        let mut selection = None;
+        let mut pending = None;
+        let (id, _) = frame_with_channel(
+            &ctx,
+            Vec::new(),
+            1.0,
+            &mut editor,
+            &mut preview,
+            &mut selection,
+            &mut pending,
+            &mut cursor,
+        );
+        let rect = ctx.read_response(id).expect("TextEdit 响应已记录").rect;
+        let inside = egui::pos2(rect.left() + 60.0, rect.top() + 9.0);
+        let beyond = egui::pos2(rect.right() - 100.0, rect.top() + 9.0);
+
+        // 无选区:内部右键 → 塌缩为光标,落在正文内、未到文本尾;
+        // 文本尾之外右键 → 光标钳到文本尾(11)。
+        frame_with_channel(
+            &ctx,
+            secondary_click(inside),
+            2.0,
+            &mut editor,
+            &mut preview,
+            &mut selection,
+            &mut pending,
+            &mut cursor,
+        );
+        let caret = selection_now(&ctx, id).expect("右键已落光标").0;
+        assert!(
+            (1..11).contains(&caret),
+            "内部右键落点 {caret} 应在正文内、未到文本尾"
+        );
+        frame_with_channel(
+            &ctx,
+            secondary_click(beyond),
+            3.0,
+            &mut editor,
+            &mut preview,
+            &mut selection,
+            &mut pending,
+            &mut cursor,
+        );
+        assert_eq!(
+            selection_now(&ctx, id),
+            Some((11, 11)),
+            "尾外右键钳到文本尾"
+        );
+
+        // 全选 (0,11):内部右键 → 选区保留(在选区内右键是对选中内容操作)。
+        // 注入后先跑一帧空事件,把上一帧快照刷成 (0,11)。
+        inject(&ctx, id, 0, 11);
+        frame_with_channel(
+            &ctx,
+            Vec::new(),
+            4.0,
+            &mut editor,
+            &mut preview,
+            &mut selection,
+            &mut pending,
+            &mut cursor,
+        );
+        frame_with_channel(
+            &ctx,
+            secondary_click(inside),
+            5.0,
+            &mut editor,
+            &mut preview,
+            &mut selection,
+            &mut pending,
+            &mut cursor,
+        );
+        assert_eq!(selection_now(&ctx, id), Some((0, 11)), "选区内右键保留选区");
+
+        // 选区 (3,5):落点(left+90 → 字符 11)在选区外 → 塌缩到落点。
+        // 上一案例把 context menu 弹在了 `inside`,先在别处单击关掉弹层
+        // (真实交互同款:右键菜单在场时不会再去右键同一处)。
+        // 远离弹层锚点(inside)与文档文本行:视口右下角,弹层矩形覆盖不到
+        let close_at = egui::pos2(rect.right() - 5.0, rect.bottom() - 20.0);
+        let primary_click = |pos: egui::Pos2| {
+            let press_release = |pressed| Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            vec![
+                Event::PointerMoved(pos),
+                press_release(true),
+                press_release(false),
+            ]
+        };
+        frame_with_channel(
+            &ctx,
+            primary_click(close_at),
+            6.5,
+            &mut editor,
+            &mut preview,
+            &mut selection,
+            &mut pending,
+            &mut cursor,
+        );
+        // 点击位选 left+90(字符 11,文本尾):既在 (3,5) 之外,也避开了
+        // 选区 AI 浮标 —— 选区非空且持焦时,浮标挂在选区尾(char 5 ≈
+        // left+39..63),盖住范围内的右键会被浮标吞掉(不达 TextEdit,
+        // 不弹本菜单),这是浮标作为可见 UI 的合理语义,测试绕开它。
+        inject(&ctx, id, 3, 5);
+        frame_with_channel(
+            &ctx,
+            Vec::new(),
+            7.0,
+            &mut editor,
+            &mut preview,
+            &mut selection,
+            &mut pending,
+            &mut cursor,
+        );
+        let outside = egui::pos2(rect.left() + 90.0, rect.top() + 9.0);
+        frame_with_channel(
+            &ctx,
+            secondary_click(outside),
+            8.0,
+            &mut editor,
+            &mut preview,
+            &mut selection,
+            &mut pending,
+            &mut cursor,
+        );
+        assert_eq!(
+            selection_now(&ctx, id),
+            Some((11, 11)),
+            "选区外右键塌缩到落点"
+        );
     }
 
     /// TextEdit 内建 undo/redo:Ctrl+Z 回退一步,Ctrl+Shift+Z 重做。

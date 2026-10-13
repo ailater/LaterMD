@@ -44,6 +44,7 @@ pub fn ui(
     panel: &mut egui::Ui,
     tabs: &TabsState,
     mode: TitleWidthMode,
+    file_tree_root: Option<&std::path::Path>,
     outbox: &mut Vec<Message>,
 ) -> bool {
     if !visible(tabs) {
@@ -72,7 +73,7 @@ pub fn ui(
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for (index, width) in widths.iter().enumerate() {
-                    let response = chip(ui, tabs, index, mode, *width, outbox);
+                    let response = chip(ui, tabs, index, mode, *width, file_tree_root, outbox);
                     if reveal && index == tabs.active {
                         response.scroll_to_me(Some(egui::Align::Center));
                     }
@@ -88,6 +89,7 @@ pub fn header(
     rect: egui::Rect,
     tabs: &TabsState,
     mode: TitleWidthMode,
+    file_tree_root: Option<&std::path::Path>,
     outbox: &mut Vec<Message>,
 ) {
     let list_rect =
@@ -105,7 +107,7 @@ pub fn header(
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
     child.set_clip_rect(strip.intersect(parent.clip_rect()));
-    ui(&mut child, tabs, mode, outbox);
+    ui(&mut child, tabs, mode, file_tree_root, outbox);
 
     let add_response = parent.allocate_rect(add_rect, Sense::click());
     let colors = crate::theme::shell(parent);
@@ -278,6 +280,9 @@ pub(crate) struct TabMenuItems {
     pub rename: egui::Response,
     pub short_title: egui::Response,
     pub full_title: egui::Response,
+    pub copy_path: egui::Response,
+    pub copy_relative: egui::Response,
+    pub reveal: egui::Response,
 }
 
 /// 单条菜单项:可用性由调用方判定(无目标/已是当前模式即禁用),禁用态
@@ -303,6 +308,7 @@ fn context_menu_items(
     tabs: &TabsState,
     index: usize,
     mode: TitleWidthMode,
+    file_tree_root: Option<&std::path::Path>,
     outbox: &mut Vec<Message>,
 ) -> TabMenuItems {
     let close_left = menu_item(ui, "关闭左侧", index > 0, "左侧没有标签");
@@ -357,6 +363,51 @@ fn context_menu_items(
     if full_title.clicked() {
         outbox.push(Message::TabTitleWidthChanged(TitleWidthMode::Full));
     }
+    ui.separator();
+    // 文件级两条(context-menu-plan §3 M4):目标 = 被右键标签的落盘路径,
+    // 与文件树右键共用 FileTreeCopyPath / FileTreeReveal 消息与归约实现
+    // (消息名带 FileTree 是历史命名,语义就是「对某路径做 X」)。未落盘
+    // 标签没有路径,禁用并说明;在文件树根之下才出现「复制相对路径」。
+    let tab_path = tabs
+        .tabs
+        .get(index)
+        .and_then(|tab| tab.document.path.clone());
+    let copy_path = menu_item(ui, "复制路径", tab_path.is_some(), "该标签尚未保存到磁盘");
+    if let (true, Some(path)) = (copy_path.clicked(), tab_path.clone()) {
+        outbox.push(Message::FileTreeCopyPath {
+            path,
+            relative: false,
+        });
+    }
+    let relative_ready = tab_path.as_deref().is_some_and(|path| {
+        file_tree_root.is_some_and(|root| root != path && path.starts_with(root))
+    });
+    let copy_relative = menu_item(
+        ui,
+        "复制相对路径",
+        relative_ready,
+        if tab_path.is_none() {
+            "该标签尚未保存到磁盘"
+        } else {
+            "不在文件树根目录之下"
+        },
+    );
+    let reveal = menu_item(
+        ui,
+        "在文件管理器中显示",
+        tab_path.is_some(),
+        "该标签尚未保存到磁盘",
+    );
+    if let (true, Some(path)) = (reveal.clicked(), tab_path.clone()) {
+        outbox.push(Message::FileTreeReveal(path));
+    }
+    if let (true, Some(path)) = (copy_relative.clicked(), tab_path.clone()) {
+        outbox.push(Message::FileTreeCopyPath {
+            path,
+            relative: true,
+        });
+    }
+
     TabMenuItems {
         close_left,
         close_right,
@@ -365,6 +416,9 @@ fn context_menu_items(
         rename,
         short_title,
         full_title,
+        copy_path,
+        copy_relative,
+        reveal,
     }
 }
 
@@ -378,6 +432,7 @@ fn chip(
     index: usize,
     mode: TitleWidthMode,
     width: f32,
+    file_tree_root: Option<&std::path::Path>,
     outbox: &mut Vec<Message>,
 ) -> egui::Response {
     let tab = &tabs.tabs[index];
@@ -475,7 +530,7 @@ fn chip(
     // `context_menu` 消费 Response,借 clone 注册、原 response 继续供上面的
     // 点击判定用(与标题栏设置键右键直达同手法)。
     response.clone().context_menu(|ui| {
-        context_menu_items(ui, tabs, index, mode, outbox);
+        context_menu_items(ui, tabs, index, mode, file_tree_root, outbox);
     });
     response
 }
@@ -536,7 +591,7 @@ mod tests {
 
         let output = ctx.run_ui(RawInput::default(), |ui| {
             assert!(
-                !super::ui(ui, &tabs, TitleWidthMode::Full, &mut outbox),
+                !super::ui(ui, &tabs, TitleWidthMode::Full, None, &mut outbox),
                 "单个未命名空标签不画条"
             );
         });
@@ -545,7 +600,7 @@ mod tests {
         tabs.current_mut().editor.insert_chars(0, "写了字");
         let output = ctx.run_ui(RawInput::default(), |ui| {
             assert!(
-                super::ui(ui, &tabs, TitleWidthMode::Full, &mut outbox),
+                super::ui(ui, &tabs, TitleWidthMode::Full, None, &mut outbox),
                 "dirty 后条出现"
             );
         });
@@ -555,7 +610,13 @@ mod tests {
         tabs.current_mut().editor.clear_dirty();
         tabs.current_mut().document.path = Some(std::path::PathBuf::from("/a.md"));
         let output = ctx.run_ui(RawInput::default(), |ui| {
-            assert!(super::ui(ui, &tabs, TitleWidthMode::Full, &mut outbox));
+            assert!(super::ui(
+                ui,
+                &tabs,
+                TitleWidthMode::Full,
+                None,
+                &mut outbox
+            ));
         });
         output.drop_without_applying_deltas();
     }
@@ -581,7 +642,10 @@ mod tests {
                 let mut height = None;
                 let output = ctx.run_ui(RawInput::default(), |ui| {
                     ui.set_max_width(width);
-                    assert!(super::ui(ui, &tabs, mode, &mut outbox), "多标签必画条");
+                    assert!(
+                        super::ui(ui, &tabs, mode, None, &mut outbox),
+                        "多标签必画条"
+                    );
                     height = Some(ui.min_rect().height());
                 });
                 output.drop_without_applying_deltas();
@@ -606,7 +670,15 @@ mod tests {
         // 第一帧拿 chip 0 的位置(画在原始位置;宽度按完整标题实测)
         let output = ctx.run_ui(RawInput::default(), |ui| {
             let widths = plan_widths(ui, &tabs, TitleWidthMode::Full, ui.available_width());
-            chip(ui, &tabs, 0, TitleWidthMode::Full, widths[0], &mut outbox);
+            chip(
+                ui,
+                &tabs,
+                0,
+                TitleWidthMode::Full,
+                widths[0],
+                None,
+                &mut outbox,
+            );
             rect.set(ui.min_rect());
         });
         output.drop_without_applying_deltas();
@@ -627,7 +699,7 @@ mod tests {
                 },
                 |ui| {
                     let widths = plan_widths(ui, &tabs, TitleWidthMode::Full, ui.available_width());
-                    chip(ui, &tabs, 0, TitleWidthMode::Full, widths[0], outbox);
+                    chip(ui, &tabs, 0, TitleWidthMode::Full, widths[0], None, outbox);
                 },
             )
             .drop_without_applying_deltas();
@@ -675,7 +747,8 @@ mod tests {
             let mut outbox = Vec::new();
             let rect = Cell::new(Rect::NOTHING);
             ctx.run_ui(RawInput::default(), |ui| {
-                let items = context_menu_items(ui, &tabs, 1, TitleWidthMode::Full, &mut outbox);
+                let items =
+                    context_menu_items(ui, &tabs, 1, TitleWidthMode::Full, None, &mut outbox);
                 rect.set(match kind {
                     crate::tabs::BatchClose::Left => items.close_left.rect,
                     crate::tabs::BatchClose::Right => items.close_right.rect,
@@ -699,7 +772,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    context_menu_items(ui, &tabs, 1, TitleWidthMode::Full, &mut outbox);
+                    context_menu_items(ui, &tabs, 1, TitleWidthMode::Full, None, &mut outbox);
                 },
             )
             .drop_without_applying_deltas();
@@ -721,7 +794,8 @@ mod tests {
             let mut outbox = Vec::new();
             let rects = Cell::new(Vec::<Rect>::new());
             ctx.run_ui(RawInput::default(), |ui| {
-                let items = context_menu_items(ui, tabs, index, TitleWidthMode::Full, &mut outbox);
+                let items =
+                    context_menu_items(ui, tabs, index, TitleWidthMode::Full, None, &mut outbox);
                 assert_eq!(
                     [
                         items.close_left.enabled(),
@@ -760,7 +834,14 @@ mod tests {
                         ..Default::default()
                     },
                     |ui| {
-                        context_menu_items(ui, tabs, index, TitleWidthMode::Full, &mut outbox);
+                        context_menu_items(
+                            ui,
+                            tabs,
+                            index,
+                            TitleWidthMode::Full,
+                            None,
+                            &mut outbox,
+                        );
                     },
                 )
                 .drop_without_applying_deltas();
@@ -797,7 +878,7 @@ mod tests {
         let rename_rect = Cell::new(Rect::NOTHING);
         let current_mode_rect = Cell::new(Rect::NOTHING);
         ctx.run_ui(RawInput::default(), |ui| {
-            let items = context_menu_items(ui, &tabs, 0, TitleWidthMode::Full, &mut outbox);
+            let items = context_menu_items(ui, &tabs, 0, TitleWidthMode::Full, None, &mut outbox);
             assert!(items.rename.enabled(), "重命名对任何标签可用");
             assert!(items.short_title.enabled(), "完整模式下「缩短标题」可切换");
             assert!(!items.full_title.enabled(), "已是完整模式,「完整标题」禁用");
@@ -821,7 +902,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                context_menu_items(ui, &tabs, 0, TitleWidthMode::Full, &mut outbox);
+                context_menu_items(ui, &tabs, 0, TitleWidthMode::Full, None, &mut outbox);
             },
         )
         .drop_without_applying_deltas();
@@ -841,7 +922,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                context_menu_items(ui, &tabs, 0, TitleWidthMode::Full, &mut outbox);
+                context_menu_items(ui, &tabs, 0, TitleWidthMode::Full, None, &mut outbox);
             },
         )
         .drop_without_applying_deltas();
@@ -866,7 +947,7 @@ mod tests {
             let mut outbox = Vec::new();
             let target_rect = Cell::new(Rect::NOTHING);
             ctx.run_ui(RawInput::default(), |ui| {
-                let items = context_menu_items(ui, &tabs, 0, from, &mut outbox);
+                let items = context_menu_items(ui, &tabs, 0, from, None, &mut outbox);
                 let (target, current) = match switch_to {
                     TitleWidthMode::Short => (items.short_title, items.full_title),
                     TitleWidthMode::Full => (items.full_title, items.short_title),
@@ -890,7 +971,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    context_menu_items(ui, &tabs, 0, from, &mut outbox);
+                    context_menu_items(ui, &tabs, 0, from, None, &mut outbox);
                 },
             )
             .drop_without_applying_deltas();
@@ -952,7 +1033,7 @@ mod tests {
 
         ctx.run_ui(RawInput::default(), |ui| {
             assert!(
-                super::ui(ui, &tabs, TitleWidthMode::Full, &mut outbox),
+                super::ui(ui, &tabs, TitleWidthMode::Full, None, &mut outbox),
                 "多标签必画条"
             );
             rect.set(ui.min_rect());
@@ -976,12 +1057,12 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                super::ui(ui, &tabs, TitleWidthMode::Full, &mut outbox);
+                super::ui(ui, &tabs, TitleWidthMode::Full, None, &mut outbox);
             },
         )
         .drop_without_applying_deltas();
         ctx.run_ui(RawInput::default(), |ui| {
-            super::ui(ui, &tabs, TitleWidthMode::Full, &mut outbox);
+            super::ui(ui, &tabs, TitleWidthMode::Full, None, &mut outbox);
         })
         .drop_without_applying_deltas();
         assert!(
@@ -1047,6 +1128,7 @@ mod tests {
                 0,
                 TitleWidthMode::Short,
                 shared[0],
+                None,
                 &mut Vec::new(),
             );
             rendered.set(ui.min_rect().width());
@@ -1055,7 +1137,15 @@ mod tests {
         assert_eq!(rendered.get(), shared[0], "chip 按分配宽实际渲染");
         // 对照:完整模式的 chip 用完整宽渲染,量出的是完整宽
         ctx.run_ui(RawInput::default(), |ui| {
-            chip(ui, &tabs, 0, TitleWidthMode::Full, full[0], &mut Vec::new());
+            chip(
+                ui,
+                &tabs,
+                0,
+                TitleWidthMode::Full,
+                full[0],
+                None,
+                &mut Vec::new(),
+            );
             rendered.set(ui.min_rect().width());
         })
         .drop_without_applying_deltas();
@@ -1182,7 +1272,7 @@ mod tests {
             let height = Cell::new(0.0_f32);
             let output = ctx.run_ui(RawInput::default(), |ui| {
                 ui.set_max_width(160.0);
-                assert!(super::ui(ui, &tabs, mode, &mut outbox));
+                assert!(super::ui(ui, &tabs, mode, None, &mut outbox));
                 height.set(ui.min_rect().height());
             });
             for clipped in &output.shapes {
@@ -1267,7 +1357,7 @@ mod tests {
                 },
                 |ui| {
                     ui.set_max_width(90.0);
-                    super::ui(ui, &tabs, TitleWidthMode::Short, &mut outbox);
+                    super::ui(ui, &tabs, TitleWidthMode::Short, None, &mut outbox);
                 },
             )
             .drop_without_applying_deltas();
@@ -1299,7 +1389,7 @@ mod tests {
             let rect = Cell::new(Rect::NOTHING);
             ctx.run_ui(RawInput::default(), |ui| {
                 ui.set_max_width(140.0); // 缩短模式下必触发截断
-                assert!(super::ui(ui, &tabs, mode, &mut outbox));
+                assert!(super::ui(ui, &tabs, mode, None, &mut outbox));
                 rect.set(ui.min_rect());
             })
             .drop_without_applying_deltas();
@@ -1326,7 +1416,7 @@ mod tests {
                     },
                     |ui| {
                         ui.set_max_width(140.0);
-                        super::ui(ui, &tabs, mode, &mut outbox);
+                        super::ui(ui, &tabs, mode, None, &mut outbox);
                     },
                 );
                 painted.clear();
@@ -1356,7 +1446,13 @@ mod tests {
         let mut outbox = Vec::new();
         let rect = Cell::new(Rect::NOTHING);
         ctx.run_ui(RawInput::default(), |ui| {
-            assert!(super::ui(ui, &tabs, TitleWidthMode::Full, &mut outbox));
+            assert!(super::ui(
+                ui,
+                &tabs,
+                TitleWidthMode::Full,
+                None,
+                &mut outbox
+            ));
             rect.set(ui.min_rect());
         })
         .drop_without_applying_deltas();
@@ -1377,7 +1473,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    super::ui(ui, &tabs, TitleWidthMode::Full, &mut outbox);
+                    super::ui(ui, &tabs, TitleWidthMode::Full, None, &mut outbox);
                 },
             );
             painted.clear();
@@ -1395,5 +1491,101 @@ mod tests {
             painted.contains("尚未保存到磁盘"),
             "未落盘标签的 tooltip 如实说明"
         );
+    }
+
+    /// 右键菜单 M4(context-menu-plan §3 M4):复制路径/复制相对路径/
+    /// 在文件管理器中显示 —— 与文件树右键共用消息与归约实现。
+    #[test]
+    fn context_menu_file_items_follow_tab_path() {
+        use crate::tabs::TabsState;
+        use std::path::PathBuf;
+
+        let ctx = egui::Context::default();
+        // 落盘标签:三枚条目全部可用
+        // 用 open_tab 建落盘标签(spawn 语义在 state 层,这里直接构造)
+        let mut tabs = TabsState::new("旧");
+        let file_index = tabs.open_tab(Some(PathBuf::from("/root/文档.md")), "文档");
+        let mut outbox = Vec::new();
+        let items = Cell::new(None);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            items.set(Some(context_menu_items(
+                ui,
+                &tabs,
+                file_index,
+                TitleWidthMode::Full,
+                None,
+                &mut outbox,
+            )));
+        });
+        output.drop_without_applying_deltas();
+        let items = items.into_inner().expect("已渲染");
+        assert!(items.copy_path.enabled(), "落盘标签可复制路径");
+        assert!(items.reveal.enabled(), "落盘标签可在文件管理器显示");
+        assert!(!items.copy_relative.enabled(), "无文件树根时相对路径不可用");
+
+        // 在文件树根下:相对路径可用,点击产出 relative 消息
+        let mut outbox = Vec::new();
+        let root = PathBuf::from("/root");
+        let probed = Cell::new(egui::Rect::NOTHING);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let items = context_menu_items(
+                ui,
+                &tabs,
+                file_index,
+                TitleWidthMode::Full,
+                Some(root.as_path()),
+                &mut outbox,
+            );
+            assert!(items.copy_relative.enabled(), "根下可复制相对路径");
+            probed.set(items.copy_relative.rect);
+        });
+        output.drop_without_applying_deltas();
+        let rect = probed.get();
+        let click = |pressed| Event::PointerButton {
+            pos: rect.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        for events in [
+            vec![Event::PointerMoved(rect.center()), click(true)],
+            vec![click(false)],
+        ] {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    context_menu_items(
+                        ui,
+                        &tabs,
+                        file_index,
+                        TitleWidthMode::Full,
+                        Some(root.as_path()),
+                        &mut outbox,
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            outbox,
+            vec![Message::FileTreeCopyPath {
+                path: PathBuf::from("/root/文档.md"),
+                relative: true,
+            }]
+        );
+
+        // 未落盘标签:三枚条目全部禁用
+        let tabs = TabsState::new("草稿");
+        let mut outbox = Vec::new();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let items = context_menu_items(ui, &tabs, 0, TitleWidthMode::Full, None, &mut outbox);
+            assert!(!items.copy_path.enabled());
+            assert!(!items.copy_relative.enabled());
+            assert!(!items.reveal.enabled());
+        });
+        output.drop_without_applying_deltas();
     }
 }

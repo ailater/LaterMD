@@ -1173,6 +1173,109 @@ pub(crate) fn new_file_dialog(
     buttons.expect("浮窗必然绘制创建/取消按钮")
 }
 
+/// 「新建文件夹」浮窗(context-menu-plan §3 M2):形态与
+/// [`new_file_dialog`] 相同,确认发 `FileTreeNewFolderConfirmed`,
+/// 落盘在归约(`State::confirm_new_folder`)。文件夹名不补后缀,
+/// 也没有「可省略 .md」的提示。
+///
+/// 返回(创建, 取消)响应供无头测试定位。
+pub(crate) fn new_folder_dialog(
+    ui: &mut egui::Ui,
+    draft: &mut crate::filetree::NewFileDraft,
+) -> (egui::Response, egui::Response) {
+    let mut buttons = None;
+    egui::Window::new("新建文件夹")
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ui.ctx().viewport_rect().center())
+        .collapsible(false)
+        .resizable(false)
+        .frame(crate::ui::workbench::dialog_frame(ui))
+        .show(ui.ctx(), |ui| {
+            ui.label("文件夹名");
+            ui.text_edit_singleline(&mut draft.draft);
+            ui.add_space(tokens::SPACE_XS);
+            ui.weak(format!("位置:{}", draft.dir.display()));
+            ui.add_space(tokens::SPACE_SM);
+            ui.separator();
+            ui.horizontal(|ui| {
+                let ready = crate::filetree::valid_file_name(draft.draft.trim());
+                let confirm = ui
+                    .add_enabled(ready, egui::Button::new("创建"))
+                    .on_disabled_hover_text("名字不能为空,也不能包含路径分隔符");
+                let cancel = ui.button("取消");
+                buttons = Some((confirm, cancel));
+            });
+        });
+    buttons.expect("浮窗必然绘制创建/取消按钮")
+}
+
+/// 「重命名」浮窗(context-menu-plan §3 M2,真实文件改名):预填现名
+/// (调用方已填),确认发 `FileTreeRenameConfirmed`;改名 + 打开中标签
+/// 换绑在归约(`State::confirm_rename`)。
+///
+/// 返回(确定, 取消)响应供无头测试定位。
+pub(crate) fn rename_dialog(
+    ui: &mut egui::Ui,
+    draft: &mut crate::filetree::RenameDraft,
+) -> (egui::Response, egui::Response) {
+    let mut buttons = None;
+    egui::Window::new("重命名")
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ui.ctx().viewport_rect().center())
+        .collapsible(false)
+        .resizable(false)
+        .frame(crate::ui::workbench::dialog_frame(ui))
+        .show(ui.ctx(), |ui| {
+            ui.label("新名字");
+            ui.text_edit_singleline(&mut draft.draft)
+                .on_hover_text("只改这一项的名字;打开中的文档会跟着换到新路径");
+            ui.add_space(tokens::SPACE_XS);
+            ui.weak(format!("原路径:{}", draft.from.display()));
+            ui.add_space(tokens::SPACE_SM);
+            ui.separator();
+            ui.horizontal(|ui| {
+                // 现名相同视为未改,禁用确定(避免一次无意义 rename)
+                let current = draft
+                    .from
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let ready = crate::filetree::valid_file_name(draft.draft.trim())
+                    && draft.draft.trim() != current;
+                let confirm = ui
+                    .add_enabled(ready, egui::Button::new("确定"))
+                    .on_disabled_hover_text("名字不能为空、不能含路径分隔符,也不能与现名相同");
+                let cancel = ui.button("取消");
+                buttons = Some((confirm, cancel));
+            });
+        });
+    buttons.expect("浮窗必然绘制确定/取消按钮")
+}
+
+/// 「删除」确认浮窗(context-menu-plan §3 M2):复用
+/// `destructive_confirm_dialog` 的危险语义;文案按文件/目录分叉,
+/// 删除走系统废纸篓(可恢复)在文案里明说。
+///
+/// 返回(删除, 取消)响应供无头测试定位。
+pub(crate) fn delete_confirm_dialog(
+    ui: &mut egui::Ui,
+    path: &Path,
+    is_dir: bool,
+) -> (egui::Response, egui::Response) {
+    let (lead, warning) = if is_dir {
+        (
+            format!("把文件夹 {} 移入废纸篓?", path.display()),
+            "文件夹内的全部内容(含子文件夹)一起移入,可从系统废纸篓恢复。",
+        )
+    } else {
+        (
+            format!("把 {} 移入废纸篓?", path.display()),
+            "文件将移入系统废纸篓,可从那里恢复。",
+        )
+    };
+    crate::ui::layout::destructive_confirm_dialog(ui, "删除", &lead, warning, "删除", None)
+}
+
 /// Files 页顶部根目录行:目录名(最近列表下拉 / 无历史时纯文本)+ 三枚
 /// 见方图标按钮(选文件夹 / 新建 / 刷新)。
 ///
@@ -1399,6 +1502,11 @@ fn tree_row(
             outbox.push(Message::FileSelected(entry.path.clone()));
         }
     }
+    // 右键菜单(context-menu-plan §3 M2):文件/目录两套条目。全部映射
+    // 既有消息通道,重命名/删除的浮窗与确认在 layout.rs 顶层接线。
+    response.context_menu(|ui| {
+        tree_context_menu(ui, entry, outbox);
+    });
     if entry.is_dir && open {
         ui.indent(entry.path.clone(), |ui| {
             match tree.children.get(&entry.path) {
@@ -1412,6 +1520,50 @@ fn tree_row(
         });
     }
     response
+}
+
+/// 右键菜单条目表(context-menu-plan §3 M2):文件/目录两套。全部映射
+/// 既有消息通道 —— 打开走 `FileSelected`(与行点击同一条),重命名/
+/// 删除只发请求,浮窗与确认在 `layout.rs` 顶层接线;独立成函数便于
+/// 无头测试直接构建与点击(tabs.rs `context_menu_items` 同手法)。
+pub(crate) fn tree_context_menu(ui: &mut egui::Ui, entry: &TreeEntry, outbox: &mut Vec<Message>) {
+    if entry.is_dir {
+        if ui.button("新建文档").clicked() {
+            outbox.push(Message::FileTreeNewFileRequested(entry.path.clone()));
+        }
+        if ui.button("新建文件夹").clicked() {
+            outbox.push(Message::FileTreeNewFolderRequested(entry.path.clone()));
+        }
+        ui.separator();
+    } else if ui.button("打开").clicked() {
+        outbox.push(Message::FileSelected(entry.path.clone()));
+    }
+    if ui.button("重命名").clicked() {
+        outbox.push(Message::FileTreeRenameRequested(entry.path.clone()));
+    }
+    if ui.button("删除").clicked() {
+        outbox.push(Message::FileTreeDeleteRequested(entry.path.clone()));
+    }
+    ui.separator();
+    if ui.button("复制路径").clicked() {
+        outbox.push(Message::FileTreeCopyPath {
+            path: entry.path.clone(),
+            relative: false,
+        });
+    }
+    if ui.button("复制相对路径").clicked() {
+        outbox.push(Message::FileTreeCopyPath {
+            path: entry.path.clone(),
+            relative: true,
+        });
+    }
+    ui.separator();
+    if ui.button("在文件管理器中显示").clicked() {
+        outbox.push(Message::FileTreeReveal(entry.path.clone()));
+    }
+    if entry.is_dir && ui.button("刷新").clicked() {
+        outbox.push(Message::FileTreeRefreshRequested);
+    }
 }
 
 /// 文件树行的显示文本:前导空格数由「三角槽(两个空格)+ 图标槽 + 间隙」
@@ -4502,6 +4654,9 @@ mod tests {
             expanded: idle_tree.expanded.clone(),
             children: idle_tree.children.clone(),
             new_file: None,
+            new_folder: None,
+            rename: None,
+            delete_confirm: None,
             refresh_started: Some(std::time::Instant::now()),
         };
 
@@ -4724,5 +4879,145 @@ mod tests {
             count, 5,
             "rail 只挂五枚视图 tab;再加常驻按钮先过上方高度预算"
         );
+    }
+
+    /// 右键菜单条目(context-menu-plan §3 M2):文件/目录两套条目,
+    /// 点击全部映射既有消息。文本抽取 + 点击定位沿用 editor_menu
+    /// 测试的手法(按字形文本找中心,三帧点击)。
+    mod tree_menu {
+        use super::super::tree_context_menu;
+        use crate::filetree::TreeEntry;
+        use crate::state::Message;
+        use eframe::egui::{self, Event, PointerButton, Pos2, RawInput};
+        use std::cell::RefCell;
+        use std::path::PathBuf;
+        use std::rc::Rc;
+
+        fn shapes_text(output: &egui::FullOutput) -> String {
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| {
+                    let egui::epaint::Shape::Text(text) = &clipped.shape else {
+                        return None;
+                    };
+                    Some(text.galley.job.text.clone())
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn label_center(output: &egui::FullOutput, label: &str) -> Option<Pos2> {
+            output.shapes.iter().find_map(|clipped| {
+                let egui::epaint::Shape::Text(text) = &clipped.shape else {
+                    return None;
+                };
+                (text.galley.job.text == label).then(|| {
+                    text.galley
+                        .mesh_bounds
+                        .translate(text.pos.to_vec2())
+                        .center()
+                })
+            })
+        }
+
+        fn click_frame(
+            ctx: &egui::Context,
+            outbox: &Rc<RefCell<Vec<Message>>>,
+            entry: &TreeEntry,
+            pos: Option<Pos2>,
+        ) -> egui::FullOutput {
+            let outbox = outbox.clone();
+            let events = match pos {
+                None => Vec::new(),
+                Some(pos) => {
+                    let press = |pressed| Event::PointerButton {
+                        pos,
+                        button: PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    };
+                    vec![Event::PointerMoved(pos), press(true), press(false)]
+                }
+            };
+            ctx.run_ui(
+                RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    tree_context_menu(ui, entry, &mut outbox.borrow_mut());
+                },
+            )
+        }
+
+        #[test]
+        fn file_and_dir_rows_have_distinct_items() {
+            let file = TreeEntry {
+                path: PathBuf::from("/root/笔记.md"),
+                name: "笔记.md".into(),
+                is_dir: false,
+            };
+            let dir = TreeEntry {
+                path: PathBuf::from("/root/目录"),
+                name: "目录".into(),
+                is_dir: true,
+            };
+            let ctx = egui::Context::default();
+            let outbox = Rc::new(RefCell::new(Vec::new()));
+            let file_frame = click_frame(&ctx, &outbox, &file, None);
+            let text = shapes_text(&file_frame);
+            for label in [
+                "打开",
+                "重命名",
+                "删除",
+                "复制路径",
+                "复制相对路径",
+                "在文件管理器中显示",
+            ] {
+                assert!(text.contains(label), "文件菜单缺 {label}");
+            }
+            assert!(!text.contains("新建文件夹"), "文件菜单不该有目录专属项");
+            file_frame.drop_without_applying_deltas();
+
+            let dir_frame = click_frame(&ctx, &outbox, &dir, None);
+            let text = shapes_text(&dir_frame);
+            for label in [
+                "新建文档",
+                "新建文件夹",
+                "重命名",
+                "删除",
+                "复制路径",
+                "在文件管理器中显示",
+                "刷新",
+            ] {
+                assert!(text.contains(label), "目录菜单缺 {label}");
+            }
+            assert!(!text.contains("打开"), "目录菜单不该有「打开」");
+            dir_frame.drop_without_applying_deltas();
+        }
+
+        #[test]
+        fn menu_clicks_push_expected_messages() {
+            let file = TreeEntry {
+                path: PathBuf::from("/root/笔记.md"),
+                name: "笔记.md".into(),
+                is_dir: false,
+            };
+            let ctx = egui::Context::default();
+            let outbox = Rc::new(RefCell::new(Vec::new()));
+            let first = click_frame(&ctx, &outbox, &file, None);
+            let rename_pos = label_center(&first, "重命名").expect("重命名在场");
+            first.drop_without_applying_deltas();
+            for pos in [Some(rename_pos), None, None] {
+                click_frame(&ctx, &outbox, &file, pos).drop_without_applying_deltas();
+            }
+            assert_eq!(
+                outbox.borrow().as_slice(),
+                [Message::FileTreeRenameRequested(PathBuf::from(
+                    "/root/笔记.md"
+                ))]
+            );
+        }
     }
 }

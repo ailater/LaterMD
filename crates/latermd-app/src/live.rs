@@ -323,7 +323,7 @@ struct LiveRichHandler<'a> {
     /// handler 同一纪律 —— 不用 `Visuals::dark()/light()` 推)。
     text_color: egui::Color32,
     dark_mode: bool,
-    clicked: std::cell::RefCell<Vec<Message>>,
+    clicked: std::rc::Rc<std::cell::RefCell<Vec<Message>>>,
 }
 
 impl<'a> LiveRichHandler<'a> {
@@ -338,7 +338,7 @@ impl<'a> LiveRichHandler<'a> {
             task_base,
             text_color,
             dark_mode,
-            clicked: std::cell::RefCell::new(Vec::new()),
+            clicked: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         }
     }
 
@@ -348,6 +348,40 @@ impl<'a> LiveRichHandler<'a> {
 }
 
 impl LinkHandler for LiveRichHandler<'_> {
+    /// 右键菜单(context-menu-plan §3 M3,与右栏预览同一挂点/同一判定):
+    /// Live 富渲染块的普通链接弹「打开 / 复制链接地址」,协议链接不弹。
+    /// 图片菜单不挂 —— 富渲染块的图片走 MarkdownLabel 同一 images 臂,
+    /// vendored 的 image_response 同样会回调到这里;Live 是编辑视图,
+    /// 「复制图片地址」的用场与预览一致,一并挂上。
+    fn link_response(&self, _ui: &egui::Ui, _text: &str, href: &str, response: &egui::Response) {
+        if !crate::ui::preview::is_openable_href(href) {
+            return;
+        }
+        let clicked = std::rc::Rc::clone(&self.clicked);
+        response.context_menu(|ui| {
+            if ui.button("打开链接").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(href.to_owned()));
+            }
+            if ui.button("复制链接地址").clicked() {
+                clicked
+                    .borrow_mut()
+                    .push(Message::CopyText(href.to_owned()));
+            }
+        });
+    }
+
+    fn image_response(&self, _ui: &egui::Ui, _alt: &str, url: &str, response: &egui::Response) {
+        let clicked = std::rc::Rc::clone(&self.clicked);
+        response.context_menu(|ui| {
+            if ui.button("在浏览器打开").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url.to_owned()));
+            }
+            if ui.button("复制图片地址").clicked() {
+                clicked.borrow_mut().push(Message::CopyText(url.to_owned()));
+            }
+        });
+    }
+
     fn is_block_code_widget(&self, language: Option<&str>) -> bool {
         self.mermaid.is_block_code_widget(language)
     }
@@ -617,6 +651,7 @@ pub fn ui(
     editor_id: egui::Id,
     show_typewriter: bool,
     show_focus: bool,
+    keymap: &crate::keymap::Keymap,
     outbox: &mut Vec<Message>,
 ) -> egui::Response {
     live.sync(editor, cursor.byte);
@@ -742,6 +777,9 @@ pub fn ui(
                         .cursor
                         .char_range()
                         .map(|range| editor.char_to_byte(range.primary.index.0));
+                    // 右键菜单:空文档块与活动块同一挂点(条目表共用)。
+                    // 排在 active_response 之前 —— 那条会移走 response。
+                    crate::ui::editor_menu::attach(ui, &output, keymap, true, outbox);
                     active_response = Some(output.response.response);
                 }
             }
@@ -790,6 +828,10 @@ pub fn ui(
                     let edit =
                         edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)));
                     let output = edit.show(ui);
+                    // 右键菜单(context-menu-plan §3 M1):活动块与源码
+                    // 编辑器同一挂点,条目表共用;块内坐标落光标见
+                    // editor_menu::attach。
+                    crate::ui::editor_menu::attach(ui, &output, keymap, true, outbox);
                     let focused_now = ui.ctx().memory(|mem| mem.has_focus(response_id));
                     let ime_event = ui.ctx().input(|input| {
                         input
@@ -1795,6 +1837,7 @@ mod tests {
                 egui::Id::new("live-test"),
                 false,
                 false,
+                &crate::keymap::Keymap::builtin(),
                 &mut outbox,
             );
         });
@@ -1956,6 +1999,7 @@ mod tests {
                     egui::Id::new("live-copy-test"),
                     false,
                     false,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
             },
@@ -2516,6 +2560,7 @@ mod tests {
                     egui::Id::new(FADE_EDITOR_ID),
                     false,
                     false,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
                 let bg = ui.visuals().text_edit_bg_color();
@@ -3188,6 +3233,7 @@ mod tests {
                     egui::Id::new(SCROLL_EDITOR_ID),
                     show_typewriter,
                     show_focus,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 )
                 .id;
@@ -4442,6 +4488,7 @@ mod tests {
                     egui::Id::new(FOCUS_EDITOR_ID),
                     false,
                     show_focus,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
                 let bg = ui.visuals().text_edit_bg_color();
@@ -4677,6 +4724,7 @@ mod tests {
                     egui::Id::new(FOCUS_EDITOR_ID),
                     typewriter,
                     focus,
+                    &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
                 let bg = ui.visuals().text_edit_bg_color();
@@ -4854,6 +4902,7 @@ mod tests {
                 egui::Id::new("live-highlight-test"),
                 false,
                 false,
+                &crate::keymap::Keymap::builtin(),
                 &mut outbox,
             );
         });
@@ -4982,6 +5031,7 @@ mod tests {
                 egui::Id::new("gap-test"),
                 false,
                 false,
+                &crate::keymap::Keymap::builtin(),
                 &mut outbox,
             );
         });

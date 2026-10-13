@@ -362,6 +362,16 @@ pub struct State {
     /// (成功/失败/作废)清除 —— [`Message::AiChunk`] / [`Message::AiDone`]
     /// 的写入目标由它决定,与 `tabs.active` 无关:切标签不中断也不改道。
     pub ai_active_tab: Option<u64>,
+    /// 编辑器右键菜单的在途编辑动作(`Message::EditAction` 的记账队列,
+    /// context-menu-plan §3 M1):归约只入队,`LaterMdApp::reduce` 每帧
+    /// 取走推合成事件 —— 事件必须进 logic() 阶段的输入流,ui() 阶段推
+    /// 的当帧末被清空(时序红线,`edit_events` 模块文档)。取走即清,
+    /// 跨帧不滞留;同帧多条动作(连点菜单)按序排队,不互相顶掉。
+    pub(crate) pending_edit_action: Vec<crate::edit_events::EditAction>,
+    /// 待写入系统剪贴板的文本(`Message::FileTreeCopyPath` /
+    /// `Message::CopyText` 的落点):state 没有 `egui::Context`,
+    /// `LaterMdApp::reduce` 每帧取走 `ctx.copy_text`,取走即清。
+    pub(crate) pending_copy_text: Option<String>,
     /// 在途流的插入点(#61 M2,选区续写专用);`None` = chunk 写发起标签
     /// 文档末尾(既有语义,存量入口不挂它)。与 [`State::ai_active_tab`]
     /// 同生命周期:发起时置入,成功/失败/作废一并清除。
@@ -530,6 +540,8 @@ impl Default for State {
             goto: GotoBarState::default(),
             quick_open: QuickOpenState::default(),
             ai_active_tab: None,
+            pending_edit_action: Vec::new(),
+            pending_copy_text: None,
             ai_insert_at: None,
             ai_polish: None,
             file_tree: FileTreeState::default(),
@@ -666,6 +678,11 @@ pub enum Message {
     /// [`crate::compose::apply`],归约侧只负责取选区、调它、把结果写回
     /// 缓冲并把新选区挂到 `TabState::pending_selection`。
     FormatRequested(crate::compose::FormatAction),
+    /// 编辑器右键菜单的编辑动作(撤销/重做/剪切/复制/粘贴/全选,
+    /// context-menu-plan §3 M1)。归约只记账到 `pending_edit_action`,
+    /// 合成事件的推入留在持有 `egui::Context` 的 `LaterMdApp::reduce`
+    /// (logic() 阶段,时序红线见 `edit_events` 模块文档)。
+    EditAction(crate::edit_events::EditAction),
     /// 打开「图片框」对话框(工具条 Image 按钮 / `Cmd/Ctrl+Shift+I` 产出,
     /// docs/image-plan.md A 段)。归约置 `image_dialog.open` 并按选区预填
     /// alt —— 选中文字就是要保留的替代文字(`compose::insert_image` 的约定)。
@@ -756,6 +773,43 @@ pub enum Message {
     FileTreeNewFileConfirmed,
     /// 新建浮窗「取消」。
     FileTreeNewFileCancelled,
+    /// 文件树右键菜单「新建文件夹」(context-menu-plan §3 M2):归约挂
+    /// `file_tree.new_folder` 浮窗,确认走 [`crate::filetree::create_folder`]。
+    FileTreeNewFolderRequested(PathBuf),
+    /// 新建文件夹浮窗点「创建」:落盘目录 + 失效缓存 + 展开。
+    FileTreeNewFolderConfirmed,
+    /// 新建文件夹浮窗点「取消」。
+    FileTreeNewFolderCancelled,
+    /// 文件树右键菜单「重命名」(**真实文件改名**,与标签 #37 的显示
+    /// 别名相区分):归约挂 `file_tree.rename` 浮窗,确认走
+    /// [`crate::filetree::rename_entry`]。
+    FileTreeRenameRequested(PathBuf),
+    /// 重命名浮窗点「确定」:合法性校验 + `fs::rename` + 打开中标签
+    /// 换绑新路径(缓冲/dirty 保留)+ named_draft 迁移。
+    FileTreeRenameConfirmed,
+    /// 重命名浮窗点「取消」。
+    FileTreeRenameCancelled,
+    /// 文件树右键菜单「删除」:归约挂 `file_tree.delete_confirm` 确认
+    /// 浮窗;真正的删除走系统废纸篓(`trash_delete`),可恢复。
+    FileTreeDeleteRequested(PathBuf),
+    /// 删除确认浮窗点「删除」:打开中 dirty 文件拒绝;干净标签先关闭
+    /// 再删;删目录连子文档的标签一起关。
+    FileTreeDeleteConfirmed,
+    /// 删除确认浮窗点「取消」。
+    FileTreeDeleteCancelled,
+    /// 复制路径(文件树行 / 标签右键共用):`relative` 为真时取相对
+    /// 文件树根的路径(不在根下则原样绝对路径)。文本经
+    /// `pending_copy_text` 出口落系统剪贴板。
+    FileTreeCopyPath {
+        path: PathBuf,
+        relative: bool,
+    },
+    /// 在系统文件管理器中显示(Linux 打开父目录,mac/win 定位文件)。
+    FileTreeReveal(PathBuf),
+    /// 通用「复制文本到剪贴板」出口(state 无 `egui::Context`,
+    /// `LaterMdApp::reduce` 每帧取走 `ctx.copy_text`)。预览右键
+    /// 「复制链接/图片地址」同走这条。
+    CopyText(String),
     /// 文件栏「刷新」按钮:重扫**根 + 当前展开中的全部目录**(树是懒加载
     /// 缓存,外部增删改文件在 UI 层看不出来),并按新状态刷新 Git 角标 ——
     /// 外部 `git add/commit` 后角标同样滞后。归约里同步做完,UI 无状态。
@@ -1131,6 +1185,7 @@ impl State {
                 }
             }
             Message::FileCommand(cmd) => self.run_file_cmd(cmd),
+            Message::EditAction(action) => self.pending_edit_action.push(action),
             Message::NoticeDismissed => self.tabs.current_mut().document.notice = None,
             Message::ExportHtml => self.run_export_html(),
             Message::ExportPdf => self.run_export_pdf(),
@@ -1169,6 +1224,19 @@ impl State {
             Message::FileTreeNewFileRequested(dir) => self.request_new_file(dir),
             Message::FileTreeNewFileConfirmed => self.confirm_new_file(),
             Message::FileTreeNewFileCancelled => self.file_tree.new_file = None,
+            Message::FileTreeNewFolderRequested(dir) => self.request_new_folder(dir),
+            Message::FileTreeNewFolderConfirmed => self.confirm_new_folder(),
+            Message::FileTreeNewFolderCancelled => self.file_tree.new_folder = None,
+            Message::FileTreeRenameRequested(path) => self.request_rename(path),
+            Message::FileTreeRenameConfirmed => self.confirm_rename(),
+            Message::FileTreeRenameCancelled => self.file_tree.rename = None,
+            Message::FileTreeDeleteRequested(path) => self.request_delete(path),
+            Message::FileTreeDeleteConfirmed => self.confirm_delete(),
+            Message::FileTreeDeleteCancelled => self.file_tree.delete_confirm = None,
+            Message::FileTreeCopyPath { path, relative } => self.copy_path(path, relative),
+            Message::FileTreeReveal(path) => self.reveal_path(path),
+            Message::CopyText(text) => self.pending_copy_text = Some(text),
+
             Message::FileTreeRefreshRequested => self.refresh_file_tree(),
             Message::FileTreeToggled(dir) => self.file_tree.toggle(&dir),
             Message::FileSelected(path) => {
@@ -2038,6 +2106,25 @@ impl State {
         } else {
             self.layout.enter_zen();
         }
+    }
+
+    /// 当前编辑目标的 widget id(`Message::EditAction` 推合成事件前归还
+    /// 焦点的对象,context-menu-plan §3 M1):源码模式 = 源码 TextEdit;
+    /// Live = 活动块 TextEdit,无活动块 = 空文档块,浏览态 = `None`
+    /// (无处还焦,动作作废 —— 浏览态没有可消费事件的编辑器)。
+    pub(crate) fn editor_focus_id(&self) -> Option<eframe::egui::Id> {
+        let tab = self.tabs.current();
+        let base = crate::ui::editor::tab_editor_id(tab.id);
+        if self.render_mode != crate::live::RenderMode::Live {
+            return Some(base);
+        }
+        if tab.live.browse_only {
+            return None;
+        }
+        Some(match tab.live.active {
+            Some(index) => base.with(("live-block", index)),
+            None => base.with("live-empty"),
+        })
     }
 
     /// 请求一次 Markdown 格式动作(§6.4 链路)。
@@ -3792,6 +3879,188 @@ impl State {
         }
     }
 
+    /// 挂起新建文件夹浮窗(context-menu-plan §3 M2)。目标目录口径与
+    /// [`Self::request_new_file`] 相同:载荷目录不存在时回落根。
+    fn request_new_folder(&mut self, dir: PathBuf) {
+        let Some(dir) = dir
+            .is_dir()
+            .then_some(dir)
+            .or_else(|| self.file_tree.root.clone())
+        else {
+            self.tabs.current_mut().document.notice =
+                Some("先在文件栏选择一个文件夹,再新建".to_owned());
+            return;
+        };
+        let draft = unique_draft(&dir, "新建文件夹");
+        self.file_tree.new_folder = Some(crate::filetree::NewFileDraft { dir, draft });
+    }
+
+    /// 确认新建文件夹:落盘目录 → 失效缓存 → 展开到它。失败只落提示行,
+    /// 浮窗保留可改名重试(与新建文件同口径)。
+    fn confirm_new_folder(&mut self) {
+        let Some(draft) = self.file_tree.new_folder.clone() else {
+            return;
+        };
+        match crate::filetree::create_folder(&draft.dir, &draft.draft) {
+            Ok(path) => {
+                self.file_tree.new_folder = None;
+                self.file_tree.invalidate(&draft.dir);
+                self.file_tree.toggle(&path);
+                self.refresh_git();
+            }
+            Err(error) => {
+                self.tabs.current_mut().document.notice = Some(error.to_string());
+            }
+        }
+    }
+
+    /// 挂起重命名浮窗:草稿预填现名(不含目录),改完落回同目录。
+    fn request_rename(&mut self, path: PathBuf) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.file_tree.rename = Some(crate::filetree::RenameDraft {
+            from: path,
+            draft: name,
+        });
+    }
+
+    /// 确认重命名(真实文件改名,context-menu-plan §3 M2):
+    /// `filetree::rename_entry` 校验 + `fs::rename`,成功后——
+    /// 失效父目录缓存、展开新路径;**打开中的标签换绑新路径**(缓冲与
+    /// dirty 原样保留,保存目标跟移,窗口标题/状态栏自然跟随);改名
+    /// 目标是目录时,其下打开中的文档按前缀整体搬移;命名草稿
+    /// (`<doc>.latermd-draft`)随路径迁移。失败只落提示行,浮窗保留
+    /// (磁盘不动,改名可重试)。
+    fn confirm_rename(&mut self) {
+        let Some(draft) = self.file_tree.rename.clone() else {
+            return;
+        };
+        let was_dir = draft.from.is_dir();
+        match crate::filetree::rename_entry(&draft.from, &draft.draft) {
+            Ok(new_path) => {
+                self.file_tree.rename = None;
+                if let Some(parent) = draft.from.parent() {
+                    self.file_tree.invalidate(parent);
+                }
+                self.file_tree.expand_ancestors_of(&new_path);
+                // 标签换绑:精确匹配(文件)或前缀匹配(目录,连同子树)。
+                // named_draft 落点跟路径走,旧草稿文件一并迁移。
+                for tab in &mut self.tabs.tabs {
+                    let Some(tab_path) = tab.document.path.clone() else {
+                        continue;
+                    };
+                    let retargeted = if was_dir {
+                        tab_path
+                            .strip_prefix(&draft.from)
+                            .ok()
+                            .map(|rest| new_path.join(rest))
+                    } else if tab_path == draft.from {
+                        Some(new_path.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(new_tab_path) = retargeted {
+                        let old_draft = Self::named_draft_path(&tab_path);
+                        if old_draft.exists() {
+                            let _ =
+                                std::fs::rename(&old_draft, Self::named_draft_path(&new_tab_path));
+                        }
+                        tab.document.path = Some(new_tab_path);
+                    }
+                }
+                self.refresh_git();
+            }
+            Err(error) => {
+                self.tabs.current_mut().document.notice = Some(error.to_string());
+            }
+        }
+    }
+
+    /// 挂起删除确认浮窗。
+    fn request_delete(&mut self, path: PathBuf) {
+        self.file_tree.delete_confirm = Some(path);
+    }
+
+    /// 确认删除(context-menu-plan §3 M2):remover 参数化 —— 生产传
+    /// [`crate::filetree::trash_delete`](系统废纸篓 可恢复),无头测试
+    /// 注入 spy(trash 不进测试,不污染用户废纸篓/CI 环境)。
+    ///
+    /// 口径(decisions-pending #144):目标(或其子树,删目录时)有
+    /// **dirty 打开标签 → 拒绝**,确认浮窗保留、提示先保存或关闭 ——
+    /// 删掉磁盘文件而留下脏缓冲,会让「保存」把已删文件原样写回,比
+    /// 拒绝更危险;**干净打开标签 → 先关闭再删**(标签留着会指向已不
+    /// 存在的路径,保存又把文件变回来)。删除目标本身不存在(外部已
+    /// 删)按成功收尾:浮窗关、缓存失效,树刷新后条目自然消失。
+    fn confirm_delete_with(&mut self, remover: &dyn Fn(&Path) -> Result<(), String>) {
+        let Some(path) = self.file_tree.delete_confirm.clone() else {
+            return;
+        };
+        let under_target = |tab_path: &Path| tab_path == path || tab_path.starts_with(&path);
+        let dirty_open = self.tabs.tabs.iter().any(|tab| {
+            tab.document.path.as_deref().is_some_and(&under_target) && tab.document.dirty
+        });
+        if dirty_open {
+            self.tabs.current_mut().document.notice = Some(format!(
+                "{} 有未保存的修改,请先保存或关闭再删除",
+                path.display()
+            ));
+            return;
+        }
+        // 关闭目标(及子树)上的干净标签:从后往前移,索引不漂移。
+        // AI 在途流的作废保护走 remove_tab 既有逻辑。
+        for index in (0..self.tabs.tabs.len()).rev() {
+            let is_target = self.tabs.tabs[index]
+                .document
+                .path
+                .as_deref()
+                .is_some_and(&under_target);
+            if is_target {
+                self.remove_tab(index);
+            }
+        }
+        if let Err(error) = remover(&path) {
+            // 废纸篓失败(权限/被占用):文件还在,落提示行,浮窗保留
+            self.tabs.current_mut().document.notice = Some(error);
+            return;
+        }
+        self.file_tree.delete_confirm = None;
+        if let Some(parent) = path.parent() {
+            self.file_tree.invalidate(parent);
+        }
+        self.refresh_git();
+    }
+
+    /// 生产删除:走系统废纸篓。
+    fn confirm_delete(&mut self) {
+        self.confirm_delete_with(&crate::filetree::trash_delete);
+    }
+
+    /// 复制路径:相对口径 = 相对文件树根(不在根下则原样绝对路径)。
+    /// 文本落 `pending_copy_text`,`LaterMdApp::reduce` 每帧写剪贴板。
+    fn copy_path(&mut self, path: PathBuf, relative: bool) {
+        let text = if relative {
+            self.file_tree
+                .root
+                .as_deref()
+                .and_then(|root| path.strip_prefix(root).ok())
+                .map(Path::to_string_lossy)
+                .map(|cow| cow.into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned())
+        } else {
+            path.to_string_lossy().into_owned()
+        };
+        self.pending_copy_text = Some(text);
+    }
+
+    /// 在系统文件管理器中显示。spawn 失败只落提示行。
+    fn reveal_path(&mut self, path: PathBuf) {
+        if let Err(error) = crate::filetree::reveal_in_file_manager(&path) {
+            self.tabs.current_mut().document.notice = Some(error);
+        }
+    }
+
     /// 重扫文件树(`Message::FileTreeRefreshRequested` 的归约):丢全部子项
     /// 缓存,下一帧归约的 `ensure_loaded` 即按「根 + 展开中」重列。
     ///
@@ -3931,6 +4200,62 @@ mod tests {
         std::env::temp_dir().join(format!("latermd-state-{}-{name}", std::process::id()))
     }
 
+    /// 测试取命名草稿落点(named_draft_path 私有,不为此扩 API 面)。
+    fn named_draft_path_for_test(path: &Path) -> PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".latermd-draft");
+        PathBuf::from(name)
+    }
+
+    /// 右键菜单编辑动作(context-menu-plan §3 M1):归约只记账到
+    /// `pending_edit_action`,合成事件的推入由 `LaterMdApp::reduce` 在
+    /// 持有 `egui::Context` 的层完成(layout.rs 侧有对应的出口测试)。
+    #[test]
+    fn edit_action_message_parks_into_pending() {
+        let mut state = State::default();
+        assert!(state.pending_edit_action.is_empty());
+        state.apply(Message::EditAction(crate::edit_events::EditAction::Undo));
+        state.apply(Message::EditAction(crate::edit_events::EditAction::Paste));
+        assert_eq!(
+            state.pending_edit_action,
+            vec![
+                crate::edit_events::EditAction::Undo,
+                crate::edit_events::EditAction::Paste,
+            ],
+            "同帧多条动作按序排队,不互相顶掉"
+        );
+    }
+
+    /// 焦点目标矩阵:源码 = 源码 TextEdit;Live = 活动块 / 空文档块;
+    /// 浏览态 = None(动作作废,无可消费事件的编辑器)。
+    #[test]
+    fn editor_focus_id_follows_render_mode() {
+        use crate::live::RenderMode;
+        let mut state = State::default();
+        let base = crate::ui::editor::tab_editor_id(state.tabs.current().id);
+
+        state.render_mode = RenderMode::Source;
+        assert_eq!(state.editor_focus_id(), Some(base));
+
+        state.render_mode = RenderMode::Live;
+        state.tabs.current_mut().live.browse_only = true;
+        assert_eq!(state.editor_focus_id(), None, "浏览态无处还焦");
+
+        state.tabs.current_mut().live.browse_only = false;
+        assert_eq!(
+            state.editor_focus_id(),
+            Some(base.with("live-empty")),
+            "无活动块 = 空文档块"
+        );
+
+        state.tabs.current_mut().live.active = Some(2);
+        assert_eq!(
+            state.editor_focus_id(),
+            Some(base.with(("live-block", 2))),
+            "活动块 id 与 live.rs 的 TextEdit id 同构"
+        );
+    }
+
     #[test]
     fn display_name_and_window_title_track_dirty() {
         let mut document = DocumentState {
@@ -3948,6 +4273,192 @@ mod tests {
             notice: None,
         };
         assert_eq!(document.display_name(), "未命名*");
+    }
+
+    /// 文件树右键「重命名」(context-menu-plan §3 M2 验收 4):真实改名
+    /// + 打开中标签换绑(缓冲与 dirty 保留)+ named_draft 迁移。
+    #[test]
+    fn tree_rename_retargets_open_tab_and_moves_draft() {
+        let dir = temp_path("tree-rename");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("旧.md");
+        std::fs::write(&file, "正文").unwrap();
+        let draft_file = named_draft_path_for_test(&file);
+        std::fs::write(&draft_file, "未保存草稿").unwrap();
+
+        let mut state = State::default();
+        state.apply(Message::FileSelected(file.clone()));
+        // 弄脏缓冲,验证换绑后 dirty 保留
+        state.tabs.current_mut().document.dirty = true;
+
+        state.apply(Message::FileTreeRenameRequested(file.clone()));
+        assert!(state.file_tree.rename.is_some());
+        state.file_tree.rename.as_mut().unwrap().draft = "新.md".into();
+        state.apply(Message::FileTreeRenameConfirmed);
+
+        assert!(!file.exists(), "旧路径消失");
+        let new_file = dir.join("新.md");
+        assert!(new_file.exists());
+        assert_eq!(
+            state.tabs.current().document.path.as_deref(),
+            Some(new_file.as_path()),
+            "打开中标签换绑新路径"
+        );
+        assert!(state.tabs.current().document.dirty, "缓冲 dirty 保留");
+        assert!(
+            named_draft_path_for_test(&new_file).exists(),
+            "named_draft 随路径迁移"
+        );
+        assert!(!draft_file.exists(), "旧 draft 不残留");
+        assert!(state.file_tree.rename.is_none(), "成功后浮窗撤下");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 改名撞名:磁盘不动、浮窗保留、提示行落地 —— 可改名重试。
+    #[test]
+    fn tree_rename_collision_keeps_dialog_and_disk() {
+        let dir = temp_path("tree-rename-collision");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("甲.md");
+        std::fs::write(&file, "").unwrap();
+        std::fs::write(dir.join("乙.md"), "").unwrap();
+
+        let mut state = State::default();
+        state.apply(Message::FileSelected(file.clone()));
+        state.apply(Message::FileTreeRenameRequested(file.clone()));
+        state.file_tree.rename.as_mut().unwrap().draft = "乙.md".into();
+        state.apply(Message::FileTreeRenameConfirmed);
+
+        assert!(file.exists(), "磁盘不动");
+        assert!(state.file_tree.rename.is_some(), "浮窗保留可重试");
+        assert!(
+            state.tabs.current().document.notice.is_some(),
+            "撞名原因落提示行"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 删除守卫(context-menu-plan §3 M2 验收 5):dirty 打开 → 拒绝,
+    /// 磁盘与标签都不动;remover 经注入,不真碰废纸篓。
+    #[test]
+    fn tree_delete_refused_while_dirty_open() {
+        let dir = temp_path("tree-delete-dirty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("脏.md");
+        std::fs::write(&file, "").unwrap();
+
+        let mut state = State::default();
+        state.apply(Message::FileSelected(file.clone()));
+        state.tabs.current_mut().document.dirty = true;
+
+        let removed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let removed_in = removed.clone();
+        let spy = move |_path: &Path| {
+            removed_in.set(true);
+            Ok(())
+        };
+        state.apply(Message::FileTreeDeleteRequested(file.clone()));
+        state.confirm_delete_with(&spy);
+
+        assert!(file.exists(), "dirty 打开时磁盘不动");
+        assert!(!removed.get(), "未调用 remover");
+        assert!(
+            state
+                .tabs
+                .tabs
+                .iter()
+                .filter(|tab| tab.document.path.as_deref() == Some(file.as_path()))
+                .count()
+                == 1,
+            "标签不关"
+        );
+        assert!(state.file_tree.delete_confirm.is_some(), "确认浮窗保留");
+        assert!(state.tabs.current().document.notice.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 干净打开的标签:先关标签再删;remover 收到目标路径;
+    /// 删除失败(remover 报错)时浮窗保留。
+    #[test]
+    fn tree_delete_closes_clean_tab_then_removes() {
+        let dir = temp_path("tree-delete-clean");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("净.md");
+        std::fs::write(&file, "").unwrap();
+
+        let mut state = State::default();
+        state.apply(Message::FileSelected(file.clone()));
+
+        let removed_path = std::rc::Rc::new(std::cell::RefCell::new(None::<PathBuf>));
+        let removed_in = removed_path.clone();
+        let spy = move |path: &Path| {
+            *removed_in.borrow_mut() = Some(path.to_path_buf());
+            Ok(())
+        };
+        state.apply(Message::FileTreeDeleteRequested(file.clone()));
+        state.confirm_delete_with(&spy);
+
+        assert_eq!(
+            removed_path.borrow().as_deref(),
+            Some(file.as_path()),
+            "remover 收到目标路径"
+        );
+        assert_eq!(state.tabs.tabs.len(), 1, "干净标签已关(只剩兜底空标签)");
+        assert!(state.file_tree.delete_confirm.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // remover 失败:文件还在、浮窗保留、提示行落地
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&file, "").unwrap();
+        let mut state = State::default();
+        state.apply(Message::FileTreeDeleteRequested(file.clone()));
+        let fail = |_path: &Path| -> Result<(), String> { Err("被占用".into()) };
+        state.confirm_delete_with(&fail);
+        assert!(file.exists());
+        assert!(state.file_tree.delete_confirm.is_some());
+        assert!(state.tabs.current().document.notice.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 复制路径:根下取相对,根外回落绝对。
+    #[test]
+    fn tree_copy_path_relative_to_root_falls_back_absolute() {
+        let mut state = State::default();
+        let root = temp_path("tree-copy-root");
+        let inside = root.join("子").join("文.md");
+        state.file_tree.root = Some(root.clone());
+        state.apply(Message::FileTreeCopyPath {
+            path: inside.clone(),
+            relative: true,
+        });
+        assert_eq!(
+            state.pending_copy_text.as_deref(),
+            Some("子/文.md"),
+            "根下取相对路径"
+        );
+        state.apply(Message::FileTreeCopyPath {
+            path: inside.clone(),
+            relative: false,
+        });
+        assert_eq!(
+            state.pending_copy_text.as_deref(),
+            Some(inside.to_string_lossy().as_ref()),
+            "绝对口径原样"
+        );
+        let outside = PathBuf::from("/其他/地方.md");
+        state.apply(Message::FileTreeCopyPath {
+            path: outside.clone(),
+            relative: true,
+        });
+        assert_eq!(
+            state.pending_copy_text.as_deref(),
+            Some(outside.to_string_lossy().as_ref()),
+            "根外回落绝对路径"
+        );
     }
 
     /// 命令层开关消息:主题互换(翻转 + 落盘)与侧边栏翻转,都走完整归约。

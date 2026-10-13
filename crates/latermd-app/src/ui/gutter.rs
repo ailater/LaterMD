@@ -137,6 +137,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    &crate::keymap::Keymap::builtin(),
                     &mut Vec::new(),
                     &[],
                 );

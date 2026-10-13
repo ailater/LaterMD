@@ -282,6 +282,16 @@ fn binding(action: Action, state: &State) -> Option<Shortcut> {
     .then_some(shortcut)
 }
 
+/// 读系统剪贴板文本(`edit_events::system_paste_text` 的 mac 实现):
+/// 原生菜单「粘贴」与编辑器右键菜单共用同一条读取路径,与 egui-winit
+/// 在 Ctrl+V 的同步读取同口径。
+pub(crate) fn pasteboard_text() -> Option<String> {
+    let board = NSPasteboard::generalPasteboard();
+    // SAFETY: Apple's constant identifies the UTF-8 text pasteboard type.
+    let text = unsafe { board.stringForType(NSPasteboardTypeString) }?;
+    Some(text.to_string())
+}
+
 fn dispatch(action: Action, ctx: &egui::Context, outbox: &mut Vec<Message>) {
     match action {
         Action::Command(cmd) => outbox.push(cmd.message()),
@@ -294,13 +304,14 @@ fn dispatch(action: Action, ctx: &egui::Context, outbox: &mut Vec<Message>) {
                 EditAction::Paste => {
                     // 与 egui-winit 一致：文本同步从系统剪贴板读入；
                     // 无文本时复用后台图片读取，避免菜单粘贴丢失图片能力。
-                    let board = NSPasteboard::generalPasteboard();
-                    // SAFETY: Apple's constant identifies the UTF-8 text pasteboard type.
-                    if let Some(text) = unsafe { board.stringForType(NSPasteboardTypeString) } {
-                        egui::Event::Paste(text.to_string())
-                    } else {
-                        outbox.push(Message::ImagePasteRequested);
-                        return;
+                    // 读取实现在 `edit_events::system_paste_text`(mac 分支
+                    // 委托到这里),与编辑器右键菜单共用同一条路径。
+                    match crate::edit_events::system_paste_text() {
+                        Some(text) => egui::Event::Paste(text),
+                        None => {
+                            outbox.push(Message::ImagePasteRequested);
+                            return;
+                        }
                     }
                 }
                 _ => egui::Event::Key {

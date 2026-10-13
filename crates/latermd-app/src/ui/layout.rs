@@ -97,6 +97,30 @@ impl LaterMdApp {
         for message in std::mem::take(outbox) {
             state.apply(message);
         }
+        // 编辑器右键菜单的合成事件出口(context-menu-plan §3 M1):归约
+        // 只把 `Message::EditAction` 记账到 `pending_edit_action`,事件
+        // 推入留在这层 —— 必须 logic() 阶段进输入流(ui() 阶段推的当帧
+        // 末被清空),且归约在 ui() 之前,同帧 TextEdit 即可消费。粘贴的
+        // 剪贴板文本在推之前同步读(mac_menu 先例,风险面同注);兜底
+        // 消息(无文本回落图片粘贴)当帧照常归约。浏览态无处还焦,动作
+        // 作废(没有可消费事件的编辑器)。
+        for action in std::mem::take(&mut state.pending_edit_action) {
+            let paste = action
+                .needs_paste_text()
+                .then(crate::edit_events::system_paste_text)
+                .flatten();
+            if let Some(fallback) = state
+                .editor_focus_id()
+                .and_then(|focus| crate::edit_events::dispatch(action, ctx, paste, focus))
+            {
+                state.apply(fallback);
+            }
+        }
+        // 「复制文本」出口(`Message::CopyText` / `Message::FileTreeCopyPath`
+        // 的落点):state 没有 `egui::Context`,写剪贴板留在这层。取走即清。
+        if let Some(text) = state.pending_copy_text.take() {
+            ctx.copy_text(text);
+        }
         // 长按修饰键检测(#54 M1):与命令快捷键同层的顶层输入处理,但
         // 扫描必须排在 poll_shortcuts / poll_capture 之前——快捷键消费会
         // 从事件流删掉 Key 事件,后扫会把「按过 Ctrl+S」看成「只在按
@@ -620,6 +644,8 @@ impl LaterMdApp {
                     // 活动块,源码模式不接线 —— 边界见 decisions-pending #122;
                     // 关闭 = 现状零变化)。
                     state.theme.show_focus_mode,
+                    // 右键菜单条目的键位标注与菜单栏同源(context-menu-plan §3 M1)。
+                    &state.keymap,
                     outbox,
                     &find_marks,
                 );
@@ -815,6 +841,43 @@ impl LaterMdApp {
             }
             if cancel.clicked() {
                 outbox.push(Message::FileTreeNewFileCancelled);
+            }
+        }
+
+        // 文件树右键「新建文件夹」浮窗(context-menu-plan §3 M2):与新建
+        // 文档同纪律 —— 只收草稿,落盘在归约(confirm_new_folder)。
+        if let Some(new_folder) = self.state.file_tree.new_folder.as_mut() {
+            let (confirm, cancel) = crate::ui::sidebar::new_folder_dialog(ui, new_folder);
+            if confirm.clicked() {
+                outbox.push(Message::FileTreeNewFolderConfirmed);
+            }
+            if cancel.clicked() {
+                outbox.push(Message::FileTreeNewFolderCancelled);
+            }
+        }
+
+        // 文件树右键「重命名」浮窗:草稿预填现名,确认走归约
+        // (confirm_rename:真实改名 + 标签换绑)。
+        if let Some(rename) = self.state.file_tree.rename.as_mut() {
+            let (confirm, cancel) = crate::ui::sidebar::rename_dialog(ui, rename);
+            if confirm.clicked() {
+                outbox.push(Message::FileTreeRenameConfirmed);
+            }
+            if cancel.clicked() {
+                outbox.push(Message::FileTreeRenameCancelled);
+            }
+        }
+
+        // 文件树右键「删除」确认浮窗:只收确认,删除在归约
+        // (confirm_delete:dirty 拒绝 / 干净关标签 / 废纸篓)。
+        if let Some(path) = self.state.file_tree.delete_confirm.as_ref() {
+            let is_dir = path.is_dir();
+            let (confirm, cancel) = crate::ui::sidebar::delete_confirm_dialog(ui, path, is_dir);
+            if confirm.clicked() {
+                outbox.push(Message::FileTreeDeleteConfirmed);
+            }
+            if cancel.clicked() {
+                outbox.push(Message::FileTreeDeleteCancelled);
             }
         }
 
@@ -1727,7 +1790,7 @@ fn selection_ai_polish_dialog(
 /// * 按钮右对齐:中性「取消」+ 危险实心确认钮([`danger_button`])。
 ///
 /// 返回(确认, 取消)按钮的响应,测试定位用;真正的动作都在归约。
-fn destructive_confirm_dialog(
+pub(crate) fn destructive_confirm_dialog(
     ui: &mut egui::Ui,
     title: &str,
     lead: &str,
@@ -3790,6 +3853,49 @@ mod tests {
             repeat: false,
             modifiers,
         }
+    }
+
+    /// 右键菜单编辑动作的合成事件出口(context-menu-plan §3 M1 验收 3
+    /// 的消息侧):outbox 里的 `Message::EditAction` 在同一 logic 帧内
+    /// 变成输入流里的合成事件,记账位取走即清;粘贴无文本回落图片粘贴
+    /// 消息当帧归约。
+    #[test]
+    fn edit_action_message_pushes_synthetic_event_same_frame() {
+        use crate::edit_events::EditAction;
+
+        let mut app = LaterMdApp::default();
+        app.outbox.push(Message::EditAction(EditAction::Undo));
+        app.outbox.push(Message::EditAction(EditAction::Paste));
+
+        let ctx = egui::Context::default();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen_in = seen.clone();
+        let output = ctx.run_ui(RawInput::default(), |ui| {
+            app.reduce(ui.ctx());
+            *seen_in.borrow_mut() = ui.input(|input| input.events.clone());
+        });
+        output.drop_without_applying_deltas();
+
+        let events = seen.borrow();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Z,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.command && !modifiers.shift
+            )),
+            "撤销应变成 Cmd/Ctrl+Z 合成按键"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Paste(_))),
+            "粘贴的合成事件应已入流(测试环境读到的系统剪贴板内容不定,只验事件形态)"
+        );
+        assert!(app.state.pending_edit_action.is_empty(), "记账队列取走即清");
     }
 
     /// 跑一帧归约(与 eframe 同序:begin_pass 之后调 logic),返回该帧下发的

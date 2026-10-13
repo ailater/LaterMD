@@ -338,6 +338,7 @@ build 期工具不在此列):
 |---|---|---|---|
 | Inter 4.1(Regular/Medium/SemiBold,rsms/inter) | 嵌入字体资源(`include_bytes`,U1) | SIL Open Font License 1.1 | crates/latermd-app/src/fonts.rs;字文件与许可文本 [assets/fonts/](../assets/fonts/) |
 | Twemoji(jdecked/twemoji v17.0.3) | 嵌入 PNG 图形资源(#47 彩色 emoji 面板,`include_bytes` 懒解码纹理) | CC-BY 4.0(义务 = 署名 + 附许可文本;本表即署名,全文随源码库 [assets/emoji/twemoji/LICENSE-GRAPHICS](../assets/emoji/twemoji/LICENSE-GRAPHICS)) | 资产与下载脚本 [assets/emoji/twemoji/](../assets/emoji/twemoji/)(272 枚 72x72,来源/版本/复现见同目录 SOURCES.txt) |
+| trash 5.2.9(byron/trash-rs) | Rust 依赖(文件树右键「删除」= 移入系统废纸篓,context-menu-plan §3 M2) | MIT OR Apache-2.0 | crates/latermd-app(Cargo.toml);传递依赖 chrono 0.4 / urlencoding 2.1(freedesktop trashinfo 时间戳与转义)同为 MIT OR Apache-2.0 |
 
 **OFL 1.1 的分发合规口径(2026-09-28 定)**:OFL 要求字体再分发时随附许可
 文本。LaterMD 的 Release 产物是单一二进制(TTF 以 `include_bytes` 打进
