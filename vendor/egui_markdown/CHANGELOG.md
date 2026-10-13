@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LinkHandler::link_response` and `LinkHandler::image_response`, called with the interaction
+  `Response` of default-rendered links (galley path on secondary click, per-link widgets in table
+  cells, and `egui::Image` blocks under the `images` feature), so hosts can attach context menus
+  and other interaction. Both default to no-op.
 - `OverflowWrap` enum (`Normal`, `BreakAll`) and `MarkdownLabel::overflow_wrap`, which break a
   run of text that is wider than the available width.
 - `MarkdownLabel::wrap_mode`, `.wrap()`, `.truncate()`, and `.extend()`, which mirror the same

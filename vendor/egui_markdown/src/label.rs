@@ -1265,7 +1265,7 @@ impl<'a> MarkdownLabel<'a> {
           after_block(&mut i, &mut text_start, end, ui);
         }
         #[cfg(feature = "images")]
-        Token::Image { url, .. } => {
+        Token::Image { alt, url, .. } => {
           let had_content = text_start < i;
           self.flush_text_range(ui, md, font, color, text_start, i, style, true);
           before_block(had_content, ui);
@@ -1292,7 +1292,10 @@ impl<'a> MarkdownLabel<'a> {
             .max_width(ui.available_width())
             .fit_to_original_size(1.0)
             .show_loading_spinner(true);
-          ui.add(image);
+          let image_response = ui.add(image);
+          if let Some(handler) = &self.link_handler {
+            handler.image_response(ui, alt.as_ref(), url.as_ref(), &image_response);
+          }
           record_widget_block(ui, self.id, md.spans[i].clone(), before_rect, ui.min_rect().bottom());
           cache_block_height(ui, block_sz_id, block_key(i), before_y);
           i += 1;
@@ -1767,21 +1770,53 @@ impl<'a> MarkdownLabel<'a> {
     if self.interactable && response.clicked() {
       self.handle_click(ui, tokens, section_to_token, hovered_section);
     }
+
+    // Secondary-click context menu on links: resolve the link under the
+    // pointer and hand the label's Response to the handler for as long as
+    // the popup is open. The payload is parked in temp storage because the
+    // pointer leaves the link the moment the popup covers it — re-invoking
+    // the hook every open frame is what lets the host re-attach its menu
+    // closure. Right-clicking anywhere that is not a link parks `None`:
+    // no hook, no empty popup.
+    if let Some(handler) = &self.link_handler {
+      let menu_key = self.id.with("link-ctx-menu");
+      if response.secondary_clicked() {
+        let link =
+          self.token_at_pointer(ui, &galley, section_to_token, &response, rect).and_then(|(_section, token_index)| {
+            let is_inline_widget = inline_widget_spans.iter().any(|&(_, _, span_ti)| span_ti == token_index);
+            match tokens.get(token_index) {
+              Some(Token::Link { text, href, .. }) if !is_inline_widget => Some((text.to_string(), href.to_string())),
+              _ => None,
+            }
+          });
+        ui.ctx().data_mut(|d| d.insert_temp(menu_key, link));
+      }
+      let payload: Option<Option<(String, String)>> = ui.ctx().data(|d| d.get_temp(menu_key));
+      if let Some((text, href)) = payload.flatten() {
+        handler.link_response(ui, &text, &href, &response);
+        // The open command lands at frame end, so on the click frame itself
+        // `context_menu_opened()` still reads false — only retire the hook
+        // on a frame that neither has the menu open nor just opened it.
+        if !response.context_menu_opened() && !response.secondary_clicked() {
+          ui.ctx().data_mut(|d| d.insert_temp::<Option<(String, String)>>(menu_key, None));
+        }
+      }
+    }
     (size, galley, relative_anchors)
   }
 
-  #[allow(clippy::too_many_arguments)]
-  fn handle_hover(
+  /// Pointer hit test in galley-local coordinates: `(section_index,
+  /// token_index)` under the pointer, or `None` when non-interactable,
+  /// unhovered, or over empty space. Shared by hover decorations and the
+  /// secondary-click link menu.
+  fn token_at_pointer(
     &self,
-    ui: &mut Ui,
-    tokens: &[Token<'_>],
+    ui: &Ui,
     galley: &Arc<Galley>,
     section_to_token: &[usize],
-    inline_widget_spans: &[(usize, usize, usize)],
     response: &Response,
     rect: Rect,
-    _color: Color32,
-  ) -> Option<u32> {
+  ) -> Option<(u32, usize)> {
     if !self.interactable || !response.hovered() {
       return None;
     }
@@ -1799,15 +1834,28 @@ impl<'a> MarkdownLabel<'a> {
 
     let pos_in_galley = transformed_pointer_pos.map(|pos| pos - rect.min.to_vec2())?;
     let glyph_index = cursor_from_pos(galley, pos_in_galley)?;
-    let index_to_section = |index: u32| -> Option<u32> { section_for_char(&galley.job, index) };
+    let section_index = section_for_char(&galley.job, glyph_index)?;
+    let token_index = section_to_token.get(section_index as usize).copied()?;
+    Some((section_index, token_index))
+  }
 
-    let section_index = index_to_section(glyph_index)?;
-    let token_index = section_to_token.get(section_index as usize).copied();
-    let token = token_index.and_then(|idx| tokens.get(idx));
+  #[allow(clippy::too_many_arguments)]
+  fn handle_hover(
+    &self,
+    ui: &mut Ui,
+    tokens: &[Token<'_>],
+    galley: &Arc<Galley>,
+    section_to_token: &[usize],
+    inline_widget_spans: &[(usize, usize, usize)],
+    response: &Response,
+    rect: Rect,
+    _color: Color32,
+  ) -> Option<u32> {
+    let (section_index, token_index) = self.token_at_pointer(ui, galley, section_to_token, response, rect)?;
+    let token = Some(token_index).and_then(|idx| tokens.get(idx));
 
     // Check if this token is an inline widget - show pointing hand but suppress underline/tooltip.
-    let is_inline_widget =
-      token_index.is_some_and(|ti| inline_widget_spans.iter().any(|&(_, _, span_ti)| span_ti == ti));
+    let is_inline_widget = inline_widget_spans.iter().any(|&(_, _, span_ti)| span_ti == token_index);
 
     if is_inline_widget {
       ui.output_mut(|out| out.cursor_icon = CursorIcon::PointingHand);
@@ -1828,7 +1876,7 @@ impl<'a> MarkdownLabel<'a> {
 
     if let Some(stroke) = stroke {
       // Find all sections belonging to the same token (for multi-section layout_link).
-      let target_token = token_index.unwrap();
+      let target_token = token_index;
       for (sec_idx, &tok_idx) in section_to_token.iter().enumerate() {
         if tok_idx != target_token {
           continue;

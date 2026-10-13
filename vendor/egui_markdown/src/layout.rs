@@ -242,6 +242,10 @@ pub fn render_link_in_ui(
     }
   }
 
+  if let Some(handler) = link_handler {
+    handler.link_response(ui, text, href, &response);
+  }
+
   response
 }
 

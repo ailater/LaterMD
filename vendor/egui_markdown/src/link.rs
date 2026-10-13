@@ -23,6 +23,18 @@ pub trait LinkHandler {
     false
   }
 
+  /// Expose the [`Response`] of a default-rendered link, so hosts can attach
+  /// interaction on top of it (context menus, tooltips with the resolved URL,
+  /// custom hit testing). Called once per rendered inline link, after the
+  /// galley is painted. Default: no-op.
+  fn link_response(&self, _ui: &Ui, _text: &str, _href: &str, _response: &Response) {}
+
+  /// Expose the [`Response`] of a rendered image (the `images` feature renders
+  /// `Token::Image` as an [`egui::Image`] widget; without the feature images
+  /// degrade to links and go through [`Self::link_response`] instead).
+  /// Default: no-op.
+  fn image_response(&self, _ui: &Ui, _alt: &str, _url: &str, _response: &Response) {}
+
   /// Append custom styled sections to the LayoutJob for this link.
   /// Called during layout. Return true if handled, false for default (colored text).
   ///
