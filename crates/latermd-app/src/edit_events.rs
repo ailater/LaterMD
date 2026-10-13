@@ -12,7 +12,7 @@
 //! 合成事件必须在 `logic()` 阶段推入:ui() 阶段推的事件当帧末被清空,
 //! 下一帧 `begin_pass` 不复存在。菜单条目的点击发生在 ui()(弹层渲染帧),
 //! 消息经 outbox 到**下一帧** logic():归约只记账
-//! ([`State::pending_edit_action`]),`LaterMdApp::reduce` 在 apply 循环后
+//! (`State::pending_edit_action` 记账位),`LaterMdApp::reduce` 在 apply 循环后
 //! 取走并调 [`dispatch`]。推事件前把焦点还给编辑目标 —— 点击弹层条目的
 //! press 帧已把编辑器焦点清掉,而 TextEdit 只在持焦时消费事件;归约在
 //! ui() 之前跑,同帧 TextEdit 即可消费。

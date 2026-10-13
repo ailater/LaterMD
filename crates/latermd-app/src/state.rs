@@ -3984,7 +3984,7 @@ impl State {
     }
 
     /// 确认删除(context-menu-plan §3 M2):remover 参数化 —— 生产传
-    /// [`crate::filetree::trash_delete`](系统废纸篓,可恢复),无头测试
+    /// [`crate::filetree::trash_delete`](系统废纸篓 可恢复),无头测试
     /// 注入 spy(trash 不进测试,不污染用户废纸篓/CI 环境)。
     ///
     /// 口径(decisions-pending #144):目标(或其子树,删目录时)有
