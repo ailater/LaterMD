@@ -58,7 +58,7 @@
 | 平台 | 方式 |
 |---|---|
 | macOS(推荐) | `brew install --cask crazykun/ailater/latermd`(cask 经 postflight 自动移除 quarantine,无 Gatekeeper 拦截) |
-| Windows | 从 [Releases](https://github.com/ailater/LaterMd/releases) 下 `latermd.exe` 直接运行(免安装;也可用 `latermd-x86_64-pc-windows-msvc.zip` 归档版) |
+| Windows | 三选一:安装器 `latermd-{版本}-setup.exe`(向导式,按用户装、无 UAC);绿色版 `latermd.exe` 直接运行;或 `latermd-x86_64-pc-windows-msvc.zip` 归档版 |
 | Linux | 下 `latermd-x86_64-unknown-linux-gnu.tar.xz`,解包后 `./latermd` |
 
 - macOS 走 brew 的用户无额外步骤;**从 Releases 直下 dmg** 的用户,拖入 `/Applications/` 后首次打开会被 Gatekeeper 拦(无签名公证的正常表现),执行一次即可:

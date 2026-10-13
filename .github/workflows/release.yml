@@ -314,6 +314,43 @@ jobs:
             --ref "${{ github.event.repository.default_branch }}" \
             -f tag="${{ needs.plan.outputs.tag }}"
 
+  # LOCAL PATCH(非 dist 模板):Windows Inno Setup 安装器(2026-10-13 坤哥,
+  # 对齐 GLMeter 的发行形态 glmeter-{ver}-setup.exe)。host 在 ubuntu 上没有
+  # iscc,故独立 job:等 host 建好 Release 并补传裸 exe 后,下载 x64 zip →
+  # 解出 latermd.exe → iscc(Windows runner 自带)打 latermd-{ver}-setup.exe
+  # → 补传 Release。脚本在 packaging/windows/latermd.iss(按用户装
+  # localappdata,无 UAC;可选桌面快捷方式)。
+  windows-installer:
+    needs:
+      - plan
+      - host
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' }}
+    runs-on: "windows-latest"
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: 下载 x64 zip 并解出 exe
+        shell: pwsh
+        run: |
+          gh release download "$env:TAG" --pattern 'latermd-x86_64-pc-windows-msvc.zip' --dir win
+          Expand-Archive win/latermd-x86_64-pc-windows-msvc.zip -DestinationPath win/unpacked
+          $exe = Get-ChildItem win/unpacked -Recurse -Filter latermd.exe | Select-Object -First 1
+          Copy-Item $exe.FullName latermd.exe
+      - name: 打 Inno Setup 安装器
+        shell: pwsh
+        run: |
+          Copy-Item assets/logo/deliverables/windows/latermd.ico packaging/windows/latermd.ico
+          iscc "/DVERSION=$($env:TAG.TrimStart('v'))" packaging/windows/latermd.iss
+          Get-ChildItem packaging/windows
+      - name: 补传安装器
+        shell: pwsh
+        run: |
+          gh release upload "$env:TAG" "packaging/windows/latermd-$($env:TAG.TrimStart('v'))-setup.exe" --clobber
+
   announce:
     needs:
       - plan
