@@ -107,9 +107,13 @@ bot 直推 main 改版本号会被分支保护拦截。版本号不变地合入 
 | macOS x64 | dist | `latermd-x86_64-apple-darwin.tar.xz` | 无;**发布后清理**(仅 dmg 原料) |
 | macOS arm64 | dist | `latermd-aarch64-apple-darwin.tar.xz` | 无;**发布后清理**(仅 dmg 原料) |
 | Windows x64 | dist | `latermd-x86_64-pc-windows-msvc.zip` | 无 |
-| Windows ARM64 | dist | `latermd-aarch64-pc-windows-msvc.zip` | 无 |
+| Windows x64 裸 exe | release.yml host 尾部 | `latermd.exe` | 无(从 x64 zip 提取补传) |
 | macOS universal2 | macos-dmg.yml | `latermd-v{version}-universal2-apple-darwin.dmg` | **有**(lscreen 同构,cask url 模板依赖) |
 | 校验和 | dist | 每资产附 `.sha256`,另有 `sha256.sum` | — |
+
+- **Windows ARM64 不再出包**(2026-10-12,坤哥:资产面收敛):dist targets
+  移除 `aarch64-pc-windows-msvc`,ARM64 机器经 Windows 的 x64 模拟运行 x64
+  包;源码级测试矩阵(rust.yml)仍保留该 target。历史版本的 ARM64 zip 不追删。
 
 - **发布后清理**(macos-dmg.yml 尾部步骤):上述两行 macOS 每架构 tar.xz
   (含 `.sha256`)与 `source.tar.gz`(含 `.sha256`)在 dmg 回传后从 Release
@@ -141,9 +145,8 @@ bot 直推 main 改版本号会被分支保护拦截。版本号不变地合入 
 
    ```bash
    dist manifest --output-format=json \
-     --target=aarch64-apple-darwin --target=aarch64-pc-windows-msvc \
-     --target=x86_64-apple-darwin --target=x86_64-unknown-linux-gnu \
-     --target=x86_64-pc-windows-msvc
+     --target=aarch64-apple-darwin --target=x86_64-apple-darwin \
+     --target=x86_64-unknown-linux-gnu --target=x86_64-pc-windows-msvc
    ```
 
    确认矩阵含 4 个 build job(双 darwin 合并在 macos-14)、资产名与表 2 一致。

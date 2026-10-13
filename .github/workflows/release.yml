@@ -283,6 +283,22 @@ jobs:
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+      # LOCAL PATCH(非 dist 模板):追加裸 Windows exe(2026-10-12 坤哥需求)。
+      # dist 只产 zip;Windows 用户想「下载即运行」不 解压,从刚上传的 x64 zip
+      # 提出单文件 latermd.exe 直接补传为独立资产。zip 内部结构固定为单层
+      # 目录 latermd-v{ver}-x86_64-pc-windows-msvc/,find 兜住目录名随版本变化。
+      # 放在 dmg/deb dispatch 之前:三个后续 job 各自独立消费 Release,互不依赖。
+      - name: "Attach bare Windows exe"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --pattern 'latermd-x86_64-pc-windows-msvc.zip' --dir win-exe
+          unzip -o "win-exe/latermd-x86_64-pc-windows-msvc.zip" -d win-exe/unpacked
+          EXE="$(find win-exe/unpacked -name latermd.exe -print -quit)"
+          test -n "$EXE" || { echo "zip 内未找到 latermd.exe" >&2; exit 1; }
+          gh release upload "$TAG" "$EXE" --clobber
       # LOCAL PATCH(非 dist 模板):GITHUB_TOKEN 建的 Release 不会触发
       # macos-dmg.yml / linux-deb.yml 的 on: release 事件(GitHub 防递归规则),
       # macOS universal2 dmg 与 Linux deb 的合成都必须由此处显式 dispatch 到 main
