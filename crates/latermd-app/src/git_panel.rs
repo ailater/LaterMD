@@ -119,6 +119,10 @@ pub struct GitPanelState {
     /// 单文件历史(「文件历史」分区);`None` = 还没查过(渲染层
     /// 给「右键文件 → 查看文件历史」引导)。
     pub file_history: Option<FileHistory>,
+    /// [`Self::sync_file_history`] 上次同步到的当前文档(相对仓库根);
+    /// 文档没换就不动「文件历史」——保住右键「查看文件历史」等显式查询
+    /// 不被轮询顶掉,换了文档才跟随加载新文档的历史。
+    pub(crate) file_history_synced_doc: Option<String>,
     /// 是否把选中的 diff 放进主工作区审阅。会话内状态,重启回编辑器。
     pub diff_workspace_open: bool,
     /// 待确认回滚的文件(相对仓库根);`Some` = 确认模态可见。
@@ -145,6 +149,7 @@ impl Default for GitPanelState {
             diff_target: None,
             history: None,
             file_history: None,
+            file_history_synced_doc: None,
             diff_workspace_open: false,
             confirm_checkout: None,
             refresh_due: Instant::now(),
@@ -209,14 +214,16 @@ impl GitPanelState {
         self.truncated = snapshot.truncated;
         self.commits =
             latermd_git::log(&repo_root, latermd_git::DEFAULT_LOG_LIMIT).unwrap_or_default();
-        // 文件历史跟随刷新:外部提交/回滚都会改变「这个文件被哪些提交改过」,
-        // 已查过的文件每次刷新重查一次(file_log 本地毫秒级,上限同 log)。
-        if let Some(tracked) = self
+        // 只有自动跟随当前文档的历史才随刷新重查。右键显式查看的另一文件
+        // 由 `file_history.path != file_history_synced_doc` 标记,保留给用户
+        // 连续浏览;否则 3 秒轮询会把显式选择悄悄顶回当前 tab。
+        let tracked = self
             .file_history
             .as_ref()
             .map(|history| history.path.clone())
-        {
-            self.load_file_history(&tracked);
+            .filter(|path| self.file_history_synced_doc.as_deref() == Some(path.as_str()));
+        if let Some(path) = tracked {
+            self.load_file_history(&path);
         }
     }
 
@@ -257,6 +264,21 @@ impl GitPanelState {
                 error: Some(error),
             },
         });
+    }
+
+    /// 把「文件历史」分区同步到**当前文档**(`State::refresh_git` 每次刷新
+    /// 调用,`doc_rel` 是当前文档换算的相对仓库根路径):文档没换就什么都不
+    /// 做——右键「查看文件历史」/改动列表选中的显式查询不会被 3s 轮询顶掉;
+    /// 换了文档(含从无文档到有文档)则跟随加载新文档的历史。文档不在仓库
+    /// 内(`None`)只记录同步位,已查结果保留。
+    pub fn sync_file_history(&mut self, doc_rel: Option<String>) {
+        if doc_rel == self.file_history_synced_doc {
+            return;
+        }
+        self.file_history_synced_doc = doc_rel.clone();
+        if let Some(rel) = doc_rel {
+            self.load_file_history(&rel);
+        }
     }
 
     /// 加载一条历史提交的文件清单，不改变工作区文件选择。
@@ -389,9 +411,10 @@ impl GitPanelState {
         self.badges.clear();
         self.commits.clear();
         self.history = None;
-        // 文件历史一并作废(换根/降级后旧路径不再有意义);范围保留用户
-        // 选择,由渲染层给「查不到」引导
+        // 文件历史一并作废(换根/降级后旧路径不再有意义);同步位也清零,
+        // 重探成功后按当前文档重新跟随
         self.file_history = None;
+        self.file_history_synced_doc = None;
         self.selected = None;
         self.diff.clear();
         self.diff_lines = None;

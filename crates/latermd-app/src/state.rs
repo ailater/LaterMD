@@ -1084,6 +1084,10 @@ pub enum Message {
     /// 把侧栏切到 Git 页的「文件历史」分区。文件不在仓库内时留提示
     /// 行,不查。
     GitFileHistoryRequested(PathBuf),
+    /// 刷新 Git 页(顶部刷新按钮 / 展开「存储库」分区触发):立即重读
+    /// 未提交改动、提交历史与文件历史(文件历史按当前文档同步,见
+    /// [`GitPanelState::sync_file_history`])。
+    GitRefreshRequested,
     /// 保存 MCP 配置(设置页 MCP 页「保存」):归一化 → 落 `mcp.json` → 按
     /// 开关起停后台服务(**默认关闭**,开了才监听回环端口)。
     McpConfigSaved(McpConfig),
@@ -1528,14 +1532,25 @@ impl State {
                     }
                 }
             }
+            Message::GitRefreshRequested => self.refresh_git(),
         }
     }
 
-    /// 立即刷新 Git 状态。触发点:切到 Git 页、文件树换根、回滚完成,以及
-    /// 归约侧的到点轮询(见 `ui::layout::reduce`)。
+    /// 立即刷新 Git 状态。触发点:切到 Git 页、文件树换根、回滚完成、
+    /// 顶部刷新按钮 / 展开「存储库」分区,以及归约侧的到点轮询(见
+    /// `ui::layout::reduce`)。刷新顺带把「文件历史」分区同步到当前文档:
+    /// 文档没换不动(显式查询不被轮询顶掉),换了文档跟随加载。
     pub fn refresh_git(&mut self) {
         let root = self.file_tree.root.clone();
         self.git.refresh(root.as_deref());
+        let doc_rel = self
+            .tabs
+            .current()
+            .document
+            .path
+            .clone()
+            .and_then(|doc| self.git.relative_path(&doc));
+        self.git.sync_file_history(doc_rel);
     }
 
     /// 回滚成功后的编辑器一致性(`Message::GitCheckoutConfirmed` 的归约
@@ -3542,6 +3557,9 @@ impl State {
             }
         }
         self.rescan_find_after_tab_switch(previous);
+        // 换了文档:「文件历史」的文档同步位失效,下一次刷新跟随新文档
+        // (右键显式查询只保到用户主动换 tab 为止)
+        self.git.file_history_synced_doc = None;
         index
     }
 
@@ -3555,6 +3573,8 @@ impl State {
         }
         self.tabs.activate(index);
         self.rescan_find_after_tab_switch(previous);
+        // 换了文档:「文件历史」的文档同步位失效(理由同 spawn_tab)
+        self.git.file_history_synced_doc = None;
     }
 
     /// 关闭请求(标签条 × / Ctrl+W):脏标签先弹确认模态,干净标签直接关。
@@ -9039,6 +9059,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&settings_dir);
         let _ = std::fs::remove_dir_all(temp_path("git-file-history-outside"));
+    }
+
+    /// 文件历史跟随当前 tab 文档:打开文档后刷新即查该文档;右键显式
+    /// 查询在文档不换时被轮询刷新保留;换文档后跟随新文档。
+    #[test]
+    fn file_history_follows_active_document_and_explicit_query_survives_poll() {
+        let dir = git_repo_with_dirty_file("git-follow-doc");
+        // 提交一个 b.md,供右键显式查询
+        std::fs::write(dir.join("b.md"), "乙\n").unwrap();
+        run_git(&dir, &["add", "b.md"]);
+        run_git(&dir, &["commit", "-q", "-m", "加 b"]);
+
+        let settings_dir = temp_path("git-follow-doc-settings");
+        let mut state = State {
+            settings_dir: Some(settings_dir.clone()),
+            ..State::default()
+        };
+        state.apply(Message::FileTreeRootSelected(dir.clone()));
+
+        // 打开 a.md(当前 tab 文档)→ 刷新后文件历史跟随 a.md
+        state.tabs.current_mut().editor.clear_dirty(); // 放行 open_from 的 unsaved_guard
+        state.apply(Message::FileSelected(dir.join("a.md")));
+        state.refresh_git();
+        assert_eq!(
+            state.git.file_history.as_ref().map(|h| h.path.as_str()),
+            Some("a.md"),
+            "跟随当前文档"
+        );
+
+        // 右键显式查 b.md:文档没换,轮询刷新不顶掉
+        state.apply(Message::GitFileHistoryRequested(dir.join("b.md")));
+        assert_eq!(
+            state.git.file_history.as_ref().map(|h| h.path.as_str()),
+            Some("b.md")
+        );
+        state.refresh_git();
+        assert_eq!(
+            state.git.file_history.as_ref().map(|h| h.path.as_str()),
+            Some("b.md"),
+            "显式查询不被轮询顶掉"
+        );
+
+        // tab 换回 a.md → 刷新后跟随 a.md
+        state.apply(Message::FileSelected(dir.join("a.md")));
+        state.refresh_git();
+        assert_eq!(
+            state.git.file_history.as_ref().map(|h| h.path.as_str()),
+            Some("a.md"),
+            "换文档跟随新文档"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&settings_dir);
     }
 
     /// 回滚目标正是编辑器当前文档(非 dirty):确认后编辑器重读磁盘的

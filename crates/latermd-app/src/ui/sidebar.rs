@@ -1662,14 +1662,24 @@ fn arrow_vertices(center: egui::Pos2, r: f32, open: bool) -> Vec<egui::Pos2> {
 
 /// Git 页:降级提示,或 VS Code 源代码管理式的三折叠区 ——
 /// 「更改」(未提交) /「存储库」(仓库提交历史,点击提交展开文件清单) /
-/// 「文件历史」(单文件的修改记录,文件树右键或选中改动文件触发)。
-/// 数据是 `GitPanelState` 的只读快照(刷新在归约侧),交互全部经由消息;
-/// 回滚按钮只发 [`Message::GitCheckoutRequested`],确认模态在 `ui::layout`。
+/// 「文件历史」(单文件的修改记录,跟随当前文档,文件树右键可显式指定)。
+/// 顶部刷新按钮与展开「存储库」都会立即刷新;数据是 `GitPanelState` 的
+/// 只读快照(刷新在归约侧),交互全部经由消息;回滚按钮只发
+/// [`Message::GitCheckoutRequested`],确认模态在 `ui::layout`。
 fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message>) {
     if let Some(error) = &git.error {
         panel.weak(format!("⚠ {error}"));
         return;
     }
+
+    // 顶部工具行:右侧手动刷新(立即重读未提交改动 / 提交历史 / 文件历史)。
+    panel.horizontal(|ui| {
+        ui.weak("Git");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            git_refresh_button(ui, outbox);
+        });
+    });
+    panel.add_space(tokens::gap::XS);
 
     egui::CollapsingHeader::new(format!("更改({})", git.entries.len()))
         .id_salt("git-changes")
@@ -1693,16 +1703,26 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
         });
 
     panel.add_space(tokens::gap::XS);
-    egui::CollapsingHeader::new(format!("存储库({})", git.commits.len()))
-        .id_salt("git-repo-history")
-        .default_open(true)
-        .show(panel, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("git-log-scroll")
-                .auto_shrink([false, false])
-                .max_height(220.0)
-                .show(ui, |ui| repo_history_rows(ui, git, outbox));
-        });
+    // 「点进历史」即刷新:展开存储库分区的那一下触发立即刷新(收起不刷),
+    // 外部提交/回滚后的变更列表不用等 3s 轮询。折叠头的开合状态在 show
+    // 内部才写内存,先读一次"点击前是否展开"再渲染。
+    let section_id = egui::Id::new("git-repo-history");
+    let was_open = egui::collapsing_header::CollapsingState::load_with_default_open(
+        panel.ctx(),
+        section_id,
+        true,
+    )
+    .is_open();
+    let repo_section = git_repo_section(panel, git, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("git-log-scroll")
+            .auto_shrink([false, false])
+            .max_height(220.0)
+            .show(ui, |ui| repo_history_rows(ui, git, outbox));
+    });
+    if repo_section.header_response.clicked() && !was_open {
+        outbox.push(Message::GitRefreshRequested);
+    }
 
     panel.add_space(tokens::gap::XS);
     let file_count = git.file_history.as_ref().map_or(0, |h| h.commits.len());
@@ -1712,7 +1732,31 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
         .show(panel, |ui| file_history_rows(ui, git, outbox));
 }
 
-/// 「存储库」分区:仓库近期提交 + 点击展开的文件清单。
+/// 顶部刷新按钮(自绘 Reset 图标,与改动行回滚图标同库不同义——位置在
+/// 页面工具行,tooltip 写明动作)。独立成函数便于无头测试点击。
+fn git_refresh_button(ui: &mut egui::Ui, outbox: &mut Vec<Message>) -> egui::Response {
+    let response = crate::ui::icons::narrow_icon_button(ui, Icon::Reset, "刷新 Git 状态");
+    if response.clicked() {
+        outbox.push(Message::GitRefreshRequested);
+    }
+    response
+}
+
+/// 「存储库」分区:仓库近期提交 + 点击展开的文件清单。独立成函数以便
+/// 测试拿到折叠头响应(展开即刷新的点击判定)。
+/// 「存储库」分区本体(渲染折叠头 + 提交列表;展开即刷新的判定在调用方)。
+fn git_repo_section<R>(
+    panel: &mut egui::Ui,
+    git: &GitPanelState,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::CollapsingResponse<R> {
+    egui::CollapsingHeader::new(format!("存储库({})", git.commits.len()))
+        .id_salt("git-repo-history")
+        .default_open(true)
+        .show(panel, body)
+}
+
+/// 仓库近期提交 + 点击展开的文件清单(既有口径原样)。
 fn repo_history_rows(ui: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message>) {
     if git.commits.is_empty() {
         ui.weak("没有提交历史");
@@ -1751,9 +1795,33 @@ fn file_history_rows(ui: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Me
             .history
             .as_ref()
             .is_some_and(|selected| selected.commit.hash == commit.hash);
-        commit_row(ui, commit, git.fetched_at, expanded, outbox);
+        file_history_commit_row(ui, git, commit, expanded, outbox);
         commit_files_expansion(ui, git, &commit.hash, outbox);
     }
+}
+
+/// 「文件历史」分区里的单条提交:与存储库提交行同一套渲染;点它除了展开
+/// 文件清单(`commit_row` 内发 [`Message::GitHistorySelected`]),还发
+/// [`Message::FileSelected`] 在工作区打开并选中该文件(VS Code 时间线口径
+/// ——tab 换成这个文件后,下一次刷新的文档同步落在同一份历史上,不跳走)。
+fn file_history_commit_row(
+    ui: &mut egui::Ui,
+    git: &GitPanelState,
+    commit: &CommitInfo,
+    expanded: bool,
+    outbox: &mut Vec<Message>,
+) -> egui::Response {
+    let response = commit_row(ui, commit, git.fetched_at, expanded, outbox);
+    if response.clicked() {
+        let path = git
+            .file_history
+            .as_ref()
+            .map(|history| history.path.clone());
+        if let Some(abs) = path.as_deref().and_then(|path| git.absolute_path(path)) {
+            outbox.push(Message::FileSelected(abs));
+        }
+    }
+    response
 }
 
 /// 展开的提交文件清单(两个范围共用):错误文案 / 文件行 / 截断提示。
