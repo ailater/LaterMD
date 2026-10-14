@@ -6293,6 +6293,10 @@ mod tests {
     fn doc_link_opens_relative_target_and_jumps_to_anchor() {
         let dir = temp_path("doclink");
         std::fs::create_dir_all(dir.join("子目录")).unwrap();
+        // canonicalize 落地:doclink 解析命中会 canonicalize(macOS /tmp 在
+        // /private 符号链接之后,形态漂移会同时打歪路径相等断言与已开标签
+        // 去重),期望基线须同形态。
+        let dir = std::fs::canonicalize(dir).unwrap();
         std::fs::write(
             dir.join("子目录/正文.md"),
             "# 开头\n\n正文\n\n## 安装指南\n\n步骤\n",

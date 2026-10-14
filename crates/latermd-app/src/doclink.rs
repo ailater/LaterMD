@@ -312,7 +312,11 @@ mod tests {
             std::env::temp_dir().join(format!("latermd-doclink-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        // canonicalize 落地:resolve 命中路径会 canonicalize,macOS 的 /tmp
+        // 在 /private 符号链接之后,期望基线若还是 /tmp 形态逐路径相等断言
+        // 必错(Linux 无符号链接,canonicalize 是恒等);Windows 下本套测试
+        // 不进 CI 矩阵。
+        fs::canonicalize(&dir).unwrap()
     }
 
     // —— classify ——
