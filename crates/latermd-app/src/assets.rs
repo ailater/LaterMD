@@ -3,7 +3,7 @@
 //! 目录约定:文档 `foo.md` 的图片都住它旁边的 `foo.assets/`。文档里存
 //! **相对**路径(`./foo.assets/x.png`),文档目录整体搬走、换机器、进 Git
 //! 仓库都仍然有效 —— 这是 B 段「可移植」验收的根基;预览侧再把它解析成
-//! 绝对 URI(`ui::preview::resolve_relative_images`),两侧各管一半。
+//! 绝对 URI(`ui::rich_widgets::resolve_relative_images`),两侧各管一半。
 //!
 //! 命名:保留原名,撞名时 `x.png` → `x-1.png` → `x-2.png`(永不覆盖既有
 //! 文件)。落文档的地址遇空格/括号以 `<…>` 包裹 —— CommonMark 的目标语法

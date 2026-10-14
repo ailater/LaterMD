@@ -274,7 +274,7 @@ fn tab_switch_finding_report() {
         let mut samples = Vec::new();
         for _ in 0..20 {
             let start = Instant::now();
-            let out = crate::ui::preview::resolve_relative_images(
+            let out = crate::ui::rich_widgets::resolve_relative_images(
                 std::hint::black_box(&doc_a),
                 Some(std::path::Path::new("/home/u/docs")),
             );
@@ -287,7 +287,7 @@ fn tab_switch_finding_report() {
         let mut samples = Vec::new();
         for _ in 0..20 {
             let start = Instant::now();
-            let out = crate::ui::preview::resolve_relative_images(
+            let out = crate::ui::rich_widgets::resolve_relative_images(
                 std::hint::black_box(&doc_b),
                 Some(std::path::Path::new("/home/u/docs")),
             );
