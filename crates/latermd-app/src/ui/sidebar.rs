@@ -1788,11 +1788,34 @@ fn git_section_resize_handle(panel: &mut egui::Ui, name: &str, height: f32) {
         .on_hover_text("拖动调整分区高度");
 }
 
-/// 顶部刷新按钮(自绘 Reset 图标,与改动行回滚图标同库不同义——位置在
-/// 页面工具行,tooltip 写明动作)。独立成函数便于无头测试点击。
+/// 顶部刷新按钮:空闲画 Reset 图标,点击后点亮一小段 spinner 再落回
+/// (Git 刷新在归约侧同步完成、本地毫秒级,没有真实的「忙」窗口可画;
+/// 人为点亮是给「点了确实动了」的反馈,与目录树刷新按钮同一套外壳)。
+/// 独立成函数便于无头测试点击。
 fn git_refresh_button(ui: &mut egui::Ui, outbox: &mut Vec<Message>) -> egui::Response {
-    let response = crate::ui::icons::narrow_icon_button(ui, Icon::Reset, "刷新 Git 状态");
+    const BUSY_WINDOW: std::time::Duration = std::time::Duration::from_millis(450);
+    let busy_id = ui.make_persistent_id("git-refresh-busy");
+    let now = std::time::Instant::now();
+    let busy_until = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<std::time::Instant>(busy_id))
+        .filter(|until| *until > now);
+    if let Some(until) = busy_until {
+        // 窗口走到点的最后一帧也要来:否则指针不在按钮上时 spinner 可能
+        // 停在半圈,回不到图标。
+        ui.ctx().request_repaint_after(until - now);
+    }
+    let busy = busy_until.is_some();
+    let response = crate::ui::icons::narrow_busy_icon_button(
+        ui,
+        Icon::Reset,
+        busy,
+        "正在刷新 Git 状态…",
+        "刷新 Git 状态",
+    );
     if response.clicked() {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(busy_id, now + BUSY_WINDOW));
         outbox.push(Message::GitRefreshRequested);
     }
     response
@@ -2240,6 +2263,23 @@ pub(crate) fn diff_view_toggle(
         outbox.push(Message::GitDiffViewChanged(DiffView::Split));
     }
     (split.rect, unified.rect)
+}
+
+/// 审阅头部的「返回编辑器」按钮。**必须与 双栏/统一 同款**(`small` 字号
+/// 的 Button):曾经用默认正文字号的 `ui.button`,文字大一号导致整颗按钮
+/// 比左侧两枚切换高出一截(2026-10-14 用户截图反馈)。
+pub(crate) fn git_back_to_editor_button(
+    ui: &mut egui::Ui,
+    outbox: &mut Vec<Message>,
+) -> egui::Response {
+    let response = ui.add(
+        egui::Button::new(egui::RichText::new("返回编辑器").small())
+            .min_size(egui::vec2(0.0, ui.spacing().interact_size.y)),
+    );
+    if response.clicked() {
+        outbox.push(Message::GitDiffWorkspaceClosed);
+    }
+    response
 }
 
 /// 双栏 diff 视图(#53 M2):GitHub 式左右对齐。左右各带行号列(右对齐)
@@ -4513,6 +4553,136 @@ mod tests {
             vec![Message::GitDiffViewChanged(DiffView::Unified)],
             "{outbox:?}"
         );
+    }
+
+    /// 审阅头部三按钮等高:「返回编辑器」曾用默认正文字号,比左侧 small
+    /// 字号的双栏/统一切换高出一截(2026-10-14 用户截图反馈)。三枚现在
+    /// 同字号同 min 高度,无头帧量矩形锁住;顺带锁「返回编辑器」点击发
+    /// [`Message::GitDiffWorkspaceClosed`]。
+    #[test]
+    fn git_workspace_header_actions_share_height() {
+        let ctx = egui::Context::default();
+        let mut outbox = Vec::new();
+        let rects = Cell::new((Rect::NOTHING, Rect::NOTHING, Rect::NOTHING));
+
+        ctx.run_ui(RawInput::default(), |ui| {
+            let back = git_back_to_editor_button(ui, &mut outbox);
+            let (split, unified) = diff_view_toggle(ui, DiffView::Split, &mut outbox);
+            rects.set((back.rect, split, unified));
+        })
+        .drop_without_applying_deltas();
+        assert!(outbox.is_empty(), "仅渲染不产生消息");
+        let (back, split, unified) = rects.get();
+        assert_eq!(back.height(), split.height(), "返回编辑器与双栏同高");
+        assert_eq!(back.height(), unified.height(), "返回编辑器与统一同高");
+
+        // 点「返回编辑器」→ GitDiffWorkspaceClosed
+        let center = back.center();
+        let click = |pressed| Event::PointerButton {
+            pos: center,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        ctx.run_ui(
+            RawInput {
+                events: vec![Event::PointerMoved(center), click(true), click(false)],
+                ..Default::default()
+            },
+            |ui| {
+                git_back_to_editor_button(ui, &mut outbox);
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(outbox, vec![Message::GitDiffWorkspaceClosed], "{outbox:?}");
+    }
+
+    /// Git 页顶部刷新按钮的点击反馈:点击发出 [`Message::GitRefreshRequested`]
+    /// 且下一帧图形换成 spinner(shape 集合与空闲帧不同);反馈窗口走完
+    /// 自动落回原图标(shape 集合与初始帧一致)——「点了没动画」的回归锁。
+    #[test]
+    fn git_refresh_button_flashes_spinner_after_click() {
+        fn shape_dump(output: &egui::FullOutput) -> Vec<String> {
+            let mut dump: Vec<String> = output
+                .shapes
+                .iter()
+                .map(|clipped| format!("{:?}", clipped.shape))
+                .collect();
+            dump.sort();
+            dump
+        }
+
+        let ctx = egui::Context::default();
+        let mut outbox = Vec::new();
+        let rect = Cell::new(Rect::NOTHING);
+
+        // 帧 1:空闲 —— 记图标帧的 shape 集合与按钮矩形
+        let idle = {
+            let mut output = ctx.run_ui(RawInput::default(), |ui| {
+                rect.set(git_refresh_button(ui, &mut outbox).rect);
+            });
+            output.textures_delta.clear();
+            shape_dump(&output)
+        };
+        assert!(outbox.is_empty(), "仅渲染不产生消息");
+        assert!(rect.get().width() > 0.0);
+
+        // 帧 2:点击 → 发刷新消息
+        let center = rect.get().center();
+        let click = |pressed| Event::PointerButton {
+            pos: center,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        ctx.run_ui(
+            RawInput {
+                events: vec![Event::PointerMoved(center), click(true), click(false)],
+                ..Default::default()
+            },
+            |ui| {
+                git_refresh_button(ui, &mut outbox);
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            outbox,
+            vec![Message::GitRefreshRequested],
+            "点击应发刷新消息"
+        );
+
+        // 帧 3:反馈窗口内 —— spinner 图形,与空闲帧不同(指针移开,排除 hover 底干扰)
+        let busy = {
+            let mut output = ctx.run_ui(
+                RawInput {
+                    events: vec![Event::PointerGone],
+                    ..Default::default()
+                },
+                |ui| {
+                    git_refresh_button(ui, &mut outbox);
+                },
+            );
+            output.textures_delta.clear();
+            shape_dump(&output)
+        };
+        assert_ne!(busy, idle, "反馈窗口内应显示 spinner 而非原图标");
+
+        // 窗口(450ms)走完 → 落回原图标
+        std::thread::sleep(std::time::Duration::from_millis(550));
+        let settled = {
+            let mut output = ctx.run_ui(
+                RawInput {
+                    events: vec![Event::PointerGone],
+                    ..Default::default()
+                },
+                |ui| {
+                    git_refresh_button(ui, &mut outbox);
+                },
+            );
+            output.textures_delta.clear();
+            shape_dump(&output)
+        };
+        assert_eq!(settled, idle, "反馈窗口结束后应落回原图标");
     }
 
     /// #53 M2 行对上限:超限的大 diff 双栏渲染不 panic(视口裁剪),显式

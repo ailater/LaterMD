@@ -605,9 +605,7 @@ impl LaterMdApp {
                             None => {}
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("返回编辑器").clicked() {
-                                outbox.push(Message::GitDiffWorkspaceClosed);
-                            }
+                            crate::ui::sidebar::git_back_to_editor_button(ui, outbox);
                             crate::ui::sidebar::diff_view_toggle(ui, git.diff_view, outbox);
                         });
                     });
