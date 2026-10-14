@@ -1681,14 +1681,15 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
     });
     panel.add_space(tokens::gap::XS);
 
-    egui::CollapsingHeader::new(format!("更改({})", git.entries.len()))
+    let changes_height = git_section_height(panel, "changes", 160.0);
+    let changes_section = egui::CollapsingHeader::new(format!("更改({})", git.entries.len()))
         .id_salt("git-changes")
         .default_open(true)
         .show(panel, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("git-status-scroll")
                 .auto_shrink([false, false])
-                .max_height(200.0)
+                .max_height(changes_height)
                 .show(ui, |ui| {
                     if git.entries.is_empty() {
                         ui.weak("工作区干净,没有未提交的改动");
@@ -1701,6 +1702,9 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
                     }
                 });
         });
+    if changes_section.body_returned.is_some() {
+        git_section_resize_handle(panel, "changes", changes_height);
+    }
 
     panel.add_space(tokens::gap::XS);
     // 「点进历史」即刷新:展开存储库分区的那一下触发立即刷新(收起不刷),
@@ -1713,23 +1717,75 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
         true,
     )
     .is_open();
+    let repo_height = git_section_height(panel, "repository", 220.0);
     let repo_section = git_repo_section(panel, git, |ui| {
         egui::ScrollArea::vertical()
             .id_salt("git-log-scroll")
             .auto_shrink([false, false])
-            .max_height(220.0)
+            .max_height(repo_height)
             .show(ui, |ui| repo_history_rows(ui, git, outbox));
     });
+    if repo_section.body_returned.is_some() {
+        git_section_resize_handle(panel, "repository", repo_height);
+    }
     if repo_section.header_response.clicked() && !was_open {
         outbox.push(Message::GitRefreshRequested);
     }
 
     panel.add_space(tokens::gap::XS);
     let file_count = git.file_history.as_ref().map_or(0, |h| h.commits.len());
-    egui::CollapsingHeader::new(format!("文件历史({file_count})"))
+    let file_history_height = git_section_height(panel, "file-history", 180.0);
+    let file_section = egui::CollapsingHeader::new(format!("文件历史({file_count})"))
         .id_salt("git-file-history")
         .default_open(true)
-        .show(panel, |ui| file_history_rows(ui, git, outbox));
+        .show(panel, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("git-file-history-scroll")
+                .auto_shrink([false, false])
+                .max_height(file_history_height)
+                .show(ui, |ui| file_history_rows(ui, git, outbox));
+        });
+    if file_section.body_returned.is_some() {
+        git_section_resize_handle(panel, "file-history", file_history_height);
+    }
+}
+
+const GIT_SECTION_MIN_H: f32 = 72.0;
+const GIT_SECTION_MAX_H: f32 = 520.0;
+
+fn git_section_height(panel: &egui::Ui, name: &str, default: f32) -> f32 {
+    let id = panel.make_persistent_id(("git-section-height", name));
+    panel
+        .ctx()
+        .data_mut(|data| data.get_persisted::<f32>(id))
+        .unwrap_or(default)
+        .clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
+}
+
+fn git_section_resize_handle(panel: &mut egui::Ui, name: &str, height: f32) {
+    let width = panel.available_width();
+    let (rect, response) = panel.allocate_exact_size(egui::vec2(width, 7.0), egui::Sense::drag());
+    let id = panel.make_persistent_id(("git-section-height", name));
+    if response.dragged() {
+        let next = (height + response.drag_delta().y).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H);
+        panel.ctx().data_mut(|data| data.insert_persisted(id, next));
+        panel.ctx().request_repaint();
+    }
+    let hot = response.hovered() || response.dragged();
+    let color = panel
+        .visuals()
+        .widgets
+        .noninteractive
+        .fg_stroke
+        .color
+        .gamma_multiply(if hot { 0.48 } else { 0.16 });
+    panel.painter().line_segment(
+        [rect.left_center(), rect.right_center()],
+        egui::Stroke::new(1.0, color),
+    );
+    response
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+        .on_hover_text("拖动调整分区高度");
 }
 
 /// 顶部刷新按钮(自绘 Reset 图标,与改动行回滚图标同库不同义——位置在
@@ -1910,7 +1966,7 @@ fn git_rollback_icon(
     } else {
         ui.visuals().weak_text_color()
     };
-    Icon::Reset.draw(painter, rect.center(), crate::ui::tokens::ICON, color);
+    Icon::Undo.draw(painter, rect.center(), crate::ui::tokens::ICON, color);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tooltip));
     if enabled {
         response.clone().on_hover_text(tooltip);
