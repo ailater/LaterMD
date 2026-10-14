@@ -1706,7 +1706,7 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
     // 「点进历史」即刷新:展开存储库分区的那一下触发立即刷新(收起不刷),
     // 外部提交/回滚后的变更列表不用等 3s 轮询。折叠头的开合状态在 show
     // 内部才写内存,先读一次"点击前是否展开"再渲染。
-    let section_id = egui::Id::new("git-repo-history");
+    let section_id = panel.make_persistent_id("git-repo-history");
     let was_open = egui::collapsing_header::CollapsingState::load_with_default_open(
         panel.ctx(),
         section_id,
