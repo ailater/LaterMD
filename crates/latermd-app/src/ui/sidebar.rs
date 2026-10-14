@@ -1663,9 +1663,11 @@ fn arrow_vertices(center: egui::Pos2, r: f32, open: bool) -> Vec<egui::Pos2> {
 /// Git 页:降级提示,或 VS Code 源代码管理式的三折叠区 ——
 /// 「更改」(未提交) /「存储库」(仓库提交历史,点击提交展开文件清单) /
 /// 「文件历史」(单文件的修改记录,跟随当前文档,文件树右键可显式指定)。
-/// 顶部刷新按钮与展开「存储库」都会立即刷新;数据是 `GitPanelState` 的
-/// 只读快照(刷新在归约侧),交互全部经由消息;回滚按钮只发
-/// [`Message::GitCheckoutRequested`],确认模态在 `ui::layout`。
+/// 三分区默认平分视口高度([`git_section_third_default`]),分区底部的浅
+/// 分割线可拖拽改各自高度(持久化)。顶部刷新按钮与展开「存储库」都会
+/// 立即刷新;数据是 `GitPanelState` 的只读快照(刷新在归约侧),交互全部
+/// 经由消息;回滚按钮只发 [`Message::GitCheckoutRequested`],确认模态在
+/// `ui::layout`。
 fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message>) {
     if let Some(error) = &git.error {
         panel.weak(format!("⚠ {error}"));
@@ -1681,7 +1683,10 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
     });
     panel.add_space(tokens::gap::XS);
 
-    let changes_height = git_section_height(panel, "changes", 160.0);
+    // 三分区默认高度:视口高度三等分(用户没拖过时各分 1/3;拖过的分区
+    // 用持久值,不吃这个默认)。
+    let third = git_section_third_default(panel);
+    let changes_height = git_section_height(panel, "changes", third);
     let changes_section = egui::CollapsingHeader::new(format!("更改({})", git.entries.len()))
         .id_salt("git-changes")
         .default_open(true)
@@ -1717,7 +1722,7 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
         true,
     )
     .is_open();
-    let repo_height = git_section_height(panel, "repository", 220.0);
+    let repo_height = git_section_height(panel, "repository", third);
     let repo_section = git_repo_section(panel, git, |ui| {
         egui::ScrollArea::vertical()
             .id_salt("git-log-scroll")
@@ -1734,7 +1739,7 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
 
     panel.add_space(tokens::gap::XS);
     let file_count = git.file_history.as_ref().map_or(0, |h| h.commits.len());
-    let file_history_height = git_section_height(panel, "file-history", 180.0);
+    let file_history_height = git_section_height(panel, "file-history", third);
     let file_section = egui::CollapsingHeader::new(format!("文件历史({file_count})"))
         .id_salt("git-file-history")
         .default_open(true)
@@ -1752,6 +1757,21 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
 
 const GIT_SECTION_MIN_H: f32 = 72.0;
 const GIT_SECTION_MAX_H: f32 = 520.0;
+/// 拖拽带的命中高度(可见分割线只有 1px,居中)。
+const GIT_SECTION_HANDLE_H: f32 = 7.0;
+
+/// 三分区的**默认**高度:Git 页视口(clip_rect)高度扣除固定装饰 ——
+/// 顶部工具行、三枚折叠头、三条拖拽带、工具行后与分区间共四段间距,
+/// 另按每枚控件一次的 egui 自动 item_spacing 留余 —— 后三等分。用户
+/// 没拖过的分区都吃这个值(窗口高度变了跟着重算);拖过的分区用自己
+/// 的持久值,与三等分无关。
+fn git_section_third_default(panel: &egui::Ui) -> f32 {
+    let spacing = panel.spacing();
+    let chrome = tokens::TOOLBAR_H
+        + 3.0 * (spacing.interact_size.y + GIT_SECTION_HANDLE_H + 2.0 * spacing.item_spacing.y)
+        + 4.0 * (tokens::gap::XS + spacing.item_spacing.y);
+    ((panel.clip_rect().height() - chrome) / 3.0).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
+}
 
 fn git_section_height(panel: &egui::Ui, name: &str, default: f32) -> f32 {
     let id = panel.make_persistent_id(("git-section-height", name));
@@ -1764,7 +1784,8 @@ fn git_section_height(panel: &egui::Ui, name: &str, default: f32) -> f32 {
 
 fn git_section_resize_handle(panel: &mut egui::Ui, name: &str, height: f32) {
     let width = panel.available_width();
-    let (rect, response) = panel.allocate_exact_size(egui::vec2(width, 7.0), egui::Sense::drag());
+    let (rect, response) =
+        panel.allocate_exact_size(egui::vec2(width, GIT_SECTION_HANDLE_H), egui::Sense::drag());
     let id = panel.make_persistent_id(("git-section-height", name));
     if response.dragged() {
         let next = (height + response.drag_delta().y).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H);
@@ -4595,6 +4616,42 @@ mod tests {
         )
         .drop_without_applying_deltas();
         assert_eq!(outbox, vec![Message::GitDiffWorkspaceClosed], "{outbox:?}");
+    }
+
+    /// 三分区默认高度三等分视口:视口每加 300px,每个分区的默认高度
+    /// 恰好加 100px(斜率 1/3 锁「平分」,不绑定装饰常量的具体取值);
+    /// 极小视口落到最小高度下限,不出现负高度。
+    #[test]
+    fn git_section_defaults_split_viewport_in_three() {
+        fn third_at(screen_h: f32) -> f32 {
+            let ctx = egui::Context::default();
+            let slot = Cell::new(0.0);
+            ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(280.0, screen_h),
+                    )),
+                    ..Default::default()
+                },
+                |ui| slot.set(git_section_third_default(ui)),
+            )
+            .drop_without_applying_deltas();
+            slot.get()
+        }
+
+        let tall = third_at(900.0);
+        let short = third_at(600.0);
+        assert!(
+            (tall - short - 100.0).abs() < 0.5,
+            "视口 +300px 时每分区默认高度应 +100px(三等分):tall={tall} short={short}"
+        );
+        assert!(
+            tall < 300.0 && short < 200.0,
+            "默认值应小于视口的 1/3(装饰占用被扣除):tall={tall} short={short}"
+        );
+        let tiny = third_at(120.0);
+        assert_eq!(tiny, GIT_SECTION_MIN_H, "极小视口应落到最小高度下限:{tiny}");
     }
 
     /// Git 页顶部刷新按钮的点击反馈:点击发出 [`Message::GitRefreshRequested`]
