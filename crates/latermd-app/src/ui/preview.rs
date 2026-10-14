@@ -322,19 +322,13 @@ enum AiCardStatus {
 /// `open_url`;非 ai:// 前缀返回 false,链接照常走系统浏览器。协议语义见
 /// `ai_link` 模块文档。
 /// 链接是否「可打开」(右键菜单挂点判定,context-menu-plan §3 M3):
-/// 排除应用内协议(`ai://` `wiki://` `emoji://` `task://` `hl://`
-/// `latermd://` 等)—— 它们的 click 各有归属(AI 流/开文档/字形/checkbox/
-/// 底色),菜单挂上去只会误导;`http(s)://`、`file://`、外部绝对地址与
-/// 相对路径(会被 `resolve_relative_images` 改写成 `file://`)可开。
+/// 排除应用内协议(`ai://` `wiki://` `emoji://` `task://` `hl://`)—— 它们
+/// 的 click 各有归属(AI 流/开文档/字形/checkbox/底色),菜单挂上去只会
+/// 误导;其余(`http(s)://`、外部绝对地址、本地文档路径、`file://`、
+/// `#锚点`)可开 —— 其中本地路径与纯锚点的「打开」在应用内完成
+/// ([`crate::doclink`]),不走系统浏览器。
 pub(crate) fn is_openable_href(href: &str) -> bool {
-    let schemes = [
-        crate::ai_link::SCHEME,
-        latermd_md::WIKI_SCHEME,
-        latermd_md::EMOJI_SCHEME,
-        latermd_md::TASK_SCHEME,
-        latermd_md::HIGHLIGHT_SCHEME,
-    ];
-    !schemes.iter().any(|scheme| href.starts_with(scheme))
+    crate::doclink::classify(href) != crate::doclink::HrefKind::AppScheme
 }
 
 struct AiLinkHandler {
@@ -484,7 +478,19 @@ impl LinkHandler for AiLinkHandler {
                     .push(Message::AiLinkClicked { prompt });
                 true
             }
-            None => false,
+            None => {
+                // 本地文档链接(相对/绝对路径、`file://`、纯锚点):应用内
+                // 打开,不交系统浏览器 —— 相对路径交给浏览器只会失败,纯
+                // 锚点(TOC 目录链接)的语义就在本文档内。解析与跳转在
+                // 归约侧(`state::open_doc_link`,那里才有文档路径与库根)。
+                if crate::doclink::classify(href) == crate::doclink::HrefKind::Local {
+                    self.clicked.borrow_mut().push(Message::DocLinkClicked {
+                        href: href.to_owned(),
+                    });
+                    return true;
+                }
+                false
+            }
         }
     }
 
@@ -575,10 +581,12 @@ impl LinkHandler for AiLinkHandler {
     }
 
     /// 右键菜单(context-menu-plan §3 M3,vendor ①类暴露的 Response):
-    /// 普通链接(与 http/https 同类的可打开目标)弹「打开 / 复制链接地址」;
-    /// **协议链接不弹** —— `ai://` 在 `click` 里有流语义、`emoji://`/
-    /// `task://`/`hl://` 是字形/checkbox/底色标记不是链接,菜单挂在它们上
-    /// 只会制造「可点」的错觉(与 click 吞掉口径一致)。
+    /// 普通链接按 [`crate::doclink::classify`] 分流 —— **本地文档路径与
+    /// 纯锚点**弹「打开文档」走应用内跳转(交系统浏览器只会失败/丢语义),
+    /// 其余(`http(s)://` 等)弹「打开链接」交浏览器;**协议链接不弹** ——
+    /// `ai://` 在 `click` 里有流语义、`emoji://`/`task://`/`hl://` 是字形/
+    /// checkbox/底色标记不是链接,菜单挂在它们上只会制造「可点」的错觉
+    /// (与 click 吞掉口径一致)。
     ///
     /// 挂点由 vendored galley 主路径驱动(secondary click → 指针下链接 →
     /// 弹层打开期间逐帧回调),这里的判定只管「要不要挂」:
@@ -592,8 +600,15 @@ impl LinkHandler for AiLinkHandler {
             return;
         }
         let clicked = Rc::clone(&self.clicked);
+        let local = crate::doclink::classify(href) == crate::doclink::HrefKind::Local;
         response.context_menu(|ui| {
-            if ui.button("打开链接").clicked() {
+            if local {
+                if ui.button("打开文档").clicked() {
+                    clicked.borrow_mut().push(Message::DocLinkClicked {
+                        href: href.to_owned(),
+                    });
+                }
+            } else if ui.button("打开链接").clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(href.to_owned()));
             }
             if ui.button("复制链接地址").clicked() {
@@ -1475,6 +1490,43 @@ mod tests {
             vec![Message::WikilinkClicked {
                 target: "架构决策".into()
             }]
+        );
+    }
+
+    /// 本地文档链接的点击(#doclink):相对路径/纯锚点被拦成
+    /// [`Message::DocLinkClicked`](应用内跳转,归约侧解析),不交系统
+    /// 浏览器;外部 scheme 照旧不拦(交回 vendored 默认 open_url)。
+    #[test]
+    fn local_doc_link_click_is_intercepted_as_doc_link_message() {
+        let ctx = egui::Context::default();
+        let handler = AiLinkHandler::new(
+            ai_link_color(true),
+            true,
+            egui::Color32::WHITE,
+            &AiState::default(),
+        );
+        let output = ctx.run_ui(RawInput::default(), |ui| {
+            let local = handler.click("正文", "./正文.md#安装", ui);
+            let anchor = handler.click("目录", "#安装指南", ui);
+            let external = handler.click("x", "https://example.com", ui);
+            assert!(local, "相对路径应被拦");
+            assert!(anchor, "纯锚点应被拦");
+            assert!(!external, "http 链接不应被拦");
+        });
+        output.drop_without_applying_deltas();
+
+        let mut outbox = Vec::new();
+        handler.drain_into(&mut outbox);
+        assert_eq!(
+            outbox,
+            vec![
+                Message::DocLinkClicked {
+                    href: "./正文.md#安装".into()
+                },
+                Message::DocLinkClicked {
+                    href: "#安装指南".into()
+                },
+            ]
         );
     }
 
