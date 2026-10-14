@@ -882,6 +882,13 @@ pub enum Message {
     WikilinkClicked {
         target: String,
     },
+    /// 点击指向本地文档的普通链接(`[标题](./note.md)` / `(doc.md#锚点)` /
+    /// `(#锚点)`,载荷为**原始 href**):归约里按 [`crate::doclink`] 解析到
+    /// 本地文档并打开,带锚点则落标题行。只在 `classify == Local` 时发出
+    /// —— 外部 scheme 照走系统浏览器,应用内协议各有归属。
+    DocLinkClicked {
+        href: String,
+    },
     /// 发起 AI Mock 流式续写(命令层入口);流式进行中在归约里被忽略
     /// (防重入,见 [`AiState::start`])。
     AiStart,
@@ -1291,6 +1298,7 @@ impl State {
                 self.jump_cursor_to_heading(span);
             }
             Message::WikilinkClicked { target } => self.open_wikilink(&target),
+            Message::DocLinkClicked { href } => self.open_doc_link(&href),
             Message::AiStart => self.start_ai_stream(),
             Message::AiChunk { delta } => self.append_ai_delta(&delta),
             Message::AiDone => {
@@ -3212,6 +3220,64 @@ impl State {
             None => {
                 self.tabs.current_mut().document.notice =
                     Some(format!("文档库里没有「{target}」这篇文档"));
+            }
+        }
+    }
+
+    /// 打开指向本地文档的普通链接(`Message::DocLinkClicked` 的归约,
+    /// [`crate::doclink`] 的解析落点):相对路径按当前文档目录、库根相对与
+    /// 全库按名依次兜底;带锚点则打开后把光标落到标题行。找不到落提示行,
+    /// 与 [`Self::open_wikilink`] 同一纪律 —— 不静默无反应。
+    ///
+    /// 纯锚点(`#标题`)不开标签,直接在**当前**文档内跳:TOC 生成的
+    /// `[标题](#锚点)` 目录链接是第一用户。锚点定位以打开后的编辑器缓冲
+    /// 为准(脏缓冲比盘上新,以用户看见的为准);找不到锚点同样落提示,
+    /// 文档照常已打开。
+    fn open_doc_link(&mut self, href: &str) {
+        let link = crate::doclink::parse_local(href);
+        let current = self.tabs.current().document.path.clone();
+        let root = self.file_tree.root.clone();
+        match crate::doclink::resolve(current.as_deref(), root.as_deref(), &link) {
+            crate::doclink::Resolution::Miss(message) => {
+                self.tabs.current_mut().document.notice = Some(message);
+            }
+            crate::doclink::Resolution::AnchorHere { anchor } => {
+                self.jump_current_to_anchor(&anchor);
+            }
+            crate::doclink::Resolution::Found { path, anchor } => {
+                let index = match self.tabs.find_by_path(&path) {
+                    Some(index) => index,
+                    None => match file::read(&path) {
+                        Ok(text) => self.spawn_tab(Some(path.clone()), &text),
+                        Err(error) => {
+                            self.tabs.current_mut().document.notice = Some(error.to_string());
+                            return;
+                        }
+                    },
+                };
+                self.switch_active(index);
+                self.file_tree.expand_ancestors_of(&path);
+                if let Some(anchor) = anchor {
+                    self.jump_current_to_anchor(&anchor);
+                }
+            }
+        }
+    }
+
+    /// 当前标签内按锚点跳标题(`open_doc_link` 的锚点半程):找不到落提示
+    /// 行并返回 false,命中走 [`Self::jump_cursor_to_heading`](剥前导换行、
+    /// 钳制过期 span,与大纲点击同一落点语义)。
+    fn jump_current_to_anchor(&mut self, anchor: &str) -> bool {
+        let text = self.tabs.current().editor.text().to_owned();
+        match crate::doclink::find_anchor(&text, anchor) {
+            Some(span) => {
+                self.jump_cursor_to_heading(span);
+                true
+            }
+            None => {
+                self.tabs.current_mut().document.notice =
+                    Some(format!("链接锚点「{anchor}」没有对应的标题"));
+                false
             }
         }
     }
@@ -6219,6 +6285,136 @@ mod tests {
             .notice
             .as_deref()
             .is_some_and(|notice| notice.contains("未设置文件树根目录")));
+    }
+
+    /// 本地文档链接(`Message::DocLinkClicked`):相对路径按当前文档目录
+    /// 解析并打开;带锚点则光标落到标题行;找不到落提示行 —— 不静默。
+    #[test]
+    fn doc_link_opens_relative_target_and_jumps_to_anchor() {
+        let dir = temp_path("doclink");
+        std::fs::create_dir_all(dir.join("子目录")).unwrap();
+        std::fs::write(
+            dir.join("子目录/正文.md"),
+            "# 开头\n\n正文\n\n## 安装指南\n\n步骤\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("子目录/doc.md"), "# 主文档\n").unwrap();
+        let mut state = State {
+            settings_dir: Some(dir.clone()),
+            ..State::default()
+        };
+        state.apply(Message::FileTreeRootSelected(dir.clone()));
+        state.open_path(&dir.join("子目录/doc.md"));
+        assert!(state.tabs.current().document.notice.is_none());
+
+        // 相对路径 + 锚点:打开目标文档,光标落「安装指南」标题
+        state.apply(Message::DocLinkClicked {
+            href: "正文.md#安装指南".into(),
+        });
+        assert_eq!(
+            state.tabs.current().document.path.as_deref(),
+            Some(dir.join("子目录/正文.md").as_path()),
+            "相对当前文档目录解析"
+        );
+        assert!(
+            state.tabs.current().cursor.jump_to.is_some(),
+            "锚点落标题行"
+        );
+
+        // 已开的文档再点(不带锚点):激活同一标签,不重复开
+        let before = state.tabs.tabs.len();
+        let kept = state.tabs.current().cursor.jump_to;
+        state.apply(Message::DocLinkClicked {
+            href: "./正文.md".into(),
+        });
+        assert_eq!(state.tabs.tabs.len(), before, "路径去重,不开第二个标签");
+        assert_eq!(
+            state.tabs.current().cursor.jump_to,
+            kept,
+            "无锚点不产生新跳转"
+        );
+
+        // 找不到:提示带原文路径
+        state.apply(Message::DocLinkClicked {
+            href: "缺失.md".into(),
+        });
+        assert!(state
+            .tabs
+            .current()
+            .document
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("缺失.md")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 纯锚点链接:不开标签,当前文档内把光标跳到标题;锚点不存在落提示。
+    /// TOC 生成的 `[标题](#锚点)` 目录链接走的就是这一条。
+    #[test]
+    fn anchor_only_link_jumps_within_current_document() {
+        let dir = temp_path("doclink-anchor");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("主文档.md"),
+            "# 目录\n\n[跳转](#安装指南)\n\n## 安装指南\n\n步骤\n",
+        )
+        .unwrap();
+        let mut state = State {
+            settings_dir: Some(dir.clone()),
+            ..State::default()
+        };
+        state.apply(Message::FileTreeRootSelected(dir.clone()));
+        state.open_path(&dir.join("主文档.md"));
+
+        state.apply(Message::DocLinkClicked {
+            href: "#安装指南".into(),
+        });
+        assert!(
+            state.tabs.current().cursor.jump_to.is_some(),
+            "文档内跳标题"
+        );
+        assert!(
+            state.tabs.current().document.notice.is_none(),
+            "命中不落提示"
+        );
+
+        state.apply(Message::DocLinkClicked {
+            href: "#不存在的标题".into(),
+        });
+        assert!(state
+            .tabs
+            .current()
+            .document
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("不存在的标题")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TOC 生成的 slug 锚点(`#my-head` 这类拉丁形态)与 find_anchor 的
+    /// slug 规则互认 —— 应用自己产出的目录链接必须点得回。
+    #[test]
+    fn toc_slug_anchors_resolve_back_to_headings() {
+        let dir = temp_path("doclink-toc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("toc.md"),
+            "# Top\n\n- [指南](#my-head)\n\n## My Head\n\n内容\n",
+        )
+        .unwrap();
+        let mut state = State {
+            settings_dir: Some(dir.clone()),
+            ..State::default()
+        };
+        state.apply(Message::FileTreeRootSelected(dir.clone()));
+        state.open_path(&dir.join("toc.md"));
+
+        state.apply(Message::DocLinkClicked {
+            href: "#my-head".into(),
+        });
+        assert!(state.tabs.current().cursor.jump_to.is_some());
+        assert!(state.tabs.current().document.notice.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 反向链接的触发状态机(#15):帧末快照比对 —— 目标(根, 文档)变化才

@@ -314,7 +314,9 @@ impl LiveState {
 /// (#63 live 测试断零消息);切换统一由 `ui` 帧末的探针命中判定发出,
 /// 与右栏预览同一判定层。链接的其余行为(ai:// 卡、emoji、wikilink)
 /// 维持 Live 接入 handler 前的 vendored 默认(#51 M3 否决线,不因
-/// checkbox 顺手改变)。
+/// checkbox 顺手改变);唯本地文档链接(`doclink`,相对路径/`file://`/
+/// 纯锚点)例外:点击拦下走应用内打开,不交系统浏览器 —— 这是有意的
+/// 行为新增,不是顺手改。
 struct LiveRichHandler<'a> {
     mermaid: &'a crate::ui::mermaid::LiveMermaidHandler,
     /// 本块在全文中的字节起点(checkbox 探针坐标域携带,帧末命中换算用)。
@@ -349,7 +351,9 @@ impl<'a> LiveRichHandler<'a> {
 
 impl LinkHandler for LiveRichHandler<'_> {
     /// 右键菜单(context-menu-plan §3 M3,与右栏预览同一挂点/同一判定):
-    /// Live 富渲染块的普通链接弹「打开 / 复制链接地址」,协议链接不弹。
+    /// Live 富渲染块的普通链接按 [`crate::doclink::classify`] 分流 —— 本地
+    /// 文档路径与纯锚点弹「打开文档」走应用内跳转,其余弹「打开链接」交
+    /// 浏览器;协议链接不弹。
     /// 图片菜单不挂 —— 富渲染块的图片走 MarkdownLabel 同一 images 臂,
     /// vendored 的 image_response 同样会回调到这里;Live 是编辑视图,
     /// 「复制图片地址」的用场与预览一致,一并挂上。
@@ -358,8 +362,15 @@ impl LinkHandler for LiveRichHandler<'_> {
             return;
         }
         let clicked = std::rc::Rc::clone(&self.clicked);
+        let local = crate::doclink::classify(href) == crate::doclink::HrefKind::Local;
         response.context_menu(|ui| {
-            if ui.button("打开链接").clicked() {
+            if local {
+                if ui.button("打开文档").clicked() {
+                    clicked.borrow_mut().push(Message::DocLinkClicked {
+                        href: href.to_owned(),
+                    });
+                }
+            } else if ui.button("打开链接").clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(href.to_owned()));
             }
             if ui.button("复制链接地址").clicked() {
@@ -444,7 +455,20 @@ impl LinkHandler for LiveRichHandler<'_> {
         }
         // 只吞不发:切换消息由帧末探针判定单点发出,这里若转发,将来
         // vendored 错位修好时会双发(两次切换 = 一步空转 + 两份 undo)。
-        crate::ui::preview::parse_task_href(href).is_some()
+        if crate::ui::preview::parse_task_href(href).is_some() {
+            return true;
+        }
+        // 本地文档链接(相对/绝对路径、`file://`、纯锚点):应用内打开,
+        // 不交系统浏览器 —— 相对路径交给浏览器只会失败,纯锚点(TOC 目录
+        // 链接)的语义就在本文档内。与右栏预览同一分流口径,解析与跳转在
+        // 归约侧(`state::open_doc_link`,那里才有文档路径与库根)。
+        if crate::doclink::classify(href) == crate::doclink::HrefKind::Local {
+            self.clicked.borrow_mut().push(Message::DocLinkClicked {
+                href: href.to_owned(),
+            });
+            return true;
+        }
+        false
     }
 
     /// 透明占位:与预览 handler 同一实现(链接文字本体 + 同款字体)。
@@ -1215,6 +1239,11 @@ pub fn ui(
                     // 与右栏预览同一渲染入口。
                     .link_handler(&rich_handler)
                     .show(ui);
+                    // drain 前先取「本块拦截了链接点击」标志(wikilink/本地
+                    // 文档链接都走消息、无 OpenUrl,`clicked_for_edit` 的
+                    // OpenUrl 探测看不见它们,须显式排除 —— 点击归链接,
+                    // 不连带切入编辑)。
+                    let link_intercepted = !rich_handler.clicked.borrow().is_empty();
                     rich_handler.drain_into(outbox);
                     let bottom = ui.cursor().top();
                     let rect = egui::Rect::from_min_max(
@@ -1238,10 +1267,10 @@ pub fn ui(
                     // 已经进入写作态后，单击其他块才切换活动编辑块。
                     let edit_pos = if live.browse_only {
                         live.browse_enabled
-                            .then(|| clicked_for_edit(ui, rect, editor_id, true))
+                            .then(|| clicked_for_edit(ui, rect, editor_id, true, link_intercepted))
                             .flatten()
                     } else {
-                        clicked_for_edit(ui, rect, editor_id, false)
+                        clicked_for_edit(ui, rect, editor_id, false, link_intercepted)
                     };
                     if let Some(pos) = edit_pos {
                         let label_id = editor_id.with(("live-render", index));
@@ -1408,7 +1437,14 @@ fn clicked_for_edit(
     rect: egui::Rect,
     editor_id: egui::Id,
     double_click: bool,
+    link_intercepted: bool,
 ) -> Option<egui::Pos2> {
+    // 链接点击归链接(wikilink → 开文档、本地链接 → 应用内跳转):不连带
+    // 进编辑。普通外链走 vendored 默认 open_url,由帧输出探测兜住;应用内
+    // 跳转只发消息、无 OpenUrl,靠 drain 前的 [`link_intercepted`] 标志。
+    if link_intercepted {
+        return None;
+    }
     let clicked = ui.input(|input| {
         if double_click {
             input
@@ -2487,6 +2523,59 @@ mod tests {
             vec!["https://example.com".to_owned()],
             "链接点击打开 URL"
         );
+        assert_eq!(live.active, Some(1), "链接点击不切进编辑:{live:?}");
+    }
+
+    /// 本地文档链接在 Live 富渲染块点击:拦下发 [`Message::DocLinkClicked`]
+    /// (应用内跳转,`state::open_doc_link` 消费),不交系统浏览器 ——
+    /// 相对路径交给浏览器只会失败。块编辑状态同样不被切换。
+    #[test]
+    fn live_local_doc_link_click_emits_doc_link_message() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("[跳转](./笔记.md)\n\n后续。\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(1),
+            ..LiveState::default()
+        };
+
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let (_, link_rect) = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("跳转"))
+            .expect("本地链接文本已渲染");
+
+        let mut messages = Vec::new();
+        let mut opened = Vec::new();
+        for events in click_events(link_rect.center()) {
+            let frame = live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            messages.extend(frame.messages);
+            opened.extend(frame.opened);
+        }
+        assert_eq!(
+            messages,
+            vec![Message::DocLinkClicked {
+                href: "./笔记.md".to_owned()
+            }],
+            "本地链接点击发应用内跳转消息"
+        );
+        assert!(opened.is_empty(), "不走系统浏览器:{opened:?}");
         assert_eq!(live.active, Some(1), "链接点击不切进编辑:{live:?}");
     }
 
