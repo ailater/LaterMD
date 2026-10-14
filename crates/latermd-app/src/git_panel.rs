@@ -32,16 +32,6 @@ pub enum DiffTarget {
     Commit { hash: String, path: String },
 }
 
-/// Git 页历史区的显示范围(「全部 / 本文件」两态)。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum HistoryScope {
-    /// 仓库近期提交(默认,既有口径:不区分文件)。
-    #[default]
-    Repo,
-    /// 单个文件的全部修改记录([`FileHistory`])。
-    File,
-}
-
 /// 单文件历史查询结果([`latermd_git::file_log`] 的返回 + 查询上下文)。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileHistory {
@@ -126,9 +116,7 @@ pub struct GitPanelState {
     pub diff_target: Option<DiffTarget>,
     /// 当前展开的历史提交及其文件清单。
     pub history: Option<HistorySelection>,
-    /// 历史区显示范围(「全部 / 本文件」);会话内状态,不持久化。
-    pub history_scope: HistoryScope,
-    /// 「本文件」范围下的单文件历史查询结果;`None` = 还没查过(渲染层
+    /// 单文件历史(「文件历史」分区);`None` = 还没查过(渲染层
     /// 给「右键文件 → 查看文件历史」引导)。
     pub file_history: Option<FileHistory>,
     /// 是否把选中的 diff 放进主工作区审阅。会话内状态,重启回编辑器。
@@ -156,7 +144,6 @@ impl Default for GitPanelState {
             diff_view: DiffView::Split,
             diff_target: None,
             history: None,
-            history_scope: HistoryScope::Repo,
             file_history: None,
             diff_workspace_open: false,
             confirm_checkout: None,
@@ -222,16 +209,14 @@ impl GitPanelState {
         self.truncated = snapshot.truncated;
         self.commits =
             latermd_git::log(&repo_root, latermd_git::DEFAULT_LOG_LIMIT).unwrap_or_default();
-        // 文件历史跟随刷新:外部提交/回滚都会改变「这个文件被哪些提交改过」
-        let tracked = match self.history_scope {
-            HistoryScope::File => self
-                .file_history
-                .as_ref()
-                .map(|history| history.path.clone()),
-            HistoryScope::Repo => None,
-        };
-        if let Some(path) = tracked {
-            self.load_file_history(&path);
+        // 文件历史跟随刷新:外部提交/回滚都会改变「这个文件被哪些提交改过」,
+        // 已查过的文件每次刷新重查一次(file_log 本地毫秒级,上限同 log)。
+        if let Some(tracked) = self
+            .file_history
+            .as_ref()
+            .map(|history| history.path.clone())
+        {
+            self.load_file_history(&tracked);
         }
     }
 
@@ -248,17 +233,14 @@ impl GitPanelState {
         });
         self.diff_workspace_open = true;
         self.reload_diff();
-        // 「本文件」范围跟随选中项:选中谁就查谁的历史
-        if self.history_scope == HistoryScope::File {
-            self.load_file_history(path);
-        }
+        // 「文件历史」分区跟随选中项:选中谁就查谁的历史
+        self.load_file_history(path);
     }
 
-    /// 查询单文件的全部修改记录并把历史区切到「本文件」
-    /// (`latermd_git::file_log`)。无仓库根(未刷新/降级)时留错误文案,
+    /// 查询单文件的全部修改记录(`latermd_git::file_log`,「文件历史」
+    /// 分区的数据源)。无仓库根(未刷新/降级)时留错误文案,
     /// 不 panic;查询失败同样留文案,由渲染层显示。
     pub fn load_file_history(&mut self, path: &str) {
-        self.history_scope = HistoryScope::File;
         let result = match self.repo_root.clone() {
             None => Err("当前目录不在 Git 仓库内".to_owned()),
             Some(root) => latermd_git::file_log(&root, path, latermd_git::DEFAULT_LOG_LIMIT),
@@ -275,19 +257,6 @@ impl GitPanelState {
                 error: Some(error),
             },
         });
-    }
-
-    /// 切换历史区范围(`Message::GitHistoryScopeChanged` 的归约)。切到
-    /// 「本文件」时按 `fallback` 给的文件查一次——它是调用方按「选中项 →
-    /// 当前文档」解出的相对仓库根路径;`None` 表示当前没有可查的文件,
-    /// 保留既有结果(不清空),由渲染层给引导。切回「全部」不动已查结果。
-    pub fn set_history_scope(&mut self, scope: HistoryScope, fallback: Option<&str>) {
-        self.history_scope = scope;
-        if scope == HistoryScope::File {
-            if let Some(path) = fallback {
-                self.load_file_history(path);
-            }
-        }
     }
 
     /// 加载一条历史提交的文件清单，不改变工作区文件选择。
@@ -777,8 +746,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 文件历史:只含改动过该文件的提交;无仓库根留错误文案;选中项在
-    /// 「本文件」范围下被跟随;切回「全部」不清已查结果。
+    /// 文件历史:只含改动过该文件的提交;无仓库根留错误文案;选中改动
+    /// 文件时无条件跟随;刷新重查已跟踪的文件。
     #[test]
     fn file_history_tracks_one_file_and_follows_selection() {
         let dir = temp_repo("file-history");
@@ -789,8 +758,7 @@ mod tests {
 
         let mut git_state = GitPanelState::default();
         git_state.refresh(Some(&dir));
-        assert_eq!(git_state.history_scope, HistoryScope::Repo, "默认全部");
-        assert_eq!(git_state.file_history, None);
+        assert_eq!(git_state.file_history, None, "未查过是空");
 
         git_state.load_file_history("a.md");
         let history = git_state.file_history.as_ref().expect("文件历史就位");
@@ -805,11 +773,6 @@ mod tests {
             vec!["init"],
             "只含改动 a.md 的提交"
         );
-        assert_eq!(
-            git_state.history_scope,
-            HistoryScope::File,
-            "查询顺带切范围"
-        );
 
         git_state.load_file_history("b.md");
         let b = git_state.file_history.as_ref().expect("b 的历史");
@@ -821,7 +784,7 @@ mod tests {
             vec!["加 b"]
         );
 
-        // 选中改动文件:「本文件」范围跟随选中项
+        // 选中改动文件:「文件历史」分区无条件跟随选中项
         git_state.select("a.md");
         assert_eq!(
             git_state.file_history.as_ref().map(|h| h.path.as_str()),
@@ -829,10 +792,14 @@ mod tests {
             "选中即查选中项的历史"
         );
 
-        // 切回「全部」:已查结果保留(再切回来不用重查)
-        git_state.set_history_scope(HistoryScope::Repo, None);
-        assert_eq!(git_state.history_scope, HistoryScope::Repo);
-        assert!(git_state.file_history.is_some(), "切范围不清已查结果");
+        // 刷新重查已跟踪的文件:外部新提交后历史跟着变
+        std::fs::write(dir.join("b.md"), "二改\n").unwrap();
+        git(&dir, &["add", "b.md"]);
+        git(&dir, &["commit", "-q", "-m", "再改 b"]);
+        git_state.refresh(Some(&dir));
+        let b = git_state.file_history.as_ref().expect("刷新后仍在");
+        assert_eq!(b.path, "a.md", "刷新不清目标");
+        assert_eq!(git_state.commits[0].subject, "再改 b", "仓库历史已含新提交");
 
         // 无仓库根:错误文案,不 panic
         let mut orphan = GitPanelState::default();
