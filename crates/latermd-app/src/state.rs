@@ -3568,13 +3568,16 @@ impl State {
     /// 稳定 id —— 帧末 `autosave_pass` 为它落 draft(#18 切换即落)。
     fn switch_active(&mut self, index: usize) {
         let previous = self.tabs.current().id;
-        if index != self.tabs.active && index < self.tabs.tabs.len() {
+        let changed = index != self.tabs.active && index < self.tabs.tabs.len();
+        if changed {
             self.autosave_switch_out = Some(previous);
         }
         self.tabs.activate(index);
         self.rescan_find_after_tab_switch(previous);
-        // 换了文档:「文件历史」的文档同步位失效(理由同 spawn_tab)
-        self.git.file_history_synced_doc = None;
+        if changed {
+            // 换了文档:「文件历史」的文档同步位失效(理由同 spawn_tab)
+            self.git.file_history_synced_doc = None;
+        }
     }
 
     /// 关闭请求(标签条 × / Ctrl+W):脏标签先弹确认模态,干净标签直接关。
@@ -9100,8 +9103,17 @@ mod tests {
             Some("b.md"),
             "显式查询不被轮询顶掉"
         );
+        // 重复激活当前 tab 不算换文档,显式查询仍应保留。
+        state.apply(Message::FileSelected(dir.join("a.md")));
+        state.refresh_git();
+        assert_eq!(
+            state.git.file_history.as_ref().map(|h| h.path.as_str()),
+            Some("b.md"),
+            "重复激活当前 tab 不应覆盖显式查询"
+        );
 
         // tab 换回 a.md → 刷新后跟随 a.md
+        state.apply(Message::FileSelected(dir.join("b.md")));
         state.apply(Message::FileSelected(dir.join("a.md")));
         state.refresh_git();
         assert_eq!(
