@@ -283,6 +283,14 @@ impl GitPanelState {
 
     /// 加载一条历史提交的文件清单，不改变工作区文件选择。
     pub fn select_commit(&mut self, root: &Path, hash: &str) {
+        if self
+            .history
+            .as_ref()
+            .is_some_and(|history| history.commit.hash == hash)
+        {
+            self.history = None;
+            return;
+        }
         match latermd_git::commit_files(root, hash, latermd_git::DEFAULT_STATUS_LIMIT) {
             Ok(files) => {
                 self.history = Some(HistorySelection {
@@ -671,6 +679,12 @@ mod tests {
             "{:?}",
             history.files
         );
+
+        // 同一条历史再次点击只收起,不会重复加载或保持展开。
+        git_state.select_commit(&dir, &hash);
+        assert!(git_state.history.is_none(), "同一条历史应可折叠");
+        git_state.select_commit(&dir, &hash);
+        assert!(git_state.history.is_some(), "再次点击应重新展开");
 
         git_state.select_commit_file(&dir, &hash, "b.md");
         assert!(git_state.diff_workspace_open, "历史文件进入主工作区");

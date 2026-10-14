@@ -49,8 +49,10 @@ pub enum Icon {
     Git,
     /// 设置:齿轮。
     Settings,
-    /// 重置:回环箭头。
+    /// 重置/刷新:回环箭头。
     Reset,
+    /// 放弃当前工作区修改:向左回退箭头。
+    Undo,
     /// 关右栏:外框 + 右侧实心条(左栏用既有 `Sidebar` 镜像)。
     PanelRight,
     /// 禅定:同心圆。
@@ -403,6 +405,14 @@ impl Icon {
                 // 收口处会显得头重脚轻。
                 seg(end, (end.0 + 0.03, end.1 + 0.285));
                 seg(end, (end.0 + 0.285, end.1 - 0.06));
+            }
+            Self::Undo => {
+                // 独立于 Reset 的单向回退箭头:左向箭头 + 短尾,避免在
+                // Git 改动行里被误认为「刷新」。
+                seg((0.38, 0.0), (-0.18, 0.0));
+                seg((-0.18, 0.0), (0.06, -0.24));
+                seg((-0.18, 0.0), (0.06, 0.24));
+                seg((-0.18, 0.0), (-0.38, 0.0));
             }
             Self::PanelRight => {
                 frame((-0.44, -0.36), (0.44, 0.36));
@@ -776,6 +786,7 @@ mod tests {
             Icon::Git,
             Icon::Settings,
             Icon::Reset,
+            Icon::Undo,
             Icon::PanelRight,
             Icon::Zen,
             Icon::Minimize,
