@@ -424,7 +424,7 @@ impl LinkHandler for LiveRichHandler<'_> {
         }
         if href.starts_with(latermd_md::WIKI_SCHEME) {
             return Some(LinkStyle {
-                color: Some(crate::ui::preview::wiki_link_color(self.dark_mode)),
+                color: Some(crate::ui::rich_widgets::wiki_link_color(self.dark_mode)),
                 underline: true,
             });
         }
@@ -455,7 +455,7 @@ impl LinkHandler for LiveRichHandler<'_> {
         }
         // 只吞不发:切换消息由帧末探针判定单点发出,这里若转发,将来
         // vendored 错位修好时会双发(两次切换 = 一步空转 + 两份 undo)。
-        if crate::ui::preview::parse_task_href(href).is_some() {
+        if crate::ui::rich_widgets::parse_task_href(href).is_some() {
             return true;
         }
         // 本地文档链接(相对/绝对路径、`file://`、纯锚点):应用内打开,
@@ -484,7 +484,7 @@ impl LinkHandler for LiveRichHandler<'_> {
         color: egui::Color32,
     ) -> bool {
         if href.starts_with(latermd_md::HIGHLIGHT_SCHEME) {
-            crate::ui::preview::append_highlight_section(ui, text, job, font);
+            crate::ui::rich_widgets::append_highlight_section(ui, text, job, font);
             return true;
         }
         if href.starts_with(latermd_md::EMOJI_SCHEME) {
@@ -515,11 +515,11 @@ impl LinkHandler for LiveRichHandler<'_> {
 
     fn paint_inline_widget(&self, ui: &mut egui::Ui, _text: &str, href: &str, rect: egui::Rect) {
         if href.starts_with(latermd_md::TASK_SCHEME) {
-            crate::ui::preview::paint_task_checkbox(
+            crate::ui::rich_widgets::paint_task_checkbox(
                 ui,
                 rect,
                 href,
-                crate::ui::preview::TaskProbeDomain::Live(self.task_base),
+                crate::ui::rich_widgets::TaskProbeDomain::Live(self.task_base),
             );
         } else if let Some(glyph) = href.strip_prefix(latermd_md::EMOJI_SCHEME) {
             let side = rect.width().min(rect.height());
@@ -696,7 +696,7 @@ pub fn ui(
     // 按下帧焦点快照(#63,与右栏预览共用同一暂存):checkbox 命中帧要把
     // 它还给活动块 —— 点击 checkbox 的意图是切换勾选,不是转移焦点。预览
     // 面板同帧先画时它已收过首份快照(帧号核对,后画者不覆盖)。
-    crate::ui::preview::stash_focus_on_press(panel.ctx());
+    crate::ui::rich_widgets::stash_focus_on_press(panel.ctx());
 
     // 打字机模式(#64 M1):每标签一份记忆(与源码模式分槽),帧首读、
     // 帧末写回。关闭态不读写 temp、活动块不进任何打字机分支 —— LP2-3 的
@@ -1234,7 +1234,7 @@ pub fn ui(
                     .scroll_code_blocks(true)
                     .shrink_code_blocks(true)
                     .code_block_min_width(Some(200.0))
-                    .code_block_buttons(&crate::ui::preview::code_copy_buttons)
+                    .code_block_buttons(&crate::ui::rich_widgets::code_copy_buttons)
                     // mermaid 块出图(#51 M3)+ 任务 checkbox(#63),
                     // 与右栏预览同一渲染入口。
                     .link_handler(&rich_handler)
@@ -1357,14 +1357,14 @@ pub fn ui(
     // 载荷 + 记录时块首 = 源码偏移;过期偏移由归约侧 pulldown 重扫闸住),
     // 并归还按下帧持焦者 —— vendored 的 handler.click 对列表项 widget
     // 不可达(实测断零消息),这里是 Live 侧唯一切换入口。
-    if let Some((href, crate::ui::preview::TaskProbeDomain::Live(base))) =
-        crate::ui::preview::task_click_hit(panel)
+    if let Some((href, crate::ui::rich_widgets::TaskProbeDomain::Live(base))) =
+        crate::ui::rich_widgets::task_click_hit(panel)
     {
-        if let Some((_, offset)) = crate::ui::preview::parse_task_href(&href) {
+        if let Some((_, offset)) = crate::ui::rich_widgets::parse_task_href(&href) {
             outbox.push(Message::TaskCheckboxToggled {
                 byte: base + offset,
             });
-            crate::ui::preview::restore_stashed_focus(panel.ctx());
+            crate::ui::rich_widgets::restore_stashed_focus(panel.ctx());
         }
     }
 
@@ -1423,7 +1423,7 @@ pub fn ui(
 /// 在 `show()` 内注册得更晚,实测点击后进编辑同样失效)。所以直接读原始
 /// 指针事件:本帧有主键 click(egui 已按拖动阈值判定,块内拖选文本不算
 /// click,不误触发)且抬起点落在本块;再排除两类本就另有归属的点击 ——
-/// 落在代码块复制按钮上的(本帧探针几何,`crate::ui::preview::
+/// 落在代码块复制按钮上的(本帧探针几何,`crate::ui::rich_widgets::
 /// copy_button_rects`)和打开了链接的(链接点击归属富渲染层,不连带进
 /// 编辑;OpenUrl 在 `show()` 内已进本帧输出,这里读得到)。
 ///
@@ -1461,7 +1461,7 @@ fn clicked_for_edit(
     if !rect.contains(pos) {
         return None;
     }
-    if crate::ui::preview::copy_button_rects(ui.ctx())
+    if crate::ui::rich_widgets::copy_button_rects(ui.ctx())
         .iter()
         .any(|button| button.contains(pos))
     {
@@ -1469,7 +1469,7 @@ fn clicked_for_edit(
     }
     // 任务 checkbox(#63):点击归 checkbox 切换(帧内探针几何,由 paint
     // 先于本判定写入),不连带进编辑。
-    if crate::ui::preview::task_checkbox_rects(ui.ctx())
+    if crate::ui::rich_widgets::task_checkbox_rects(ui.ctx())
         .iter()
         .any(|checkbox| checkbox.contains(pos))
     {
@@ -2073,7 +2073,7 @@ mod tests {
         output.drop_without_applying_deltas();
         LiveFrame {
             // 帧后读取:帧号已前进,按「最后写入者即本帧」取原始探针。
-            button_rects: crate::ui::preview::copy_button_probe(ctx).1,
+            button_rects: crate::ui::rich_widgets::copy_button_probe(ctx).1,
             copied,
             opened,
             texts,
@@ -2390,7 +2390,7 @@ mod tests {
             &mut live,
         );
         assert!(frame.messages.is_empty(), "静帧零消息");
-        let rects = crate::ui::preview::task_checkbox_probe(&ctx);
+        let rects = crate::ui::rich_widgets::task_checkbox_probe(&ctx);
         assert_eq!(rects.len(), 1, "任务块一枚 checkbox:{rects:?}");
         assert_eq!(live.active, None, "静帧不切入编辑");
 
@@ -4937,7 +4937,7 @@ mod tests {
             assert_eq!(job.sections.len(), 1, "恰一段(非 inline widget 占位)");
             assert_eq!(
                 job.sections[0].format.background,
-                crate::ui::preview::highlight_bg_color(ui.visuals()),
+                crate::ui::rich_widgets::highlight_bg_color(ui.visuals()),
                 "底色 = 与预览同一推导真源"
             );
             let style = handler.link_style("hl://").expect("hl:// 有样式");
@@ -4995,7 +4995,7 @@ mod tests {
                 &mut outbox,
             );
         });
-        let hl = crate::ui::preview::highlight_bg_color(&egui::Visuals::dark());
+        let hl = crate::ui::rich_widgets::highlight_bg_color(&egui::Visuals::dark());
         let mut marked = Vec::new();
         for clipped in &output.shapes {
             if let egui::epaint::Shape::Text(t) = &clipped.shape {

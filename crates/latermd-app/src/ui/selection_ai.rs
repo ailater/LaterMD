@@ -191,7 +191,7 @@ pub(crate) fn show(
     painter.rect_filled(
         badge,
         egui::CornerRadius::same(4),
-        crate::ui::preview::ai_link_color(dark),
+        crate::ui::rich_widgets::ai_link_color(dark),
     );
     painter.text(
         badge.center(),

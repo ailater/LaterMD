@@ -387,7 +387,7 @@ fn paint_fallback(ui: &mut egui::Ui, index: usize, text: &str, err: &str) -> egu
         .scroll_code_blocks(true)
         .shrink_code_blocks(true)
         .code_block_min_width(Some(200.0))
-        .code_block_buttons(&crate::ui::preview::code_copy_buttons)
+        .code_block_buttons(&crate::ui::rich_widgets::code_copy_buttons)
         .show(ui);
     write_probe(
         ui,
@@ -600,7 +600,7 @@ mod tests {
             colors,
             node_fill,
             code_bg,
-            copy_buttons: crate::ui::preview::copy_button_probe(ctx).1,
+            copy_buttons: crate::ui::rich_widgets::copy_button_probe(ctx).1,
             code_bg_bbox: bbox,
         }
     }
@@ -805,7 +805,7 @@ mod tests {
             },
         );
         first.drop_without_applying_deltas();
-        let (_, buttons) = crate::ui::preview::copy_button_probe(&ctx);
+        let (_, buttons) = crate::ui::rich_widgets::copy_button_probe(&ctx);
         let Some(button) = buttons.first().copied() else {
             panic!("回落块应挂出复制按钮");
         };
