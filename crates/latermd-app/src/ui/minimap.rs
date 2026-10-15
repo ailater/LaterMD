@@ -1050,6 +1050,7 @@ mod tests {
                     ui,
                     editor,
                     &mut preview,
+                    &crate::ai::AiState::default(),
                     editor::CursorChannel {
                         cursor: &mut cursor,
                         selection: &mut selection,
@@ -2742,6 +2743,7 @@ mod tests {
                     ui,
                     &mut editor,
                     &mut preview,
+                    &crate::ai::AiState::default(),
                     editor::CursorChannel {
                         cursor: &mut cursor,
                         selection: &mut selection,

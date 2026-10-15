@@ -15,11 +15,10 @@
 
 use eframe::egui;
 use egui::epaint::Shape;
-use egui_markdown::link::LinkHandler;
 use egui_markdown::MarkdownLabel;
 use latermd_render::mermaid as md;
 use latermd_render::mermaid::{Diagram, TextMeasurer};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 
 /// 回落态提示行文案(样式见 [`paint_fallback`]:small + weak,克制;
 /// hover 显示具体解析错误)。改文案只动这一处。
@@ -65,42 +64,6 @@ fn diagram_font(ui: &egui::Ui) -> egui::FontId {
         crate::theme::editor_font_size(ui.ctx()),
         crate::fonts::preview_body_family(ui.ctx()),
     )
-}
-
-/// Live 富渲染块专用 handler:只拦 mermaid 围栏,其余全走 vendored 默认
-/// (链接/emoji/ai 卡在 Live 列维持接入前的行为——Live 此前不接 handler,
-/// 不能借 mermaid 顺手改变其它块的分段与像素,#51 M3 否决线)。
-pub(crate) struct LiveMermaidHandler {
-    count: Cell<usize>,
-}
-
-impl LiveMermaidHandler {
-    pub(crate) fn new() -> Self {
-        Self {
-            count: Cell::new(0),
-        }
-    }
-}
-
-impl LinkHandler for LiveMermaidHandler {
-    fn is_block_code_widget(&self, language: Option<&str>) -> bool {
-        is_mermaid_info(language)
-    }
-
-    fn block_code_widget(
-        &self,
-        ui: &mut egui::Ui,
-        text: &str,
-        language: Option<&str>,
-    ) -> Option<egui::Response> {
-        debug_assert!(
-            is_mermaid_info(language),
-            "分段侧已按 info string 过滤,两侧条件不同步是 vendor 回归"
-        );
-        let index = self.count.get();
-        self.count.set(index + 1);
-        Some(block_widget(ui, index, text))
-    }
 }
 
 // —— 解析布局缓存 ——
@@ -532,9 +495,9 @@ mod tests {
     }
 
     /// 生产链路渲染一帧:出厂字体 + `ThemeSettings::default().apply` +
-    /// `MarkdownLabel`(+ 只拦 mermaid 的 [`LiveMermaidHandler`],与生产
-    /// 接入同一条 `is_block_code_widget` 链路)。`with_handler = false`
-    /// 是「接入前」对照轮(否决线用)。
+    /// `MarkdownLabel`(+ 两栏共用的 [`crate::ui::ai_card::RichLinkHandler`],
+    /// 不开 AI 时 mermaid 分派与原 LiveMermaidHandler 逐字节等价)。
+    /// `with_handler = false` 是「接入前」对照轮(否决线用)。
     fn render_frame(
         ctx: &egui::Context,
         dark: bool,
@@ -569,7 +532,12 @@ mod tests {
                 .wrap();
             if with_handler {
                 // 链式调用让 handler 借用只活在本语句内。
-                let handler = LiveMermaidHandler::new();
+                let handler = crate::ui::ai_card::RichLinkHandler::new(
+                    crate::ui::rich_widgets::TaskProbeDomain::Preview,
+                    dark,
+                    panel.visuals().text_color(),
+                    Default::default(),
+                );
                 label.link_handler(&handler).show(panel);
             } else {
                 label.show(panel);
@@ -793,7 +761,12 @@ mod tests {
                 ..RawInput::default()
             },
             |panel| {
-                let handler = LiveMermaidHandler::new();
+                let handler = crate::ui::ai_card::RichLinkHandler::new(
+                    crate::ui::rich_widgets::TaskProbeDomain::Preview,
+                    false,
+                    egui::Color32::WHITE,
+                    Default::default(),
+                );
                 MarkdownLabel::new(egui::Id::new("mermaid-copy"), SEQ_DOC)
                     .font(egui::FontId::new(
                         crate::theme::editor_font_size(panel.ctx()),
@@ -832,7 +805,12 @@ mod tests {
                 ..RawInput::default()
             },
             |panel| {
-                let handler = LiveMermaidHandler::new();
+                let handler = crate::ui::ai_card::RichLinkHandler::new(
+                    crate::ui::rich_widgets::TaskProbeDomain::Preview,
+                    false,
+                    egui::Color32::WHITE,
+                    Default::default(),
+                );
                 MarkdownLabel::new(egui::Id::new("mermaid-copy"), SEQ_DOC)
                     .font(egui::FontId::new(
                         crate::theme::editor_font_size(panel.ctx()),
@@ -881,7 +859,12 @@ mod tests {
                     ..RawInput::default()
                 },
                 |panel| {
-                    let handler = LiveMermaidHandler::new();
+                    let handler = crate::ui::ai_card::RichLinkHandler::new(
+                        crate::ui::rich_widgets::TaskProbeDomain::Preview,
+                        false,
+                        egui::Color32::WHITE,
+                        Default::default(),
+                    );
                     MarkdownLabel::new(egui::Id::new("mermaid-stream"), doc)
                         .font(egui::FontId::new(
                             crate::theme::editor_font_size(panel.ctx()),
@@ -962,7 +945,12 @@ mod tests {
                         .font(font)
                         .wrap();
                     if with_handler {
-                        let handler = LiveMermaidHandler::new();
+                        let handler = crate::ui::ai_card::RichLinkHandler::new(
+                            crate::ui::rich_widgets::TaskProbeDomain::Preview,
+                            false,
+                            egui::Color32::WHITE,
+                            Default::default(),
+                        );
                         label.link_handler(&handler).show(panel);
                     } else {
                         label.show(panel);

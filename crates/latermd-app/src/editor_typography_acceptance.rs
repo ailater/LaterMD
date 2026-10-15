@@ -737,6 +737,7 @@ fn gutter_digits_stay_aligned_under_line_spacing_projection() {
                 ui,
                 &mut editor,
                 &mut preview,
+                &crate::ai::AiState::default(),
                 crate::ui::editor::CursorChannel {
                     cursor: &mut cursor,
                     selection: &mut selection,

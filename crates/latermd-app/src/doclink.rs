@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use latermd_md::{heading_slug, outline, Slugger};
 
-/// 应用内协议前缀(与 `ui::preview::is_openable_href` 的排除名单同一份,
+/// 应用内协议前缀(与 `ui::ai_card::is_openable_href` 的排除名单同一份,
 /// 单一事实来源在这里):它们的 click 各有归属,AI 流/开文档/字形/
 /// checkbox/底色,不该被本地链接解析或浏览器路径碰。
 const APP_SCHEMES: [&str; 5] = [

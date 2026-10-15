@@ -1,6 +1,7 @@
 //! UI 子模块。绘制都在这里;状态归约只在 `App::logic`(铁律,docs/adr-005 §2.3)。
 
 pub mod about;
+pub mod ai_card;
 pub mod editor;
 pub mod editor_menu;
 pub mod emoji_data;

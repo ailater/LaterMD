@@ -125,6 +125,7 @@ mod tests {
                     ui,
                     editor,
                     &mut preview,
+                    &crate::ai::AiState::default(),
                     CursorChannel {
                         cursor: &mut cursor,
                         selection: &mut selection,
