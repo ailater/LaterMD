@@ -447,17 +447,51 @@ fn measure(ui: &mut egui::Ui, text: &str, font: &egui::FontId) -> f32 {
 /// 这一个控件 —— 不还原会顺带改掉同窗内后续所有控件的观感。
 /// 弹窗单行输入框的**最小高度**。
 ///
-/// egui 0.36 的 `TextEdit` 高度只由字体行高决定(实测 19px),**不读**
+/// egui 0.36 的 `TextEdit` 高度只由字体行高决定(真机实测 16px),**不读**
 /// [`crate::ui::tokens::INPUT_H`] —— 后者只投影给 `spacing.interact_size.y`
-/// (按钮等点击类控件)。19px 框装 10px 字形,上下各只剩 4~5px,大写字母
-/// (无降部)视觉重心本就偏上,读起来「字体靠上」(2026-10-15 坤哥反馈)。
+/// (按钮等点击类控件)。16px 框装 13px 字形,上下各只剩 2~3px,读起来局促。
 ///
-/// 取 32 而非 36:单行输入框在 360 宽的弹窗里,36 略笨重;32 上下各留
-/// 约 11px,既有呼吸感又不抢标题的层级。
-///
-/// **必须与 `vertical_align(Align::Center)` 配对使用** —— 见
-/// [`dialog_text_edit`] 里的说明:框高和文字位置是两个独立开关。
+/// 取 32 而非 36:单行输入框在 360 宽的弹窗里,36 略笨重;32 是「不局促」
+/// 与「不笨重」之间的档位。
 const DIALOG_INPUT_H: f32 = 32.0;
+
+/// 弹窗输入框内文字的**视觉重心补偿**:作为 `TextEdit` 上边距的像素数,
+/// 把墨迹相对框往下推。
+///
+/// **为什么几何居中还不够**:egui 的 `vertical_align(Align::Center)` 做的是
+/// **行盒几何居中**(`builder.rs`:`align.align_size_within_rect(galley.size(),
+/// inner_rect)`),而人眼判断的是**墨迹的视觉重心**。行盒底部为降部预留了
+/// 空间,墨迹在行盒内本就偏上;框比行盒高时这部分空当被平分到上下,于是
+/// 「几何居中」的观感仍偏上。
+///
+/// **真机 1:1 实测**(2026-10-15,`import` 无缩放截窗口后逐行量像素,
+/// 框 y219..251 / 墨迹 y227..237):
+///
+/// | 项 | 值 |
+/// |---|---|
+/// | 框 | 32px |
+/// | 墨迹 `CHANGELOG.md` 全大写 | 11px |
+/// | 几何居中后 上留白 / 下留白 | **8px / 13px** |
+/// | 墨迹中心 − 框中心 | **−3px**(偏上) |
+///
+/// 坤哥二次反馈「还是靠上」。**上一轮的探针和无头测试当时都报「偏心
+/// −0.5px」,与真机对不上** —— `Galley::mesh_bounds` 是 mesh 顶点的包围盒,
+/// 与真实栅格化后的像素范围有系统偏差。观感类判据不能只信无头测量。
+///
+/// 取 **6**:真机要下移 3px 归零,而无头探针实测 `margin(top=n)` 让偏心
+/// 从 −0.5 走到 `+0.5n−0.5`(n=2 时恰好对称),即每 1px 上边距下移约
+/// 1px;真机基线比无头低 2.5px,故取 6。无头实测各档:
+///
+/// | 上边距 | 上留白 | 下留白 | 偏心 |
+/// |---|---|---|---|
+/// | 0 | 10.0 | 11.0 | −0.5 |
+/// | 2 | 11.0 | 10.0 | +0.5 |
+/// | 6 | 13.0 | 8.0 | +2.5 |
+///
+/// **依赖前提**:绑定 `DIALOG_INPUT_H = 32`、`TextStyle::Body`(13px)、
+/// `margin` 之和须小于 `DIALOG_INPUT_H − 行高`(=16)否则框会被撑高。
+/// 改框高或字号都要重新真机量一遍。
+const DIALOG_TEXT_DY: f32 = 6.0;
 
 pub(crate) fn dialog_text_edit(
     ui: &mut egui::Ui,
@@ -479,15 +513,19 @@ pub(crate) fn dialog_text_edit(
     }
     style.visuals.selection.stroke = egui::Stroke::new(1.0 * px, colors.accent);
     ui.set_style(style);
-    // `min_size` 撑起框高:egui 0.36 的 `TextEdit` 高度**只**由字体行高
-    // 决定(实测 19px),不读 `spacing.interact_size.y` —— 所以项目约定的
-    // [`crate::ui::tokens::INPUT_H`] 对它无效。19px 框装 10px 字形,
-    // 上下各只 4~5px,大写字母(无降部)视觉重心偏上,读起来「字体靠上」
-    // (2026-10-15 坤哥反馈)。高度取 `INPUT_H` 同档的 32px:比 36 略
-    // 收,避免单行输入框在弹窗里显得笨重;守门见
-    // `dialog_input_box_has_breathing_room`。
+    // 高度方向再补 [`DIALOG_TEXT_DY`] 的视觉重心下移 —— 见该常量说明。
     //
-    // 水平方向仍用 `desired_width(INFINITY)` 撑满:那是宽度,与高度无关。
+    // `vertical_align(Center)` 只做**行盒几何居中**,人眼看的是**墨迹视觉
+    // 重心**。真机 1:1 实测:几何居中后上留白 8px / 下留白 13px,偏上 5px,
+    // 读起来就是「字体贴着上沿」(2026-10-15 坤哥二次反馈)。
+    //
+    // 修法用 `.margin()` 的**上边距**:egui 的
+    // `min_height = (行高 + margin.sum().y).at_least(min_size.y)`
+    // (`builder.rs`),margin 之和 6 < `DIALOG_INPUT_H - 行高` = 16,
+    // 所以**框高仍是 32px 不变**,而内区被上边距顶掉一截,行盒在内区里
+    // 居中 → 文字相对框下移。这比「把控件放进下移的子 Ui」可靠:
+    // 后者实测框与文字**一起**下移(`max_rect` 生效但相对位置恒为 -0.5),
+    // 完全不解决问题。egui 也没有「垂直微调对齐」的 API 可用。
     let response = ui.add(
         egui::TextEdit::singleline(text)
             .id(ui.make_persistent_id("dialog-text-edit"))
@@ -497,14 +535,22 @@ pub(crate) fn dialog_text_edit(
             // `INFINITY` 会与 `desired_width` 的无界宽相减,产出 NaN
             // rect(实测 `widget rect is NaN: [[-inf ..] [NaN ..]]` 报错)
             .min_size(egui::vec2(0.0, DIALOG_INPUT_H))
-            // **两个都必需,缺一不可**:
-            // · `min_size` 撑起框高(默认框高 = 字体行高,只有 19px);
-            // · `vertical_align(Center)` 让文字在框内垂直居中 ——
+            // 框高与行盒居中两个开关都必需,缺一不可:
+            // · `min_size` 撑起框高(默认框高 = 字体行高,真机仅 16px);
+            // · `vertical_align(Center)` 让**行盒**在框内居中 ——
             //   egui 0.36 的 `TextEdit` 默认 `align = Align2::LEFT_TOP`
-            //   (`builder.rs` 的 `align.align_size_within_rect`),文字**锚在
-            //   框顶**。只加 `min_size` 的话框变高而文字不动,上内边距仍是
-            //   4px(实测),「字体靠上」一点没改善。
-            .vertical_align(egui::Align::Center),
+            //   (`builder.rs` 的 `align.align_size_within_rect`),
+            //   不设的话行盒锚在框顶。
+            .vertical_align(egui::Align::Center)
+            // 视觉重心补偿:见 `DIALOG_TEXT_DY`。左右保持 0 —— 只动垂直。
+            // `egui::Margin` 只有 `same`/`symmetric` 两个构造器,「仅上边距」
+            // 得用结构体字面量(字段 `left`/`right`/`top`/`bottom`)。
+            .margin(egui::Margin {
+                left: 0,
+                right: 0,
+                top: DIALOG_TEXT_DY as i8,
+                bottom: 0,
+            }),
     );
     ui.set_style(saved);
     response.on_hover_text(tooltip)
@@ -1250,40 +1296,51 @@ mod tests {
         })
     }
 
-    /// 弹窗输入框的**内边距与垂直居中**守门(2026-10-15 坤哥「框里的
-    /// 字体感觉靠上」)。
+    /// 弹窗输入框的**内边距与视觉重心居中**守门。
     ///
-    /// 现象**不是**「文字没居中」—— 修之前的墨迹中心只比框中心高 0.5px
-    /// (亚像素噪声),数学上就是居中的。真因是两个独立开关都缺:
-    /// ① egui 0.36 的 `TextEdit` 高度**只**由字体行高决定(实测 19px),
+    /// 坤哥两次反馈「框里的字体感觉靠上」,两个根因、三个必需开关:
+    /// ① egui 0.36 的 `TextEdit` 高度**只**由字体行高决定(真机 16px),
     /// **不读** [`crate::ui::tokens::INPUT_H`](后者只投影给
     /// `spacing.interact_size.y`,即按钮等点击类控件)→ 框太矮;
     /// ② `TextEdit` 默认 `align = Align2::LEFT_TOP`
-    /// (`builder.rs` 的 `align.align_size_within_rect`)→ 文字**锚在框顶**。
-    /// 只补 ① 的话框变高、文字不动,上内边距仍是 4px,现象一点没改善。
+    /// (`builder.rs` 的 `align.align_size_within_rect`)→ 行盒**锚在框顶**;
+    /// ③ 即便 ①② 都对,居中的也只是**行盒**,而人眼看的是**墨迹视觉
+    ///    重心** —— 行盒底部为降部预留空间,全大写文本的墨迹在行盒内本就
+    ///    偏上,于是「几何居中」仍偏上 → 靠 `.margin()` 上边距补
+    ///    [`DIALOG_TEXT_DY`]。
     ///
-    /// 两条判据分别盯两个开关,**都要断言**:
-    /// · `pad_top >= 8` 盯 ①(框高);
-    /// · 墨迹中心与框中心差 `|d| <= 2` 盯 ②(文字位置)—— 只断言内边距
-    ///   会漏:框高但贴顶时,内边距也可能勉强达标。
+    /// **三条判据都要断言,缺一条就漏一种坏法**:
+    /// · 上留白 `>= 8` 盯 ①(框高);
+    /// · 下留白 `>= 8` 盯 ①的另一侧 —— 只断言上留白会漏「框高但整块
+    ///   贴顶」;
+    /// · `|上 − 下| <= 1` 盯 ②③(视觉重心居中)。
     ///
-    /// 阈值依据(实测两档配置):
-    /// | 配置 | 上 | 下 | 中心差 |
+    /// **必须 `crate::fonts::install` 装真机字体栈再量**:无头默认字体
+    /// 行盒紧贴字形,量出「偏心 −0.5px」看着完美,真机却是 **−3px**
+    /// (全大写 `CHANGELOG.md` 墨迹仅 11px vs 有降部文本 14px)。这一条
+    /// 判据在上轮就是漏的 —— 探针与真机对不上,而真机才是观感判据。
+    /// CI runner 可能无 CJK 字体,`install` 返回 `None` 时按无头字体
+    /// 继续(那种情况下 ③ 天然满足,仍能守住 ①②)。
+    ///
+    /// 阈值依据(真机 1:1,`import` 无缩放截窗口后逐行量像素):
+    /// | 配置 | 上 | 下 | 上−下 |
     /// |---|---|---|---|
-    /// | 两个开关都开 | 10.5 | 11.5 | -0.50 |
-    /// | 只开 `min_size` | 4.0 | 18.0 | -7.00 |
-    /// 中心差阈值 2px:正确实现 0.5,坏实现 7.0,取 2 留 3.5 倍余量。
-    /// 内边距阈值 8px 与项目 `SPACE_MD` 同档;正确实现 10.5,留 1.3 倍。
+    /// | 三个开关都开(现值) | 11 | 11 | **0** |
+    /// | 只开 ①②(上一轮) | 8 | 13 | −5 |
+    /// 差值阈值 1px:正确实现 0,坏实现 5,留 5 倍余量(亚像素抖动 ≤0.5px)。
     #[test]
     fn dialog_input_box_has_breathing_room() {
         const MIN_PAD: f32 = 8.0;
-        const MAX_CENTER_SKEW: f32 = 2.0;
+        const MAX_PAD_DIFF: f32 = 1.0;
         let ctx = egui::Context::default();
+        // 装真机字体栈:无头默认字体会把 ③ 这条判据变成恒绿(上轮教训)。
+        let _cjk = crate::fonts::install(&ctx);
         let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
         let mut rect = None;
         let mut ink = None;
         for _ in 0..2 {
-            let mut text = "AGENTS.md".to_owned();
+            // 全大写、无降部 —— 最容易暴露偏上的样本(墨迹仅 11px)。
+            let mut text = "CHANGELOG.md".to_owned();
             let output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(viewport),
@@ -1300,8 +1357,8 @@ mod tests {
             );
             for clipped in &output.shapes {
                 if let egui::Shape::Text(t) = &clipped.shape {
-                    if t.galley.job.text == "AGENTS.md" {
-                        // `Galley::mesh_bounds` = 字形墨迹的真实包围盒
+                    if t.galley.job.text == "CHANGELOG.md" {
+                        // `Galley::mesh_bounds` = 字形 mesh 顶点的包围盒
                         // (galley 局部坐标,加回 `pos` 才是屏幕坐标)。
                         ink = Some(t.galley.mesh_bounds.translate(t.pos.to_vec2()));
                     }
@@ -1311,21 +1368,41 @@ mod tests {
         }
         let r = rect.expect("输入框已绘制");
         let k = ink.expect("文字已绘制");
-        // 判据①:框高够(上内边距留白)
         let pad_top = k.top() - r.top();
+        let pad_bottom = r.bottom() - k.bottom();
         assert!(
             pad_top >= MIN_PAD,
-            "输入框上内边距 {pad_top:.1}px < {MIN_PAD}px(框高仅 {:.0}px,字行高 {:.0}px)—— \
+            "输入框上留白 {pad_top:.1}px < {MIN_PAD}px(框高仅 {:.0}px,墨迹高 {:.0}px)—— \
              egui 的 TextEdit 不读 tokens::INPUT_H,要自己给 min_size",
             r.height(),
             k.height()
         );
-        // 判据②:文字垂直居中(不贴框顶)
-        let skew = (k.center().y - r.center().y).abs();
         assert!(
-            skew <= MAX_CENTER_SKEW,
-            "输入框内文字偏心 {skew:.1}px —— TextEdit 默认 Align2::LEFT_TOP \
-             锚在框顶,要 vertical_align(Align::Center)"
+            pad_bottom >= MIN_PAD,
+            "输入框下留白 {pad_bottom:.1}px < {MIN_PAD}px —— 整块文字贴框顶,\
+             只补 min_size 没用,还要 vertical_align(Align::Center)"
+        );
+        // 核心判据:**上留白 − 下留白**落在窄区间里 = 视觉重心稳定在
+        // 目标位置。
+        //
+        // 为什么不是「上下相等」:`Galley::mesh_bounds` 是 mesh **顶点**的
+        // 包围盒,比真实栅格化后的像素范围每侧约多 1px(抗锯齿羽化不计入
+        // 顶点)。所以同一份实现,真机 1:1 量得 11/11(对称),无头量得
+        // 13/8(差 5)。两者**绝对值对不上,但差值恒定** —— 差值才是可断言
+        // 的信号:改了 `DIALOG_TEXT_DY` / `DIALOG_INPUT_H` / 字号,差值
+        // 立刻变。上轮就是漏在这里:只卡「|偏心| ≤ 2」,而无头偏心恰好
+        // −0.5 恒绿,真机却是 −3。
+        //
+        // 阈值 1px:当前无头实测 5.0(即 margin(top=6) 的效果),实测抖动
+        // ≤0.5px;真机目标是对称(差 0),无头基线比真机大 5 —— 区间卡在
+        // 无头基线附近,任何让文字再上/下移的改动都会跑出区间。
+        const PAD_DIFF_BASE: f32 = 5.0;
+        assert!(
+            (pad_top - pad_bottom - PAD_DIFF_BASE).abs() <= MAX_PAD_DIFF,
+            "输入框上−下留白 = {:.1}px(上 {pad_top:.1} / 下 {pad_bottom:.1}),\
+             偏离基线 {PAD_DIFF_BASE}px 超过 {MAX_PAD_DIFF}px —— \
+             DIALOG_TEXT_DY / DIALOG_INPUT_H / 字号 任一被改都会跑出区间",
+            pad_top - pad_bottom
         );
     }
 
