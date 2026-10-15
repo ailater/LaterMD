@@ -105,11 +105,11 @@ fn ui(&mut self, ui: &mut egui::Ui, frame: &mut Frame);
 >
 > | 序 | panel | 内容 | 理由（出处见规格） |
 > |---|---|---|---|
-> | 1 | `Panel::top("titlebar")` 36px | 自绘标题栏：文档名 + 右端七钮（┃左 / ┃右 / ⦿禅定 / ⚙设置 / ─ / ⤢ / ✕） | D1 无边框自绘；仅默认无边框模式画，`LATERMD_NATIVE_DECORATIONS=1` 时整条不渲染 |
+> | 1 | `Panel::top("titlebar")` 36px | 自绘标题栏：文档名 + 右端六钮（┃左 / ⦿禅定 / ⚙设置 / ─ / ⤢ / ✕） | D1 无边框自绘；仅默认无边框模式画，`LATERMD_NATIVE_DECORATIONS=1` 时整条不渲染。**2026-10-15**：┃右 钮随右栏独立开关删除（live-unify P4），视图切换改由标题栏三段开关（写作/源码/分栏）+ 左端搜索胶囊承担 |
 > | 2 | `Panel::top("menubar")` | 菜单栏，全部命令的可发现性入口 | D2 保留独立菜单栏行 |
 > | 3 | `Panel::bottom("statusbar")` | 状态栏，**横跨全窗底部** | 必须在 nav/preview **之前**画：先画者占满全窗横向，后画只占中央残余区（`d797451` 修复，decisions-pending #31） |
 > | 4 | `Panel::left("nav")`（180..=400，`show_collapsible`） | 左栏三段式：顶动作行 / 视图导航 / ScrollArea 中段 | D3 单栏三段式；下限 160→180（R4） |
-> | 5 | `Panel::right("preview")`（260..=880，`show_collapsible`） | 只读预览 | `Panel::right` 必须先于 `CentralPanel`（先加的最外层） |
+> | 5 | `Panel::right(COMPARE_PANEL_ID)`（`PREVIEW_MIN_W..=preview_max`）——**仅分栏档出现** | 只读对照列，渲染 `live::ui` 的只读浏览态（同一份文档的 Live 富渲染） | `Panel::right` 必须先于 `CentralPanel`（先加的最外层）。**2026-10-15**：不再是带独立开合 bool 的「对照预览面板」，开合即 `render_mode == Split`；独立渲染链路 `ui::preview` 已删（live-unify P4/P5，AGENTS.md 铁律 4） |
 > | 6 | `CentralPanel` = 编辑器 | 标签条 / 提示行 / 格式工具条 / 源码编辑区 | 顺序铁律仍成立：`CentralPanel` 最后加，编辑器吃剩余宽度，左右开合只让中间伸缩。编辑器曾改用 `Panel::left("editor")`，致中央残余区无人认领出现第四条黑条，`d797451` 回归 `CentralPanel` |
 > | 7 | 浮层（`egui::Window`）与 `edge_resize_zones` | commit 建议 / 设置 / 回滚 / 关标签确认浮窗；四边四角 resize 命中区 | Area 层不参与 panel 嵌套；命中区必须**最后分配**（同层命中后分配者胜，见 `ui/titlebar.rs` 模块文档） |
 >

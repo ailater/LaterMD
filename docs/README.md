@@ -15,7 +15,7 @@
 | [vendor-upgrade-checklist.md](vendor-upgrade-checklist.md) | egui_markdown vendor 与升级操作清单 | **已执行**(2026-09-24 六项全绿) |
 | [m0-report.md](m0-report.md) | M0 技术验证结论（IME / 帧率 / 三 target 实测数据） | 已产出（Linux 项完成；IME 与 Win·mac wgpu 待真机） |
 | [p0-acceptance.md](p0-acceptance.md) | P0 四条验收标准的逐条状态、证据出处与出口待办 | 跟踪中（功能 10/11，剩打包首跑验证） |
-| [writing-source-modes.md](writing-source-modes.md) | 写作 / 源码 / 对照预览的关系、切换与布局恢复规则 | 已接受（2026-10-10） |
+| [writing-source-modes.md](writing-source-modes.md) | 写作 / 源码 / 分栏三态视图的关系、切换与布局恢复规则 | 已接受（2026-10-15 按三态重写） |
 | [ui-design.md](ui-design.md) | 界面设计规范：需求表达词库 + 实测诊断 + Design Token + 组件规范 | 已接受（roadmap 专题批次 B 的视觉细化） |
 | [ui-shell-redesign.md](ui-shell-redesign.md) | 外壳重构规格：自绘标题栏 + 三分栏重排 + 格式工具条 + 四种可见性（含禅定） | **待拍板**（D1–D5 五个决策点，2026-09-26） |
 | [image-plan.md](image-plan.md) | 图片插入与图床规划：图片框对话框（URL / 本地 / 上传）+ 自定义图床 + 新 crate `latermd-bed` | **待坤哥放行**（2026-09-27，A–D 四段共 4d） |

@@ -3,7 +3,7 @@
 > 自动开发循环遇到「本该问用户」的岔路口时，在这里登记：**岔路是什么、自动选了什么、为什么、想改怎么改**。
 > 选择由循环自行做出并继续执行，不阻塞；用户事后翻此文件，按「如何改」一节操作即可推翻。
 > #30 曾是「等待型」条目（改窗口形态本身，返工成本高），2026-09-26 用户放行后已按默认全部落地（M1–M4 合入 main）。
-> 编号 #145 为当前最新条目(2026-10-13 右键菜单批次 #143–#145;#142 为上一批)。历史遗留:#22/#30 各存在两条(2026-09-25/26 旧批次撞号,非 #66 引入;重编号牵连 auto-plan/README/commit 信息等跨文件引用,待专项处理)。跨分支预警(2026-10-09,#72 文档收尾记):孤儿 commit `0820817`(#70 落档,PR#146 合入后补推在 feature/titlebar-search-and-view-switch,未进 main)亦定义 #133/#134(#70 设置弹窗两条);本轮 #133/#134(#72 查找/跳转浮卡)已被 `crates/latermd-app/src/ui/layout.rs` 注释与 #135 引用,不动;该线内容将来搬运进 main 时须给其重编号(建议顺延 #136/#137)——已于 #70 收口移植(2026-10-09)执行:该线两条现编为 #136/#137(见下),撞号解除。
+> 编号 #153 为当前最新条目(2026-10-15 live-unify P6 批次 #149–#153;#146–#148 为 live-unify P1–P3 批次)。历史遗留:#22/#30 各存在两条(2026-09-25/26 旧批次撞号,非 #66 引入;重编号牵连 auto-plan/README/commit 信息等跨文件引用,待专项处理)。跨分支预警(2026-10-09,#72 文档收尾记):孤儿 commit `0820817`(#70 落档,PR#146 合入后补推在 feature/titlebar-search-and-view-switch,未进 main)亦定义 #133/#134(#70 设置弹窗两条);本轮 #133/#134(#72 查找/跳转浮卡)已被 `crates/latermd-app/src/ui/layout.rs` 注释与 #135 引用,不动;该线内容将来搬运进 main 时须给其重编号(建议顺延 #136/#137)——已于 #70 收口移植(2026-10-09)执行:该线两条现编为 #136/#137(见下),撞号解除。
 
 ## #142 minimap「全屏不可拖」是真缺陷,不是实例/面板问题:`jump_ratio` 的第一道闸门把「minimap 铺不满窄条」误判为「编辑器滚不动」,短文档在全屏下拖不动;#132 结论被取代(2026-10-09,#68 后续复核·自动拍板)
 
@@ -124,7 +124,7 @@
 - **为什么**:①加字段让「现状路径」与「grab 路径」在同一个 `match` 里相邻,`travel<=0`/`ve>=1` 的 `None` 判定只有一处,「`grab=None` 逐字节等价旧行为」才有可断言的同一份代码做对照物;新函数会把「两份 `None` 口径是否还一致」变成靠人记。②按下帧是唯一能读到「用户按下时看到的那帧阴影」的时机,而 egui 0.36 对 `click_and_drag` 没有单次 press response —— `is_pointer_button_down_on` 从 press 帧起为真,再叠当帧 `primary_pressed()` 即精确抓一次,比自己缓存 press 坐标便宜。③两个通道生命周期不同(jump 意图「消费即清」、grab 须在整段手势内常驻),硬合一会把「每帧重写」与「release 帧残留误读」两个风险同时背上;独立 temp 的代价只是多一个 `with("minimap-grab")` id。④`land` 的旧式不是观感问题而是**可累加的漂移**:同一 target 连落两帧实测 offset 1000→2000,必须先修再谈拖影。
 - **如何改**:①要退回「只有抓住框才能拖、其余一动不动」——删 press 帧的框内判定即可(grab 恒 `None` 即现状);要换成「按下后先拖过阈值才开始跟随」的语义——把 grab 的写入时机从 press 帧挪到首个 `dragged()` 帧并自行缓存 press 坐标。②grab 通道想合进 jump temp——改 `minimap::grab_id` / `jump_id` 两处的读写即可,但须同步改 `drag_stopped`/`clicked` 的清理时机。③press 帧信号想换实现——egui 后续若提供 press response,可整体替换掉叠加写法,改点只在 editor.rs 一处。④`land` 若改用别的 anchor(`Align::Center`/`BOTTOM`)——`repeated_click_from_nonzero_offset_does_not_accumulate` 的期望算法(与生产同源的 `jump_ratio` 独立算)要同步替换,否则容差失败会误导成「加加减减」而不是 anchor 改了。
 
-## #129 #67 M2 minimap 视图开关的四处口径:消息=**新增无参翻转 `Message::ToggleMinimap`** 而非复用带值 `ShowMinimapToggled(bool)`(与 `ToggleTypewriter` 同构——菜单/快捷键是翻转语义,现值在 State、`Command::message()` 无 state 访问拿不到,带值消息留给设置外观页复选框专用;归约同一字段 `theme.show_minimap` 同一 `persist_theme` 通路,**未造第二份状态**)、菜单位置=「视图」第一段 FocusModeToggle 之后、ToggleTheme 之前(编辑区呈现方式开关聚组:Live/打字机/专注/minimap 连排,主题互换收段尾;禅定仍独立第二段)、勾选态口径=**布偶开关才加 ✓**:侧边栏/预览栏/Live/打字机/专注/minimap/禅定七条从 `State` 单一事实源取真值(`toggle_checked`,菜单/设置页/标题栏钮同源),开=`✓ ` 前缀、关=两半角空格占位(开关条目间文字主体对齐;✓ 与空格字宽随字体略出入,观感留真机),「切换主题」是明暗互换非开/关(哪个算「开」无自然答案)不带勾选列,非开关命令一律无前缀;快捷键=Ctrl/Cmd+Alt+M(M=Minimap 词首,Ctrl/Cmd+Alt 层既有 C/W/D/R 之外 M 空闲,菜单标题助记集 F/E/O/V/X/A/S 不含 M,#121/#122/#127 同款避让;`conflict` 断言+真按键触发+标题审计三项实测绿)(2026-10-08,#67 menu-effect-audit M2·自动拍板)
+## #129 #67 M2 minimap 视图开关的四处口径:消息=**新增无参翻转 `Message::ToggleMinimap`** 而非复用带值 `ShowMinimapToggled(bool)`(与 `ToggleTypewriter` 同构——菜单/快捷键是翻转语义,现值在 State、`Command::message()` 无 state 访问拿不到,带值消息留给设置外观页复选框专用;归约同一字段 `theme.show_minimap` 同一 `persist_theme` 通路,**未造第二份状态**)、菜单位置=「视图」第一段 FocusModeToggle 之后、ToggleTheme 之前(编辑区呈现方式开关聚组:Live/打字机/专注/minimap 连排,主题互换收段尾;禅定仍独立第二段)、勾选态口径=**布偶开关才加 ✓**:**2026-10-15 后为六条**(侧边栏/切换视图/打字机/专注/minimap/禅定 —— 原「预览栏」一条随 `ToggleRightPreview` 删除,「Live」改由「切换视图」一条表达且勾选判据是 `render_mode == Live`,分栏档下不勾选)从 `State` 单一事实源取真值(`toggle_checked`,菜单/设置页/标题栏钮同源),开=`✓ ` 前缀、关=两半角空格占位(开关条目间文字主体对齐;✓ 与空格字宽随字体略出入,观感留真机),「切换主题」是明暗互换非开/关(哪个算「开」无自然答案)不带勾选列,非开关命令一律无前缀;快捷键=Ctrl/Cmd+Alt+M(M=Minimap 词首,Ctrl/Cmd+Alt 层既有 C/W/D 之外 M 空闲,菜单标题助记集 F/E/O/V/X/A/S 不含 M,#121/#122/#127 同款避让;`conflict` 断言+真按键触发+标题审计三项实测绿)(2026-10-08,#67 menu-effect-audit M2·自动拍板)
 
 - **岔路**:①翻转消息形态(新无参消息 vs 复用带值消息 vs 菜单层闭包读现值发带值消息);②菜单位置;③勾选态覆盖面(全部 Toggle 名命令 vs 仅布偶开关 vs 不加);④快捷键字母。
 - **备选**:①复用 `ShowMinimapToggled(bool)`(菜单绘制时从 state 读现值取反传入——菜单层就得读 State 且消息语义从「翻转」漂移成「设值」);②挂「编辑」或设置菜单(不对——group 归 View,`menu_placement_matches_command_group` 会红);③全部 Toggle* 命令加勾选(「切换主题」无 bool 语义,硬造勾选态误导);④Ctrl/Cmd+Alt+M 之外候选(纯 Alt+M 与标题助记层同命名空间,被审计否决;无 Alt 的 Ctrl+M 独占 M 键且偏离本组 Alt 层惯例)。
@@ -165,7 +165,7 @@
 - **为什么**:①M1 红线「vendor 零改动」——链接渠道 M2 只动 app 侧 `AiLinkHandler::layout_link`(实测对普通链接以非透明色调用,返回 true 即接管 section 样式,`TextFormat::background` 是 egui 标准字段);span 旁路要把字节区间映射进 vendored 的 galley section,必须 ①类;②高频形态 `==纯文本==`/`==😀==` 保住高亮,链接内 `==` 的误伤由豁免清单兜住(与 emoji 层对既有链接同一纪律);③无 flanking 的朴素配对会被 `== ==` 吞掉后续真配对的开标(`== == 与 ==真高亮==` 会高亮出「 与 」),flanking 是 markdown-it-mark 同族直觉,「闭标不回收」保证作废对不产生连锁误配;④实测 vendored `link_text` 取最后事件(覆盖语义),转义方括号救得了字面救不了多段丢字,作废最诚实;⑤链接文字本身就是高亮内容,载荷重复且引入编码约束,空载荷零解码;⑥M2 范围,M1 只把渠道与约束面探明并挂账。
 - **如何改**:①改 span 旁路——latermd-md 产区间表 + vendored ①类 hook(按区间拆 Text section 设 background),按 §6 独立 vendor: commit + 变更表;②改层序——`PreviewState::new` 与 `map_source_offset`/任务载荷逆穿的串行顺序同步换(消费点全部显式传表,编译器兜底);③改配对口径——`latermd_md::highlight_candidates` 的 flanking/定终两段;④放宽嵌套(允许强调类进高亮)——先给 vendored 链接文字扁平化补 ①类(聚合多个 Text/Code 事件再产出),或整体换 span 旁路;⑤改 scheme——`HIGHLIGHT_SCHEME` 常量与 app 侧前缀拦截(M2 落地处)同改;⑥底色值/`<mark>`/Live 接入在 #65 M2 内拍板,本条不预支。
 
-## #122 #64 M2 专注模式的八处口径:淡化范围=活动块+光标邻块(前后各一,abs_diff ≤1)保持全对比度、距离 ≥2 的非活动块淡化、无活动块(active=None,光标未落)时全部正常(专注的对象是「正在编辑的块」,无焦点无淡化,全淡化=整篇涂灰只剩干扰)、淡化档位=遮罩色 text_edit_bg_color × α110(残留 ≈57%,#81 内联标记遮罩同源;出厂明暗主题按 sRGB 逐通道混合×WCAG 相对亮度折算混后对比度 5.10/4.74:1,均 ≥ AA 正文线 4.5:1;不做用户可调,#81 同款规格口径)、无过渡动画(常量遮罩,#81 同款;crossfade 要给每块挂一个动画状态面,且关闭态零路径的否决线不允许任何动画簿记)、禅定模式下不生效(禅定正文是只读预览面板,draw_zen 走 ui::preview 无活动块概念;将来禅定若允许编辑再接入)、快捷键=Ctrl/Cmd+Alt+D(D=Dim,淡化非活动块;出厂表 Ctrl/Cmd+Alt 层只有 R/W,D 空闲;含 Alt 的绑定按保守口径避开菜单标题助记集 F/E/O/V/X/A/S,#62 口径 —— 首选 Ctrl/Cmd+Alt+F 因 Alt 裸 F=「文件」标题被 menubar 标题审计测试当场否决,审计工作正常;与 Ctrl/Cmd+D 复制选中只差一个 Alt,靠「修饰键个数降序」共存,同打字机之于关标签)、菜单归属=「视图」第一段(Live/打字机同段,同为编辑区呈现方式开关;条目层助记 F,该段 S/P/V/W/T/Z 未占)、源码模式不可达=如实记录(源码是单个 TextEdit,分段淡化没有纯绘制层落点,块级遮罩会盖住光标/选区,不硬做;开关在源码模式下无效果不报错;将来路径=自定义 Layouter 按 block 弱化非活动行,属 vendored/egui 层 ①类工程)(2026-10-07,#64 typewriter-focus M2·自动拍板)
+## #122 #64 M2 专注模式的八处口径:淡化范围=活动块+光标邻块(前后各一,abs_diff ≤1)保持全对比度、距离 ≥2 的非活动块淡化、无活动块(active=None,光标未落)时全部正常(专注的对象是「正在编辑的块」,无焦点无淡化,全淡化=整篇涂灰只剩干扰)、淡化档位=遮罩色 text_edit_bg_color × α110(残留 ≈57%,#81 内联标记遮罩同源;出厂明暗主题按 sRGB 逐通道混合×WCAG 相对亮度折算混后对比度 5.10/4.74:1,均 ≥ AA 正文线 4.5:1;不做用户可调,#81 同款规格口径)、无过渡动画(常量遮罩,#81 同款;crossfade 要给每块挂一个动画状态面,且关闭态零路径的否决线不允许任何动画簿记)、禅定模式下不生效(禅定正文是只读预览面板,draw_zen 走 ui::preview 无活动块概念;将来禅定若允许编辑再接入)、快捷键=Ctrl/Cmd+Alt+D(D=Dim,淡化非活动块;出厂表 Ctrl/Cmd+Alt 层**2026-10-15 后**只有 W,D 空闲 —— 原 R = ToggleRightPreview 已随该命令删除;含 Alt 的绑定按保守口径避开菜单标题助记集 F/E/O/V/X/A/S,#62 口径 —— 首选 Ctrl/Cmd+Alt+F 因 Alt 裸 F=「文件」标题被 menubar 标题审计测试当场否决,审计工作正常;与 Ctrl/Cmd+D 复制选中只差一个 Alt,靠「修饰键个数降序」共存,同打字机之于关标签)、菜单归属=「视图」第一段(Live/打字机同段,同为编辑区呈现方式开关;条目层助记 F,该段 S/P/V/W/T/Z 未占)、源码模式不可达=如实记录(源码是单个 TextEdit,分段淡化没有纯绘制层落点,块级遮罩会盖住光标/选区,不硬做;开关在源码模式下无效果不报错;将来路径=自定义 Layouter 按 block 弱化非活动行,属 vendored/egui 层 ①类工程)(2026-10-07,#64 typewriter-focus M2·自动拍板)
 
 - **岔路**:①淡化范围(只活动块 vs 活动块+邻块);②无活动块时的行为;③淡化档位(α 值、可读性下限、要不要用户可调);④要不要过渡动画;⑤禅定模式下的行为;⑥快捷键与 Alt 层避让;⑦菜单归属与条目助记;⑧源码模式的边界(任务书明文「不可达如实记录」)。
 
@@ -225,7 +225,7 @@
 - **理由**:①存量四入口(AiStart/ai:// 链接/摘要/commit)的回归面由「不挂字段 = 文档末」一个分支守住,关键回归测试全数保留并加否决线断言;②Live 块内→文档坐标的换算与光标回填同款(`byte_to_char(块基) + 块内字符偏移`,live.rs 光标回填先例),活动块是唯一可编辑块、块基不受本帧编辑影响,换算恒成立,且换算结果在无头测试里逐值断言(Live 选区 (2,6) → (9,13)/(13,9));③中止文案落**发起标签**(与 `AiFailed` 同定位),流式标志/指令卡状态键/绑定/插入点四处一并清,不会卡防重入;④补行使中点选区的最终形态是「前文 ⏎⏎AI⏎⏎后文」,heal/预览链路照既有通道显示(`streaming_here` 判定只看 `ai_active_tab`,不区分落点);⑤五条入口的 key 闸门与防重入语义不变(被拦连补行都不发生,与其它 AI 入口同一纪律)。
 - **如何改**:①要偏移进协议层——`latermd-ai::Chunk` 加 `at` 并让 app 归约消费,注意四家 provider 都要填默认;②要归约自读选区——先给 Live 模式补 `TabState::selection` 的文档坐标回填(需定义活动块选区与标签字段的同步时机),再让 `SelectionAiActionRequested` 退回单载荷;③要钳制口径——`append_ai_delta` 失配分支改为 `offset.min(len_chars())`(不建议:静默写错位置);④要不补行/只补一行——删 `start_selection_ai_continue` 的对应 `pad` 计算即可,矩阵是纯函数无隐藏耦合;⑤要无选区落提示——回退分支改置 `document.notice`。
 
-## #115 #61 M1 选中态 AI 浮标的五处口径:形态=chip+点开两行菜单(单自选)、拖拽判定以 ctx.dragged_id 为准(释放帧起算)、浮标/菜单行双 sense 压拖选榜、菜单外按下即合拢+失焦即隐靠 egui 失焦塌缩选区的结构性语义、交付面=源码+Live(右栏纯预览的选区在 vendored 标签层 app 读不到)(2026-10-06,#61 selection-ai-bar M1·自动拍板)
+## #115 #61 M1 选中态 AI 浮标的五处口径:形态=chip+点开两行菜单(单自选)、拖拽判定以 ctx.dragged_id 为准(释放帧起算)、浮标/菜单行双 sense 压拖选榜、菜单外按下即合拢+失焦即隐靠 egui 失焦塌缩选区的结构性语义、交付面=源码+Live(**2026-10-15 订正**:分栏档右栏是**只读**的 Live 实例,无选区;vendored 标签层 app 读不到选区,故浮标在右栏不出现 —— 这是只读的应有之义,不是缺口)(2026-10-06,#61 selection-ai-bar M1·自动拍板)
 
 - **岔路**:①浮标形态(任务书「浮出 AI 小标识;点开两动作(续写/润色,形态自选记录)」——单 chip 点开菜单 vs chip 直接并排两钮);②「拖拽进行中不弹(以指针释放帧起算,判定口径自选记录)」的机制口径(指针事件序列状态机 vs egui 拖拽状态);③命中区放同层末尾的 sense 选择(纯 click vs click_and_drag)——egui 0.36 hit_test 按 click/drag **分榜**裁决,单 click 的浮标赢了 click 榜仍把 drag 榜留给下面的 TextEdit;④菜单关闭时机(点动作即关/仅手动关)与「失焦即隐」的实现依赖(自己盯焦点 vs egui 失焦塌缩选区的既有语义);⑤交付面:右栏纯预览富渲染的文本选择(egui `LabelSelectionState`)能不能同享浮标(任务书点名「核验其无文本选择能力(现状),如实记录不伪造」)。
 - **备选**:①a 28×17 单 chip(「AI」)+点开两行菜单;①b chip 右侧直接并排「续写/润色」两钮(无二级)。②a `ctx.dragged_id()`(排除浮标自身)为准,释放帧 egui 已清空 dragged_id、浮标当帧即出;②b 自记「按下→移动→抬起」三态指针状态机。③a 双 sense(click_and_drag);③b 纯 click(实测按浮标塌缩选区,不可行);③c Foreground Area(13a 纪律禁止,不列入选型)。④a 菜单外按下即合拢+动作即关+浮标隐藏连带合拢;④b 仅显式关闭。⑤a 只做源码+Live,右栏如实登记不可达;⑤b 给 vendored label 的选区加偏移外泄(vendor ①类改造,越本模块授权)。
@@ -1112,7 +1112,7 @@
 
 ## #78 #42 M1 偏移→预览块位置通道选 vendor ①类而非 app-only(2026-10-03,#42 outline-preview-jump M1·自动拍板)
 
-- **岔路**:任务书给「vendor ①类(渲染时记录块 span→rect 表 + pub 查询)」与「app-only 替代方案」两条路,要求自选并记录理由。探测结论:vendored `render_token_range` 的块 widget 分支(表格/代码块/图片/引用/AI 指令卡)全部在 vendor 内部渲染,app 侧无任何挂载点能拿到它们的 rect(`code_block_buttons` 回调只有按钮行的 Ui,表格完全无回调);`section_anchors`(2026-09-26 已有)只在单 galley 路径有效,分段文档每 flush 覆盖写同一 data key 且 byte_start 是段内偏移——含表格/代码块的文档查表必错。app-only 不可达,通道必须开在 vendor。
+- **岔路**:任务书给「vendor ①类(渲染时记录块 span→rect 表 + pub 查询)」与「app-only 替代方案」两条路,要求自选并记录理由。**2026-10-15 订正**:本条原为「大纲跳预览」而做,预览面板已并入 Live 富渲染(live-unify P4/P5);块表现在由 `crate::live::ui` 消费(`live.rs:310` 与测试 `:5938`),三态视图下写作档正文与分栏档右栏共用同一条 vendor 通道。结论与理由不变。探测结论:vendored `render_token_range` 的块 widget 分支(表格/代码块/图片/引用/AI 指令卡)全部在 vendor 内部渲染,app 侧无任何挂载点能拿到它们的 rect(`code_block_buttons` 回调只有按钮行的 Ui,表格完全无回调);`section_anchors`(2026-09-26 已有)只在单 galley 路径有效,分段文档每 flush 覆盖写同一 data key 且 byte_start 是段内偏移——含表格/代码块的文档查表必错。app-only 不可达,通道必须开在 vendor。
 - **备选**:①vendor ①类块表(`BlockSpanRect` + `block_span_rects`/`block_rect_at_offset`,记录点覆盖 render_galley 细块/块 widget 粗块/flush culling 粗块);②app-only 探针(照 `copy_button_rects` 手法在可挂载的回调里记 rect)——只能覆盖代码块按钮行,表格/图片/引用全盲,否决;③修旧 `section_anchors`(分段聚合 + 块 widget 补锚)——行级锚点模型(单 y、无 span)承载不了「块内偏移归属/间隙归后续块」的查询语义,改造量等于重写。
 - **自动选择**:①。
 - **理由**:块 widget 几何只有渲染它的那一层知道,①是唯一完整覆盖;帧号键控的表(首写重置 + 跨帧读 None)天然满足「查询结果随缓存失效」——屏幕坐标过期即不可用,文档变更随重渲染同帧重建;①类按上游 CONTRIBUTING 标准(纯新增 API + 独立测试 + 不动既有渲染路径),`vendor/egui_markdown/check.sh` 六项全绿,可 cherry-pick。实现中推翻了一个直觉方案:`section_to_token` 不能反查行 y——epaint `LayoutJob::append` 会合并同格式相邻 section(text_layout_types.rs:205-213),两序列索引不平行;改用块首文本在 job.text 单调正向查找 + `Galley::pos_from_cursor(prefer_next_row)` 定位(O(doc) 单遍,测试钉死单调性)。
@@ -1126,6 +1126,12 @@
 - **理由**:按任务书字面直译;「一次到位」排除动画(平滑滚动在长文档里目标是屏外千行级距离,动画观感是「飞过半个文档」,编辑器内跳转同类场景也是瞬达);跳转目标是大纲点击的标题,居中让标题上下文(前后文)同时可见,长文档跳到底部标题时 TOP 会让目标贴顶失去「到了哪」的参照。端到端测试 `outline_jump_actually_scrolls_preview` 断言滚动真实发生(这是用户反馈「目前就源码跳转了」的回归锁:旧实现的 scroll_to_rect 写在 ScrollArea 闭包外,pass_state 滚动目标在下一帧 begin_pass 被清空,永不消费——egui 0.36 `PassState::begin_pass` 实读 + 双向对照实验实锤)。
 - **如何改**:想改回顶部对齐或平滑滚动,只动 `crates/latermd-app/src/ui/preview.rs` 消费段的 `Align::Center`/`ScrollAnimation::none()` 两个实参;真机目视若觉居中跳动大,改 `Align::TOP` 一处即可。
 
+> **2026-10-15 订正(载体迁移,live-unify P5)**:上述「如何改」里的 `ui/preview.rs` 已随
+> `ui::preview` 整模块删除而不存在。该语义的现载体是 **Live 富渲染**(`crate::live::ui`:
+> 写作档正文本身,以及分栏档右栏那一份只读实例),消费段在 `live.rs`(`ScrollProbe` /
+> `scroll_probe_id`,预览侧那套 `ScrollProbe`/`map_source_offset` 已删)。跳转语义本身
+> (Center + 无动画)不变,但**浏览态与禅定下只滚不进编辑**由 #148 的 `browse_locked` 决定。
+
 ## #80 #42 M2 预览面板收起期间的大纲跳转请求取「悬置,重开补跳」而非「即弃」(2026-10-03,#42 outline-preview-jump M2·自动拍板)
 
 - **岔路**:右栏收起时点大纲(左栏大纲仍可见,这是真实路径),预览侧请求(`PreviewState::scroll_target`)怎么处置:①悬置——重开面板的第一帧消费并补跳到目标;②即弃——面板不可见就当请求作废,重开停在原地。任务书只写了「预览面板不可见时消费请求无 panic」,没有给可见性语义,两条都不与之冲突。
@@ -1133,6 +1139,12 @@
 - **自动选择**:①(即现状 ③的并集)。
 - **理由**:用户点大纲的意图是「带我去那」,面板当时看不见不等于意图消失,重开补跳最贴近意图;文档变更后旧偏移对新文本无意义,rebuild 丢弃兜住「补跳跳错文本」的风险;①不新增任何生产代码,也不把可见性判断漏进归约。落档测试 `outline_click_with_preview_collapsed_pending_then_dropped_after_edit`(完整 draw 路径:悬置→重开补跳→收起→变更→丢弃→重开不复燃)。
 - **如何改**:想改成「即弃」,在 `Message::RightPanelToggled(false)` 的归约里加一行清 `scroll_target`(归约本来就知道面板开关),并把 layout 测试第一段「重开消费」的断言翻转为「重开仍在原地」;悬置语义的文档口径在 `state.rs` 的 `scroll_target` 字段注释,同步改。
+
+> **2026-10-15 整条作废(live-unify P5)**:`ui::preview` 与 `PreviewState::scroll_target`、
+> `ScrollProbe` 已全部删除,「面板收起期间悬置」这个问题连同它的载体一起消失 —— 三态视图下
+> 右栏不是可独立收起的面板,而是分栏档本身;大纲跳转统一走 Live 的 `cursor.jump_to` 通道
+> (#148 定了浏览态/禅定下只滚不进编辑)。本条留档作历史记录,不再指导任何代码。
+> 同批作废的还有本条落档那两条测试(`outline_click_with_preview_collapsed_*`)。
 
 ## #81 LP2-1 半隐藏的显形口径与弱化档位:caret 紧邻即显形 + text_edit 背景色 α0.65 常量,块级标记不弱化(2026-10-03,#14 lp-v2 LP2-1·自动拍板)
 
@@ -1266,3 +1278,42 @@
 - **理由**:`browse_only` 的语义是「还没开始写」的软状态(任何写入意图都能翻转它),`browse_locked` 是「这个视图不提供写入」的硬约束 —— 两者不是同一维度的取值,塞进一个枚举会让 `sync`/`reset`/`activate` 每处都要重判;分开后顺手解决了禅定的兄弟问题(帧垃圾回收:cursor.byte / active / pending 一律清空,不与 State 交互)。
 - **关联修正(同一轮实测)**:禅定 CentralPanel 的 Live `ScrollArea`(`auto_shrink([false,false])`)会把父 Ui 的矩形向下撑约 2px,导致其后 `ui::zen_nav` 读到的根 Ui `max_rect()` 越过窗口底缘 —— 两条既有禅定测试(`zen_hover_nav_*`)因此几何漂移而红。处置:正文改走固定矩形的 `new_child`(高度增长留在子 Ui 内,不向上传播),横向限宽仍靠 `vertical_centered` + `set_max_width`。
 - **如何改**:要让禅定也能进编辑 —— 删 `draw_zen` 的 `tab.live.browse_locked = true;`(连同 R3 守门 `zen_frame_never_mutates_*` 里「不产活动块」那条断言);要让 goto 在禅定里也落点 —— 在 `live::ui` 的 `jump_to` 分支把 `browse_locked` 与 `browse_only` 合并判定。
+
+## #149 三态互斥:右栏的开合就是 `render_mode` 本身,不再有独立开合 bool 与「离开写作时右栏该不该回来」的快照补工(live-unify P4 + 三态回归 #250/#252,2026-10-15)
+
+- **岔路**:右栏对照列回归后,它的开合状态挂在哪 —— ①回到 live-unify P4 删掉的那套(`layout.right: bool` + `right_width` + `pre_live_right` 快照);②并入 `render_mode` 成为第三档(`RenderMode::Split`),三档互斥;③保留一个「上次的右栏开关」只用于写作档回来时还原。
+- **备选**:①旧三件套(Live 与右栏可同时存在,于是必须有「进写作强制收右栏」和「切回源码恢复上次开关」两条补工 —— 这正是 P4 净删 945 行的主体);②三态互斥;③中间态。
+- **选择**:②。`RenderMode::{Source, Live, Split}` + `cycle()` 一条循环;持久化只有 `layout.render_mode: Option<RenderMode>` 一个字段(宽度另存 `live_right_width`,新名天然零迁移)。删掉的有:`layout.right` / `right_width` / `pre_live_right`、`Command::ToggleRightPreview`(`Command::ALL` 44→43)、`Message::RightPanelToggled`、`State::toggle_right_panel`、`TitleButton::PanelRight`(标题栏按钮 7→6)、`ui::preview` 整模块。
+- **理由**:「写作与右栏同时存在」这件事本身没有用户价值 —— 两者从不同屏,写的时候不看对照、看对照的时候不写。①的全部复杂度都来自为这个不存在的组合做快照补工。②把「右栏开不开」降维成「当前是第几档」,补工整条消失;代价是「从分栏回写作再回分栏」不记忆中间态,而这个序列本来就是连点循环开关的自然结果。
+- **如何改**:要恢复「写作档同时开着右栏」——`RenderMode` 加回一个独立 `compare: bool` 字段并重建快照补工(不建议,等于推翻 live-unify 的第一性动因);只想调循环顺序 —— 改 `RenderMode::cycle()` 的三行 match 与标题栏三段数组的顺序(两处必须同步,顺序即循环序)。
+
+## #150 分栏右栏只读:每帧置位的 UI 侧硬锁(`browse_locked`),不写回 State(#250/#252,2026-10-15,与 #148 同族)
+
+- **岔路**:右栏用哪份状态渲染、怎么保证它只读 —— ①复用写作档那份 `TabState::live`(省一份状态,但两块实例会抢 `browse_only`/`active`/`pending_caret` 同一组槽);②独立 `TabState::live_right`,只读靠每帧置位(与禅定浏览态同款);③独立实例 + 只读做成 `live::ui` 的新参数。
+- **备选**:①共用;②独立实例 + 每帧置位(本条选定);③新参数。
+- **选择**:②。右栏帧内每帧置 `browse_only=true` + `browse_enabled=false` + `browse_locked=true` + `active=None`;只读列不回写共享的 `cursor` / `selection`(用局部占位接住,否则会和源码侧抢这两个每帧镜像的槽)。`ScrollArea` 的 id 与块 widget id 命名空间参数化(PR1),两块各序 0 不相撞。
+- **理由**:①会真的坏 —— 右栏每帧置浏览态会把写作档正在编辑的活动块清掉(两块共用一组字段),这是「两块渲染同一份文档」的直接后果。③要给 `live::ui` 加形参而它已经 14 参;每帧置位是禅定那条路径已经验证过的手法(「硬锁不写回 State,退出即还原」),不新增机制。
+- **如何改**:要让右栏可编辑 —— 删 `tab.live_right.browse_locked = true;` 一行并让它的 `cursor`/`selection` 接回真槽(注意此时与源码侧抢槽的问题必须一并解决,不是删一行就完事);要让右栏不被 git diff 审阅挤掉 —— 改 `if split && !git_diff_workspace` 的合取条件。
+
+## #151 右栏「跟随一次」:源码侧光标移动才下滚动目标,消费后即清(#250/#252,2026-10-15)
+
+- **岔路**:分栏档下右栏要不要持续跟随源码光标 —— ①持续跟随(每次光标动右栏就滚);②跟随一次(光标移动下一颗滚动目标,落到目标帧消费后即清,此后右栏保留自己的滚动位置);③不跟随(右栏停在顶部,纯靠用户自己翻)。
+- **备选**:①持续跟随;②跟随一次(本条选定);③不跟随。
+- **选择**:②。`followed_byte` 记「上次已跟随过的光标字节」,只有它与当前 `cursor.byte` 不等时才 `sync` + 置 `pending_caret` + `caret_follow=true`;目标被消费后不再重下,直到光标再次移动。
+- **理由**:①会让右栏在编辑时不停跳动,而「对照」的用途恰恰是要能**停在别处**跟源码比较 —— 持续跟随把右栏变成源码的镜像,分栏就失去意义。③则丢失「点大纲/光标移动 → 右栏跟到同一处」这个最自然的预期。②的语义是「把两边对齐一次,然后放手」,正好是「跟随」这个词在编辑器里的通常含义(VS Code 的 markdown 预览同步同款)。
+- **如何改**:要改成持续跟随 —— 删 `followed_byte` 判等那层,每帧按光标 sync;要改成不跟随 —— 把整段 `if tab.live_right.followed_byte != cursor_byte {..}` 删掉(右栏仍随文档编辑重渲染,只是不滚)。
+
+## #152 对照列左缘分隔线回归:走 `panel_divider` 统一入口,画在全部 panel 之后(#252,2026-10-15)
+
+- **岔路**:右栏回归后左缘那条线怎么画 —— ①用 `Panel::show_separator_line(true)`(egui 内建);②自绘,复用 `workbench::panel_divider`(侧栏/其他面板同一个入口);③`Frame::stroke`。
+- **备选**:①内建;②自绘 + 统一入口(本条选定);③Frame 描边。
+- **选择**:②。`show_separator_line(false)`(内建线在 hover/drag 时才出现,不是常显),改由 `panel_divider(ui, COMPARE_PANEL_ID, split)` 在**全部 panel 之后**用 `layer_painter` 单画一根线;面板 `Frame::stroke` 置 `Stroke::NONE`(它是四边描边,会把顶/右/底也描上)。Git diff 审阅帧没有对照列,跳过画线 —— 否则 `PanelState` 里残留的上一次矩形会把线画进 diff 区。
+- **理由**:这条线的边界取法三段递降(拖动中取 `interact_pointer_pos()` / 空闲取 `PanelState` / 都不成不画)是 2026-10-13 坤哥「线不跟着我拉的框走」反馈后实测逼出来的,`panel_divider` 是它的唯一实现;新面板复用它等于免费继承那套结论。它画在 `layer_painter` 上,与 egui 自带 hover/drag 高亮线(画在 `parent_ui.painter()`,本层之下)**并存且不冲突** —— 后者只在交互时出现,视觉上是「常显线变粗」。
+- **如何改**:要改回内建线 —— `show_separator_line(true)` 并删 `panel_divider` 调用(代价:线只在 hover/drag 时出现,不常显);要改线的粗细/颜色 —— 动 `workbench::panel_divider` 内部(注意它服务多个面板,改的是全部)。
+
+## #153 R2 挂账:Live 块级 label 的 widget id 含块序号,敲回车分裂块即平移 → vendored 缓存 miss(后续性能项,本次不解决,2026-10-15 登记)
+
+- **岔路**:块级渲染的 widget id 用 `("live-render", index)` 还是按块内容/块首偏移派生。前者在插入块(敲回车)时**后面所有块的序号都 +1**,id 全变,vendored 的布局/高亮缓存整片失效。
+- **现状**:保持含序号的写法,不在 live-unify 内解决。删掉右栏后渲染粒度只剩块级一种,**没有第二条路径可以对照**,因此这条不影响「两栏观感不一致」这个重构目标;它只是一项独立的性能优化。
+- **备选**:①按块首字节偏移派生 id(插入块不影响已有块的偏移 → 缓存保留;代价是块内编辑导致块首偏移变化仍会 miss,且块表重建时机要重新界定);②按块内容哈希(最稳,但要每块算一次哈希,且内容改动本就该 miss);③保持现状。
+- **如何做**:真要动 —— 在 `live.rs` 构造 label id 处把 `index` 换成块首偏移(或内容哈希),并给「连续敲回车 N 次后首切耗时不增长」补一条 perf 性质测试(`ui/tab_switch_perf.rs` 同款 harness)。**先量化再动**:目前的 miss 代价没有被测量过,别凭直觉认定它是瓶颈。

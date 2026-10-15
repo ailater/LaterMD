@@ -112,10 +112,15 @@
 
 ## 4. ④ 三分栏的 Panel 排布
 
-**改成** `Panel::left("nav")` → `Panel::right("preview")` → `CentralPanel`（编辑器）。
+**改成** `Panel::left("nav")` → `Panel::right(COMPARE_PANEL_ID)` → `CentralPanel`（编辑器）。
 
 > 顺序铁律（AGENTS/adr-005 §3.2）不变：先加的最外层，`CentralPanel` 必须最后。
 > 编辑器进 `CentralPanel` 才是「吃掉剩余宽度」的那个 —— 中间栏理当随左右开关伸缩。
+>
+> **2026-10-15 三态视图后记**：右栏不再是「可独立开关的对照预览面板」，而是三态视图的
+> **分栏档**（`render_mode == RenderMode::Split`）—— 三档互斥，右栏的开合就是 `render_mode`
+> 本身，没有额外的开合 bool。它渲染的是 **Live 富渲染本身**（`crate::live::ui`），只读呈现。
+> 独立的 `ui::preview` 渲染链路已随 live-unify P4/P5 删除（AGENTS.md 铁律 4）。
 
 ```rust
 // ui/layout.rs :: draw
@@ -127,11 +132,15 @@ egui::Panel::left("nav")
     .resizable(true).default_size(240.0).size_range(180.0..=420.0)
     .show_collapsible(ui, &mut layout.left, |ui| ui::sidebar::ui(...));  // §5
 
-egui::Panel::right("preview")
-    .resizable(true).default_size(420.0).size_range(260.0..=880.0)
-    .frame(Frame::default().inner_margin(Margin::same(8))
-                           .fill(theme::content_fill(ui.visuals().dark_mode)))
-    .show_collapsible(ui, &mut layout.right, |ui| ui::preview::ui(...));
+// 只在分栏档出现(且审阅 Git diff 工作区时让位);渲染 live::ui 的只读浏览态
+if split && !git_diff_workspace {
+    egui::Panel::right(COMPARE_PANEL_ID)
+        .resizable(true).show_separator_line(false)
+        .size_range(tokens::PREVIEW_MIN_W..=preview_max)   // 左缘分隔线走自绘
+        .frame(Frame::default().inner_margin(Margin::symmetric(8, 8))
+                               .fill(theme::shell(ui).content).stroke(Stroke::NONE))
+        .show(ui, |ui| crate::live::ui(.., &mut tab.live_right, ..));
+}
 
 egui::CentralPanel::default()
     .frame(Frame::default().fill(theme::content_fill(ui.visuals().dark_mode)))
@@ -201,7 +210,8 @@ ScrollArea::vertical()
 > 其余用自绘线段，遵守 ui-polish §1.1「图标是矢量自绘，不是字体字符」。
 
 **新增 `Icon` 变体**（`ui/icons.rs`，全部线段/矩形自绘）：
-`Minimize` `Maximize` `Restore` `Close` `PanelLeft` `PanelRight` `Zen`
+`Minimize` `Maximize` `Restore` `Close` `PanelLeft` `Zen`
+（无 `PanelRight` —— 右栏开合已并入三态视图的分栏档，独立开关与按钮随 live-unify P4 删除）
 `Link` `CodeInline` `Quote` `CodeBlock` `Divider` `Table` `BulletList` `OrderedList` `TaskList`。
 
 ### 6.2 新的业务逻辑层 `crates/latermd-app/src/compose.rs`（纯函数 + 单测）
@@ -244,7 +254,7 @@ pub fn apply(action: FormatAction, text: &str, sel: Range<usize>) -> (String, Ra
 | `format_task` | `Cmd/Ctrl+Shift+9` | |
 | `format_quote` | `Cmd/Ctrl+Shift+.` | |
 | `format_code_block` | `Cmd/Ctrl+Shift+C` | |
-| `toggle_right_preview` | `Cmd/Ctrl+Alt+R` | |
+| `toggle_live_preview` | `Cmd/Ctrl+/` | 三态循环：源码 → 写作 → 分栏 → 源码（原 `toggle_right_preview` 的 `Cmd/Ctrl+Alt+R` 已随该命令删除） |
 | `toggle_zen` | `F11` | `Shortcut::bindable` 允许无修饰的 F1-F12 ✅ |
 
 `format_*` 全部**不绑**工具栏口诀外的 menu 项（工具条 + 快捷键两处入口足够，
@@ -295,6 +305,12 @@ pub struct LayoutState {
 ---
 
 ## 8. ⑥ 右预览只读 + 可视化编辑的接入点（D5，本轮不实现）
+
+> **2026-10-15 三态视图后记**：本节原写的「`ui/preview.rs` 右预览面板」已不存在。只读对照现在是
+> **分栏档右栏**，渲染 `crate::live::ui` 的只读浏览态：每帧置 `browse_only + !browse_enabled +
+> browse_locked`（点击/双击/跳转都不进编辑、不抢焦点），**不写回 State**，与禅定浏览态同款手法。
+> 它跟随光标滚动**一次**（源码侧光标移动才下滚动目标，消费后即清），之后保留自己的滚动位置。
+> `ui::preview` 模块与其整条渲染链路已删（live-unify P4/P5）。
 
 - **只读**已经是现状：vendored `MarkdownLabel` 是纯渲染 widget，无编辑可能。本轮只补一条**显式语义**：
   把「预览只读」写进 `ui/preview.rs` 的模块文档，并把粘贴/输入事件在预览区…不需要额外拦截（控件是无感的）。
@@ -351,7 +367,7 @@ pub struct LayoutSettings {
 |---|---|---|
 | `TITLEBAR_H` | 36.0 | 自绘标题栏 |
 | `SIDEBAR_MIN_W` | 180.0 | 左栏下限（R4） |
-| `PREVIEW_DEFAULT_W` | 420.0 | 右预览初始宽 |
+| `PREVIEW_DEFAULT_W` | 420.0 | 分栏档右栏（只读对照列）初始宽 |
 | `FORMAT_BAR_H` | 30.0 | 格式工具条 |
 | `NAV_ROW_H` | 26.0 | 左栏导航行高 |
 | ~~`NAV_BOTTOM_H`~~ | ~~28.0~~ | 已随底段设置行撤销删除（2026-09-27，decisions-pending #31） |

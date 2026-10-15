@@ -1,7 +1,9 @@
 # 右栏对照预览退役：能力并入 Live 写作渲染
 
-> 状态：**待放行**（2026-10-14 定稿，尚未开工）
-> 目标：把右栏「对照预览」的独有能力补齐进 Live 写作渲染，然后**彻底删除右栏预览面板**，全项目只剩一条富渲染路径。
+> 状态：**P0–P6 全部完成**（2026-10-15；目标句按下文「三态回归」补充订正）
+> 目标：把右栏「对照预览」的独有能力补齐进 Live 写作渲染，然后**彻底删除右栏的第二条渲染链路**，全项目只剩一条富渲染路径。
+> **订正（2026-10-15）**：右栏面板以「三态视图的分栏档」形式回归（#250/#252），渲染的仍是 **Live 富渲染本身**（只读），
+> 故 P4 删掉的「第二条渲染链路」这个事实没有被推翻；本轮 P6 的文档一律按此口径书写。
 > 行号均为定稿时的快照，执行时以 grep 复核为准。
 
 ## 阶段进度
@@ -14,7 +16,7 @@
 | P3 | 禅定切到 Live 浏览态 | 完成 | 2026-10-15 | [#241](https://github.com/ailater/LaterMd/pull/241) |
 | P4 | 删右栏（面板 / 布局状态 / 命令 / 入口 / 常量） | 完成 | 2026-10-15 | [#242](https://github.com/ailater/LaterMd/pull/242) |
 | P5 | 测试迁移 + PreviewState 瘦身 | 完成 | 2026-10-15 | [#243](https://github.com/ailater/LaterMd/pull/243) |
-| P6 | 文档与 CHANGELOG | 未开始 | | |
+| P6 | 文档与 CHANGELOG | 完成 | 2026-10-15 | (本轮) |
 
 ### 执行备注(每次推进一步时在此登记,供下一轮接手)
 
@@ -38,6 +40,10 @@
 
 - **P5 已落地(净删 3277 行)**:`PreviewState` 只剩 `text`/`synced_rev`/`outline`(`new()` 不再做五层改写),`ui::preview` 整模块删除。迁移存留 5 条测试:相对图片改写 4 条 → `ui::rich_widgets`(`image_rewrites` + `OffsetMap::apply`,即 Live 第 5 层的实际写法),`is_openable_href` 判定矩阵 → `ui::ai_card`。**决策 #80(面板收起期间跳转悬置)随 `scroll_target` 一并作废**,P6 必须清档(decisions-pending 那条 + roadmap 提及)。
 - **P6 开工注意**:①代码侧到此全部完成,剩文档与 CHANGELOG;②本模块 doc 死链已在 P5 清(5 处),P6 改文档时若再删符号须同步 `cargo doc`;③`docs/decisions-pending.md` 待处理条目:#80(作废)、#78/#79(重写为 Live 通道)、#115(交付面删右栏)、#121/#122/#129(Alt 系七条变六条),另需把 #147(D1)/#148(D2)两位 newcomer 与现有体系串起来;④R2(id 含块序号的缓存抖动)仍未解决,登记进 decisions-pending 作为后续性能项。
+
+- **P6 已落地(纯文档,零代码改动)**:口径按上一条「三态重述」执行 —— 不再写「对照预览已退役」,一律写「对照预览 = 三态视图的分栏档(只读 Live 渲染)」。①`docs/writing-source-modes.md` 整篇重写(三档关系表 + 互斥/循环/持久化/只读/跟随一次/禅定六组规则 + 验证范围);②`AGENTS.md` 铁律三→**四**,新增「单一富渲染路径」(把 P4 删第二条渲染链路的成果固化成约束力);③`README.md` / `docs/README.md` 入口描述改三态;④`CHANGELOG.md` 新增 `## Unreleased` 小节(三态 + 能力并入 + 命令精简 + 瘦身);⑤`docs/menu-coverage.md` 删 `ToggleRightPreview` 行 + 「视图三条」改两条 + Alt 系七条改六条;⑥`docs/ui-shell-redesign.md`(Panel 排布代码块改 `COMPARE_PANEL_ID` 条件式 + 图标表删 `PanelRight` + 键位表 `toggle_right_preview`→`toggle_live_preview` + §8 右预览节加后记 + token 用途改写);⑦`docs/adr-005-layout-and-sidebar.md`(面板顺序表第 1/5 行改六钮与仅分栏档);⑧`docs/roadmap.md` 两处三栏/双栏口径加订正行;⑨`docs/m5-acceptance.md` P4 后记补「三态回归 ≠ PanelRight 回归」;⑩`docs/image-plan.md` / `docs/emoji-plan.md` 把「`ui/preview.rs` / `preview.rendered`」的口径换成 Live 富渲染块(`rich_block_with_base` 第 5 层 / 第 3 层),并订正「Live 维持黑白 emoji」这句已被 P1/P2 推翻的旧结论;⑪`docs/ui-polish.md`(token 用途 + ASCII 图 + `ai_link_color` 宿主改 `ui::ai_card`);⑫`docs/preview-typography-and-keymap-plan.md` 键位表删行 + 加订正;⑬`docs/auto-plan.md` 加后记说明历史行里的 `ToggleRightPreview` 与「Alt 系七条」是当时事实。**decisions-pending.md**:#78/#79 加「载体迁到 Live」订正、#80 整条作废、`#115` 交付面改「右栏只读无选区」、`#121/#122/#129` 的 Alt 层枚举去掉 R、勾选态七条改六条(预览栏→切换视图),并新增 **#149(三态互斥)/ #150(右栏只读硬锁)/ #151(跟随一次)/ #152(分隔线走 `panel_divider` 统一入口)/ #153(R2 缓存抖动挂账)** 五条。
+- **P6 未做(如实登记)**:`docs/ui-design.md` 与 `docs/ui-shell-redesign-v2.md` 里的「预览」字样是**当时截图取证与设计规范**的历史记录(三态下右栏仍在、分区配色口径不变),改写只会伪造历史,**未动**;两份文档若将来重写需按三态口径重述。
+- **R1–R7 至此全部销账**(R1 P1 实测达标 / R2 转 #153 挂账 / R3 P3 守门测试 / R4 P1 入缓存键 / R5 P5 单独 PR / R6–R7 P4 裁定无副作用)。
 
 - **【补充 2026-10-15】右栏对照预览已按坤哥指令回归为「源码+对照」三态视图**(两个 PR,均非 vendor):[#250](https://github.com/ailater/LaterMd/pull/250) 让 `live::ui` 可被两列各自调用(`ScrollArea` id 参数化 + `TabState::live_right` 独立块状态与独立 id 命名空间),[#252](https://github.com/ailater/LaterMd/pull/252) 落三态(`RenderMode::Split` + `cycle()`、标题栏三段开关、右栏只读面板、现代版分隔线)。**右栏渲染的是 Live 富渲染本身**,不是另一套渲染器 —— P4 删掉的仍是「第二条渲染链路」这个事实本身,本次回归没有重新引入它。P6 的文档清单因此要改写:不再写「对照预览已退役」,改为「对照预览 = 三态视图的分栏档(只读 Live 渲染)」;decisions-pending 里与右栏相关的条目(#78/#79/#80/#115/#121/#122/#129)按三态重述,并新增三态视图的决策条目(互斥三态 / 右栏只读 / 跟随一次 / 分隔线回归)。
 
