@@ -21,16 +21,16 @@ use serde::{Deserialize, Serialize};
 /// 持久化文件名,与 `settings.json` 同目录。
 const SETTINGS_FILE: &str = "layout.json";
 
-/// 进入禅定前的面板快照 `(left, right)`;退出时逐项还原(§7)。
+/// 进入禅定前的面板快照(左栏开合);退出时还原(§7)。
 ///
-/// 规格 §7 写的是三元组 `(left, right, editor_hidden)`,这里是二元组:
-/// `editor_hidden` 在禅定下恒 `true`(**藏编辑器就是禅定的定义 itself**),
-/// 把常量写进存档会在每次读它时都骗人一次。将来若真出现「禅定但仍露源码」
-/// 的变体,扩成三元组比现在留一个假字段便宜。
+/// 规格 §7 原写三元组 `(left, right, editor_hidden)`;右栏对照预览退役
+/// (live-unify-plan P4)后只剩左栏一元,`editor_hidden` 在禅定下恒 `true`
+/// (**藏编辑器就是禅定的定义 itself**),把常量写进存档会在每次读它时都
+/// 骗人一次,不留假字段。
 ///
-/// **只快照左右两栏而不是整个 `LayoutSettings`**:多记一个字段就多一条
-/// 「进/出漏抄某一项」的路,而禅定只改这两项。
-pub type PreZen = Option<(bool, bool)>;
+/// **只快照面板开合而不是整个 `LayoutSettings`**:多记一个字段就多一条
+/// 「进/出漏抄某一项」的路。
+pub type PreZen = Option<bool>;
 
 /// 持久化的外壳布局。字段各自直接喂给 UI,不额外镜像。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,14 +38,12 @@ pub type PreZen = Option<(bool, bool)>;
 pub struct LayoutSettings {
     /// 左栏(导航)是否展开。
     pub left: bool,
-    /// 右栏(预览)是否展开。
-    pub right: bool,
     /// 上次主动选择的编辑模式；旧配置/首次启动进入写作。
     pub render_mode: Option<crate::live::RenderMode>,
     /// 禅定模式(§7):三栏让位、预览占满内容区。
     ///
     /// **`skip`(读写两端都跳过)而不是 `default`**:它是**当前会话的临时
-    /// 沉浸态**,不是像 left/right 那样的长期布局偏好。跨会话保留会让下次
+    /// 沉浸态**,不是像 left 那样的长期布局偏好。跨会话保留会让下次
     /// 启动的窗口在用户没要求的情况下直接进入禅定,而配套的 `pre_zen` 快照
     /// 按同一口径不落盘 —— 那次会话里退出禅定只剩「一律全开」这一条兜底,
     /// 用户被静默改了布局还回不到原样。
@@ -59,21 +57,15 @@ pub struct LayoutSettings {
     /// 进入禅定前的面板快照(§7)。同上口径:`skip`,不落盘。
     #[serde(skip)]
     pub pre_zen: PreZen,
-    /// 进入 Live 前的预览栏状态；Live 默认收起预览，切回源码时恢复。
-    #[serde(skip)]
-    pub pre_live_right: Option<bool>,
     /// 上次退出时窗口是否最大化(2026-09-29 坤哥指令「记住上次是全屏还是
     /// 窗口」)。字段级 `default`:旧 layout.json 没有它,缺项回落 false
-    /// 而不是整表 Corrupt 丢弃 left/right。
+    /// 而不是整表 Corrupt 丢弃 left。
     #[serde(default)]
     pub maximized: bool,
     /// 左栏(导航)宽度。`None` = 从未拖过,用 egui 默认。恢复走首帧前
     /// `insert_persisted` 塞 PanelState(egui 的 store 是私有的)。
     #[serde(default)]
     pub left_width: Option<f32>,
-    /// 右栏(预览)宽度,同上。
-    #[serde(default)]
-    pub right_width: Option<f32>,
 }
 
 /// 出厂布局:三栏全开(旧行为),停文件树。
@@ -81,24 +73,20 @@ impl Default for LayoutSettings {
     fn default() -> Self {
         Self {
             left: true,
-            right: true,
             render_mode: None,
             zen: false,
             left_view: SidebarTab::Files,
             pre_zen: None,
-            pre_live_right: None,
             maximized: false,
             left_width: None,
-            right_width: None,
         }
     }
 }
 
 impl LayoutSettings {
-    /// 新安装按需打开对照；Default 保留旧配置缺项的兼容口径。
+    /// 新安装停大纲(直奔写作);Default 保留旧配置缺项的兼容口径。
     pub fn fresh_install() -> Self {
         Self {
-            right: false,
             left_view: SidebarTab::Outline,
             ..Self::default()
         }
@@ -123,7 +111,7 @@ impl LayoutSettings {
     /// 目录不存在则创建。失败带路径,提示行可直接展示。
     ///
     /// `zen` 与 `pre_zen` 都是 `#[serde(skip)]`(理由见各自字段注释),而禅定
-    /// 期间 `left/right` 已被改成 `false/false` —— 那是**状态被临时借用**,
+    /// 期间 `left` 已被改成 `false` —— 那是**状态被临时借用**,
     /// 不是用户改了偏好。此刻若有别的原因触发保存(切左栏视图等),照直写
     /// 会把「三栏全关」钉进磁盘:下次启动既没有侧栏也没有菜单栏入口
     /// (禅定下两者都在),用户面对一个近乎空的窗口。故这里按快照还原后再写。
@@ -135,13 +123,8 @@ impl LayoutSettings {
             });
         };
         let mut saved = self.clone();
-        if let Some((left, right)) = saved.pre_zen {
+        if let Some(left) = saved.pre_zen {
             saved.left = left;
-            saved.right = right;
-        }
-        // 写作期间的右栏隐藏是临时状态，保存源码模式的对照偏好。
-        if let Some(right) = saved.pre_live_right {
-            saved.right = right;
         }
         let json = serde_json::to_string_pretty(&saved).map_err(|source| SaveError {
             path: dir.join(SETTINGS_FILE),
@@ -177,9 +160,8 @@ impl LayoutSettings {
         if self.pre_zen.is_some() {
             return;
         }
-        self.pre_zen = Some((self.left, self.right));
+        self.pre_zen = Some(self.left);
         self.left = false;
-        self.right = false;
         self.zen = true;
     }
 
@@ -191,14 +173,10 @@ impl LayoutSettings {
     /// 而不是什么都不做:后者会把用户永久困在禅定里。
     pub fn exit_zen(&mut self) {
         match self.pre_zen.take() {
-            Some((left, right)) => {
-                self.left = left;
-                self.right = right;
-            }
-            None => {
-                self.left = true;
-                self.right = true;
-            }
+            Some(left) => self.left = left,
+            // 没有快照(脏启动 / `zen` 从存档读出来而快照被丢)时退化为侧栏
+            // 全开,而不是什么都不做 —— 后者会把用户永久困在禅定里。
+            None => self.left = true,
         }
         self.zen = false;
     }
@@ -248,20 +226,21 @@ mod tests {
     /// `zen` 取 false:`Zen` 不落盘(见下一个用例),带着 `zen: true` 进往返
     /// 必然不相等 —— 那是设计如此,不是 bug。
     /// 旧 layout.json 没有 maximized 字段(2026-09-29 新增):缺项必须回落
-    /// false 且**不整表 Corrupt** —— 否则用户升级后 left/right 偏好被静默
-    /// 清掉,比丢 maximized 严重得多。
+    /// false 且**不整表 Corrupt** —— 否则用户升级后 left 偏好被静默清掉,
+    /// 比丢 maximized 严重得多。旧版的 `right`/`right_width` 键(右栏对照
+    /// 预览,live-unify-plan P4 退役)按 `#[serde(default)]` 的结构体级口径
+    /// **静默忽略** —— 无需迁移,读进来即弃。
     #[test]
     fn legacy_json_without_maximized_still_loads() {
         let dir = dir("legacy-no-max");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join(SETTINGS_FILE),
-            r#"{"left":false,"right":true,"left_view":"outline"}"#,
+            r#"{"left":false,"right":true,"right_width":321.5,"left_view":"outline"}"#,
         )
         .unwrap();
         let loaded = LayoutSettings::load_from(&dir).unwrap();
         assert!(!loaded.left, "旧字段不受影响");
-        assert!(loaded.right);
         assert!(!loaded.maximized, "缺项 maximized 回落 false");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -285,7 +264,6 @@ mod tests {
         let dir = dir("roundtrip");
         let settings = LayoutSettings {
             left: false,
-            right: true,
             render_mode: None,
             zen: false,
             left_view: SidebarTab::Outline,
@@ -315,7 +293,7 @@ mod tests {
         let loaded = LayoutSettings::load_from(&dir).unwrap();
         assert!(!loaded.zen, "读回来的窗口不是禅定的");
         assert_eq!(loaded.pre_zen, None, "读回来没有脏快照");
-        assert!(loaded.left && loaded.right, "三栏按快照还原着写,不写三关");
+        assert!(loaded.left, "左栏按快照还原着写,不写关闭态");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -331,15 +309,11 @@ mod tests {
             ..Default::default()
         };
         settings.enter_zen();
-        assert!(!settings.left && !settings.right, "禅定期间两栏都被关了");
+        assert!(!settings.left, "禅定期间左栏被关了");
 
         settings.save_to(Some(&dir)).unwrap();
         let loaded = LayoutSettings::load_from(&dir).unwrap();
-        assert_eq!(
-            (loaded.left, loaded.right),
-            (false, true),
-            "照快照写:(right 本来就开着)"
-        );
+        assert!(!loaded.left, "照快照写:禅定期间的借用不落盘");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -347,19 +321,18 @@ mod tests {
     /// 关着左栏写,退出禅定却蹦出侧栏是意外行为(decisions-pending #29 同款)。
     #[test]
     fn exit_zen_restores_the_pre_zen_combination() {
-        for (left, right) in [(true, true), (false, true), (true, false), (false, false)] {
+        for left in [true, false] {
             let mut settings = LayoutSettings {
                 left,
-                right,
                 ..Default::default()
             };
             settings.enter_zen();
-            assert!(!settings.left && !settings.right && settings.zen);
+            assert!(!settings.left && settings.zen);
             settings.exit_zen();
             assert_eq!(
-                (settings.left, settings.right, settings.zen),
-                (left, right, false),
-                "组合 {left}/{right} 逐项还原"
+                (settings.left, settings.zen),
+                (left, false),
+                "左栏开合 {left} 逐项还原"
             );
             assert_eq!(settings.pre_zen, None, "退出后快照清掉");
         }
@@ -375,9 +348,9 @@ mod tests {
         };
         settings.enter_zen();
         settings.enter_zen();
-        assert_eq!(settings.pre_zen, Some((false, true)));
+        assert_eq!(settings.pre_zen, Some(false));
         settings.exit_zen();
-        assert_eq!((settings.left, settings.right), (false, true));
+        assert!(!settings.left);
     }
 
     /// 没有快照(例如这份 `zen` 是手改出来的)时退出退化为三栏全开,而不是
@@ -387,20 +360,19 @@ mod tests {
         let mut settings = LayoutSettings {
             zen: true,
             left: false,
-            right: false,
             ..Default::default()
         };
         settings.exit_zen();
         assert!(!settings.zen);
-        assert!(settings.left && settings.right, "退路是三栏全开");
+        assert!(settings.left, "退路是侧栏全开");
     }
 
-    /// 出厂布局三栏全开、停文件树 —— 与旧行为一致,升级用户不会被直接
+    /// 出厂布局侧栏全开、停文件树 —— 与旧行为一致,升级用户不会被直接
     /// 扔进空窗口(左栏收起又没菜单栏入口会很难找回)。
     #[test]
     fn default_is_three_columns_open_on_files() {
         let settings = LayoutSettings::default();
-        assert!(settings.left && settings.right);
+        assert!(settings.left);
         assert!(!settings.zen);
         assert_eq!(settings.left_view, SidebarTab::Files);
     }
@@ -415,7 +387,6 @@ mod tests {
 
         let settings = LayoutSettings::load_from(&dir).unwrap();
         assert!(!settings.left, "显式值生效");
-        assert!(settings.right, "缺席的 right 回落默认 true");
         assert_eq!(settings.left_view, SidebarTab::Files);
         let _ = std::fs::remove_dir_all(&dir);
     }

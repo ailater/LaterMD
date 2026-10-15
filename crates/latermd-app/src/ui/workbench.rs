@@ -242,111 +242,6 @@ fn divider_is_hot(ui: &egui::Ui) -> bool {
     })
 }
 
-/// 「对照预览」左缘的**常显**分隔线:编辑器与只读预览之间的那条边界。
-///
-/// **为什么必须自绘而不开 egui 的 `show_separator_line(true)`**:
-/// ① 它的空闲色硬绑 `visuals.widgets.noninteractive.bg_stroke` —— 那个槽位
-/// 同时是 Markdown 表格边框与隔行底色的取色源(`theme.rs` §noninteractive
-/// 注释),为一条面板边界去动它 = 顺带改掉全部表格观感,且本函数无法只改
-/// 自己那一份(样式是全局单值)。② 它画在 `parent_ui.painter()` 上,而
-/// `parent_ui` 的 painter 位于**其后添加的 panel 之下** —— 预览是 ④、
-/// 中央编辑区是 ⑤,后者的 `Frame::fill` 会把线整根盖掉,开了等于没开。
-///
-/// 故走 `layer_painter` 在所有 panel 之上单画一根 1 物理像素竖线。取值与
-/// 「间隔 vs 边界」的判据见 [`crate::ui::tokens::PREVIEW_DIVIDER_IDLE`]。
-///
-/// **必须在全部 panel 之后调用**(与 `edge_resize_zones` 同一约束):layer
-/// painter 的层序由 `Order` 决定,同一 `Order::Middle` 内按 id 排序,这里
-/// 用独立 id 开一层,天然压过所有 panel 的 painter。
-pub(crate) fn preview_divider(ui: &egui::Ui, preview_open: bool) {
-    if !preview_open {
-        return;
-    }
-    let id = egui::Id::new("preview");
-    // **边界位置的取法是三段递降,每一段都是被实测逼出来的**(2026-10-13
-    // 坤哥反馈「线不跟着我拉的框走」):
-    //
-    // ① 拖动中 → 用 `interact_pointer_pos()`,**不能用** `Response.rect`
-    //    也不能用 `PanelState`。egui 的执行顺序是
-    //    「`resize_panel(old_outer_rect)` 交互 → 若在拖则按 pointer 重算
-    //    `outer_size`」(`panel.rs` 735-800),两者**都不是**本帧的新边界:
-    //    `PanelState` 在拖动期间被 `resize_drag_in_progress` 守卫跳过写入
-    //    (存的是拖动前的宽度,以支持「拖到最小再拖回来」),`Response.rect`
-    //    又是拿旧 `outer_rect` 算的。实测探针:五步拖动两者恒为 980.0。
-    //    而 `Panel::right` 的左缘**在拖动时就是指针 x 本身**,故直接取之。
-    // ② 空闲 → 用 `PanelState` 的左缘(response 交互带在上一帧算完,同样滞后,
-    //    且 `size_range` 的 clamp 会让实际左缘 ≠ 指针 x)。
-    // ③ 都不成(panel 尚未 show 过)→ 不画线。
-    let resize = ui.read_response(id.with("__resize"));
-    let dragging = resize
-        .as_ref()
-        .is_some_and(|r| r.dragged() || r.drag_stopped());
-    let pointer_x = resize
-        .as_ref()
-        .filter(|_| dragging)
-        .and_then(|r| r.interact_pointer_pos())
-        .map(|p| p.x);
-    // 纵向范围始终取 PanelState:resize rect 的 y 跨面板全高,但它是拿旧
-    // `outer_rect` 算的,拖动中同样滞后(横向滞后才致命,纵向一像素之差看不
-    // 出,且拖动只改宽度不改高度)。
-    let Some(panel) = egui::PanelState::load(ui.ctx(), id) else {
-        return;
-    };
-    let edge = pointer_x.unwrap_or(panel.outer_rect.left());
-    let (top, bottom) = (panel.outer_rect.top(), panel.outer_rect.bottom());
-    if bottom - top <= 0.0
-        || !ui.clip_rect().intersects(egui::Rect::from_min_max(
-            egui::pos2(edge, top),
-            egui::pos2(edge, bottom),
-        ))
-    {
-        return;
-    }
-    let colors = crate::theme::shell(ui);
-    // hover 用**两个通道**反馈,不是只改颜色:
-    // ① **线宽** 1px → 3px(主信号,一眼可辨)
-    // ② **色深** 朝 `border` 本色靠(辅助信号)
-    //
-    // 2026-10-13 坤哥实测「没看见 hover 加粗」—— 此前**只有 ②**,而 1px
-    // 线的深浅变化要「盯住看」才分辨得出,指针扫过时每帧只停几十毫秒。
-    // VS Code 的 sash 正是靠加粗给主反馈,颜色只是辅助。
-    //
-    // hot 用**几何判定**(指针是否落在命中带内)。`Response::hovered` 在这里
-    // 可靠(交互带位置不随拖动变),但仍以几何为准:它与「线该亮」是两件事,
-    // 让几何说了算,测试才能在裸调路径下也成立。
-    let grab = crate::ui::tokens::PREVIEW_DIVIDER_GRAB;
-    let hot = ui
-        .ctx()
-        .input(|input| input.pointer.hover_pos())
-        .is_some_and(|p| (p.x - edge).abs() <= grab && p.y >= top && p.y <= bottom);
-    let ppp = ui.ctx().pixels_per_point();
-    let stroke = egui::Stroke::new(
-        if hot {
-            crate::ui::tokens::PREVIEW_DIVIDER_HOT_W
-        } else {
-            1.0
-        } / ppp,
-        // 朝**底色**插值而非 `gamma_multiply` —— 后者朝黑缩放,浅色皮肤上
-        // 「变淡」会变成「变深」,空闲态反比 hover 态显眼(实测 8.7 vs 1.3
-        // 灰阶)。理由与取值见 [`crate::ui::tokens::PREVIEW_DIVIDER_IDLE`]。
-        colors.border.lerp_to_gamma(
-            colors.content,
-            if hot {
-                crate::ui::tokens::PREVIEW_DIVIDER_HOT
-            } else {
-                crate::ui::tokens::PREVIEW_DIVIDER_IDLE
-            },
-        ),
-    );
-    let x = edge - 0.5 * stroke.width;
-    ui.ctx()
-        .layer_painter(egui::LayerId::new(
-            egui::Order::Middle,
-            id.with("__divider"),
-        ))
-        .vline(x, egui::Rangef::new(top, bottom), stroke);
-}
-
 /// 浮窗统一的 macOS 风格卡片：柔和边界、内容色底和充足内距。
 pub(crate) fn dialog_frame(ui: &egui::Ui) -> egui::Frame {
     let colors = crate::theme::shell(ui);
@@ -368,17 +263,13 @@ fn action(ui: &mut egui::Ui, rect: Rect, icon: Icon, tip: &str, selected: bool) 
     } else {
         colors.secondary
     };
-    // 两侧面板使用相同的细线框与内分隔，不再画厚实心条。
-    if matches!(icon, Icon::Sidebar | Icon::PanelRight) {
+    // 侧栏按钮使用细线框与内分隔,不再画厚实心条。
+    if matches!(icon, Icon::Sidebar) {
         let bounds = Rect::from_center_size(rect.center(), egui::vec2(17.0, 13.0));
         let stroke = egui::Stroke::new(1.2, ink);
         ui.painter()
             .rect_stroke(bounds, 2.5, stroke, egui::StrokeKind::Inside);
-        let x = if icon == Icon::Sidebar {
-            bounds.left() + 5.0
-        } else {
-            bounds.right() - 5.0
-        };
+        let x = bounds.left() + 5.0;
         if selected {
             let area = if icon == Icon::Sidebar {
                 Rect::from_min_max(bounds.min, egui::pos2(x, bounds.bottom()))
@@ -508,19 +399,6 @@ pub fn header(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
         ],
         separator(ui),
     );
-    if action(
-        ui,
-        slot(right - 64.0, 28.0),
-        Icon::PanelRight,
-        if state.render_mode == crate::live::RenderMode::Live {
-            "切到源码并打开对照预览"
-        } else {
-            "显示 / 隐藏对照预览（只读）"
-        },
-        state.layout.right,
-    ) {
-        outbox.push(Command::ToggleRightPreview.message());
-    }
     if action(ui, slot(right - 28.0, 28.0), Icon::Settings, "设置", false) {
         outbox.push(Message::SettingsOpened(SettingsTab::Appearance));
     }
@@ -842,32 +720,6 @@ pub fn navigation(ui: &mut egui::Ui, active: SidebarTab, outbox: &mut Vec<Messag
     });
     ui.add_space(8.0);
     bar
-}
-
-pub fn pane_heading(ui: &mut egui::Ui, title: &str, detail: &str) {
-    let colors = crate::theme::shell(ui);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::hover());
-    label_at(
-        ui,
-        rect.left(),
-        rect.center().y,
-        title,
-        12.0,
-        colors.secondary,
-    );
-    let text = ui.painter().layout_no_wrap(
-        detail.to_owned(),
-        egui::FontId::proportional(11.0),
-        colors.secondary,
-    );
-    ui.painter().galley(
-        egui::pos2(
-            rect.right() - text.size().x,
-            rect.center().y - text.mesh_bounds.center().y,
-        ),
-        text,
-        colors.secondary,
-    );
 }
 
 #[cfg(test)]

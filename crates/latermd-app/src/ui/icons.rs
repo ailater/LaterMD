@@ -53,8 +53,6 @@ pub enum Icon {
     Reset,
     /// 放弃当前工作区修改:向左回退箭头。
     Undo,
-    /// 关右栏:外框 + 右侧实心条(左栏用既有 `Sidebar` 镜像)。
-    PanelRight,
     /// 禅定:同心圆。
     Zen,
     /// 菜单:三条横线(Zed 同款汉堡按钮,2026-10-12)。不是任何 Command
@@ -413,10 +411,6 @@ impl Icon {
                 seg((-0.18, 0.0), (0.06, -0.24));
                 seg((-0.18, 0.0), (0.06, 0.24));
                 seg((-0.18, 0.0), (-0.38, 0.0));
-            }
-            Self::PanelRight => {
-                frame((-0.44, -0.36), (0.44, 0.36));
-                fill((0.24, -0.36), (0.44, 0.36));
             }
             Self::Zen => {
                 ring((0.0, 0.0), 0.30);
@@ -787,7 +781,6 @@ mod tests {
             Icon::Settings,
             Icon::Reset,
             Icon::Undo,
-            Icon::PanelRight,
             Icon::Zen,
             Icon::Minimize,
             Icon::Maximize,

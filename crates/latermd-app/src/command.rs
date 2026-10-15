@@ -178,8 +178,6 @@ pub enum Command {
     /// 归位「编辑」:与复制行/查找/替换/跳转同族,都是不作用选区的文档级
     /// 辅助动作(格式菜单十五条全是选区/光标处的格式化)。
     InsertToc,
-    /// 右侧只读预览栏展开/折叠(§3.1)。
-    ToggleRightPreview,
     /// 禅定模式(§7)。F11:`KeyboardShortcut` 允许无修饰的 F1-F12。
     ToggleZen,
     /// 打字机模式(#64 M1):光标所在行滚动保持视口 1/3 线(源码与 Live
@@ -214,7 +212,7 @@ impl Command {
     ///
     /// 顺序 = UI 上的自然归属:文件 → 视图 → AI → 标签 → 格式按工具条分组
     /// 从左到右。
-    pub const ALL: [Command; 44] = [
+    pub const ALL: [Command; 43] = [
         Self::New,
         Self::Open,
         Self::QuickOpen,
@@ -254,7 +252,6 @@ impl Command {
         Self::ReplaceInDoc,
         Self::GotoLine,
         Self::InsertToc,
-        Self::ToggleRightPreview,
         Self::ToggleZen,
         Self::TypewriterToggle,
         Self::FocusModeToggle,
@@ -317,7 +314,6 @@ impl Command {
             | Self::EmojiPicker => CommandGroup::Format,
             Self::ToggleTheme
             | Self::ToggleSidebar
-            | Self::ToggleRightPreview
             | Self::ToggleLivePreview
             | Self::ToggleZen
             | Self::TypewriterToggle
@@ -372,7 +368,6 @@ impl Command {
             Self::ReplaceInDoc => "replace_in_doc",
             Self::GotoLine => "goto_line",
             Self::InsertToc => "insert_toc",
-            Self::ToggleRightPreview => "toggle_right_preview",
             Self::ToggleZen => "toggle_zen",
             Self::TypewriterToggle => "toggle_typewriter",
             Self::FocusModeToggle => "toggle_focus_mode",
@@ -425,7 +420,6 @@ impl Command {
             Self::ReplaceInDoc => "替换",
             Self::GotoLine => "跳转到行",
             Self::InsertToc => "插入目录",
-            Self::ToggleRightPreview => "对照预览",
             Self::ToggleZen => "禅定模式",
             Self::TypewriterToggle => "打字机模式",
             Self::FocusModeToggle => "专注模式",
@@ -542,8 +536,9 @@ impl Command {
             // (mac 侧 ⌘G 与系统「查找下一个」惯例的取舍见 decisions-pending #113)
             Self::GotoLine => egui::KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::G),
             // 插入目录(#66 M2):Ctrl/Cmd+Alt+C(C = Contents)。出厂表
-            // Ctrl/Cmd+Alt 层只有 R/W/D(切预览栏/打字机/专注),C 在该层
-            // 空闲(#9 口径的撞键核查在 tests);含 Alt 的绑定按保守口径避开
+            // Ctrl/Cmd+Alt 层只有 W/D(打字机/专注;切预览栏的 R 已随对照
+            // 预览退役,live-unify-plan P4),C 在该层空闲(#9 口径的撞键
+            // 核查在 tests);含 Alt 的绑定按保守口径避开
             // 菜单标题助记集(F/E/O/V/X/A/S),C 不在其中(与 #122 同款审计)。
             // 与 Ctrl/Cmd+Shift+C(围栏代码块)同键不同修饰,egui 的
             // `matches_logically` 只把 Shift 当「可忽略的额外键」,Alt 必须
@@ -551,9 +546,6 @@ impl Command {
             // matches_logically 实读核验)。
             Self::InsertToc => {
                 egui::KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, egui::Key::C)
-            }
-            Self::ToggleRightPreview => {
-                egui::KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, egui::Key::R)
             }
             Self::ToggleZen => egui::KeyboardShortcut::new(Modifiers::NONE, egui::Key::F11),
             // 打字机模式(#64 M1):Ctrl/Cmd+Alt+W。出厂表整条 Shortcut 无
@@ -643,7 +635,6 @@ impl Command {
             // 与大纲页签同源(icons 无目录专用形;「多命令一图标」先例:
             // ToggleLivePreview/ToggleZen 同源)。缩进列表即 TOC 的形。
             Self::InsertToc => Icon::Outline,
-            Self::ToggleRightPreview => Icon::PanelRight,
             Self::ToggleZen => Icon::Zen,
             // 与视图组两个开关共用禅定同心圆(icons 无打字机专用形;既有
             // 「多命令一图标」先例:ToggleLivePreview/ToggleZen 同源)
@@ -677,7 +668,6 @@ impl Command {
             Self::TabNext => Message::TabNext,
             Self::TabClose => Message::TabCloseActive,
             Self::TabRestore => Message::TabRestore,
-            Self::ToggleRightPreview => Message::RightPanelToggled,
             Self::ToggleZen => Message::ZenToggled,
             // 菜单/快捷键是「翻转」语义(现值在 State 里,消息层拿不到),
             // 走无参翻转消息(与 ToggleLivePreview/ZenToggled 同构);带值
@@ -1405,7 +1395,7 @@ mod tests {
 
     /// Alt+T 真按键只触发主题切换:`matches_logically` 对「显式不要
     /// Ctrl/Cmd」的组合要求事件确实没按 Ctrl/Cmd,故 Cmd/Ctrl+Alt+T 不会
-    /// 误中;与 ToggleRightPreview(Cmd/Ctrl+Alt+R)不同键,互不抢。
+    /// 误中;Alt 层的其它命令(打字机 W / 专注 D)不同键,互不抢。
     #[test]
     fn alt_t_fires_only_toggle_theme() {
         let ctx = egui::Context::default();
@@ -1473,7 +1463,7 @@ mod tests {
     /// 实现更新。
     #[test]
     fn all_commands_listed_exactly_once() {
-        assert_eq!(Command::ALL.len(), 44);
+        assert_eq!(Command::ALL.len(), 43);
         let mut ids: Vec<_> = Command::ALL.iter().map(|cmd| cmd.id()).collect();
         ids.sort_unstable();
         ids.dedup();

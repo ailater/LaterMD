@@ -111,6 +111,9 @@ pub(crate) fn append_highlight_section(
 ///
 /// `base_dir` 为 `None`(文档未落盘)或空串(裸相对文件名,`Path::parent`
 /// 的产物)时原样借回:没有锚点可拼,交给加载器按失败处理,与改写前一致。
+// P4 起唯一生产消费者(预览面板)退役;Live 走 `image_rewrites` 直取。
+// P5 随预览测试迁移定去留。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn resolve_relative_images<'a>(
     text: &'a str,
     base_dir: Option<&'a Path>,
@@ -251,7 +254,9 @@ fn file_uri(base_dir: &Path, dest: &str) -> String {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum TaskProbeDomain {
     /// 右栏预览:emoji 层输出坐标,消费时逆穿 `offset_map` +
-    /// `highlight_map` + `emoji_map`。
+    /// `highlight_map` + `emoji_map`。(P4 起仅预览测试路径消费,随 P5
+    /// 迁移定去留。)
+    #[cfg_attr(not(test), allow(dead_code))]
     Preview,
     /// 编辑器 Live 富渲染块:块内坐标,消费时加记录时的块首字节偏移。
     Live(usize),

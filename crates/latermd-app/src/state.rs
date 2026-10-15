@@ -664,9 +664,6 @@ pub enum Message {
     /// 切换左侧导航栏展开/折叠(命令层 `Ctrl/Cmd+\` 与自绘标题栏「关闭
     /// 左侧」两个入口;面板把手自行翻转不走消息)。
     SidebarToggled,
-    /// 切换右侧只读预览栏(自绘标题栏「关闭右侧」入口,
-    /// docs/ui-shell-redesign.md §3.1;M1 起接 `LayoutSettings::right`)。
-    RightPanelToggled,
     /// 切换禅定模式(docs/ui-shell-redesign.md §7;M4 实现,命令层先挂上)。
     ZenToggled,
     /// 切换「快速打开」浮层(#24):C2 的最小状态只翻转可见标志;
@@ -1220,7 +1217,6 @@ impl State {
             Message::ThemeChanged(mode) => self.change_theme(mode),
             Message::ToggleTheme => self.change_theme(self.theme.mode.opposite()),
             Message::SidebarToggled => self.toggle_left_panel(),
-            Message::RightPanelToggled => self.toggle_right_panel(),
             Message::ZenToggled => self.toggle_zen(),
             Message::ToggleQuickOpen => self.toggle_quick_open(),
             Message::FormatRequested(action) => self.apply_format(action),
@@ -2146,19 +2142,6 @@ impl State {
         self.layout.left = !self.layout.left;
     }
 
-    /// 翻转右栏(只读预览)可见性;写盘同上由帧末统一负责。
-    fn toggle_right_panel(&mut self) {
-        if self.layout.zen {
-            self.toggle_zen();
-        }
-        if self.render_mode == RenderMode::Live {
-            self.toggle_live_preview();
-            self.layout.right = true;
-        } else {
-            self.layout.right = !self.layout.right;
-        }
-    }
-
     /// 进/出禅定(§7)。进出各走 `LayoutSettings` 上那两个同名方法 —— 快照
     /// 怎么存怎么还原由它们自己说了算,`State` 不插手第二个真相源。
     fn toggle_zen(&mut self) {
@@ -3032,7 +3015,7 @@ impl State {
     /// 切模式:只翻标志。切到 Live 时顺带按当前光标定位活动块(首次进入
     /// 就有可编辑的块,而不是「点一下才出现」)。
     fn toggle_live_preview(&mut self) {
-        // 先恢复临时阅读布局，再切换，避免退出禅定时复活写作的右栏。
+        // 先退出禅定再切换,避免禅定布局被写模式借用。
         if self.layout.zen {
             self.toggle_zen();
         }
@@ -3040,8 +3023,6 @@ impl State {
         self.render_mode = self.render_mode.opposite();
         self.layout.render_mode = Some(self.render_mode);
         if self.render_mode == RenderMode::Live {
-            self.layout.pre_live_right = Some(self.layout.right);
-            self.layout.right = false;
             let tab = self.tabs.current_mut();
             // 打开/切换文档没有源码插入点时保持浏览态；显式从源码切入
             // 且已有插入点时，把它交给对应 Live 块。
@@ -3085,9 +3066,6 @@ impl State {
             if let Some(byte) = tab.cursor.byte {
                 let char_idx = tab.editor.byte_to_char(byte);
                 tab.pending_selection = Some((char_idx, char_idx));
-            }
-            if let Some(previous) = self.layout.pre_live_right.take() {
-                self.layout.right = previous;
             }
         }
     }
@@ -4621,21 +4599,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 两个「关闭栏」按钮各自只翻自己那一个 bool,互不牵连(M1 验收点:
-    /// 同时关左右 → 只剩编辑器)。
+    /// 「关闭左栏」按钮翻的只是 `layout.left` 这一个 bool(P4 起右栏对照
+    /// 预览退役,live-unify-plan;右栏开关整体不存在了)。
     #[test]
-    fn panel_toggles_are_independent() {
+    fn sidebar_toggle_flips_left_only() {
         let mut state = State::default();
-        assert!(state.layout.left && state.layout.right, "出厂三栏全开");
+        assert!(state.layout.left, "出厂侧栏全开");
 
         state.apply(Message::SidebarToggled);
-        assert!(!state.layout.left && state.layout.right, "只收左栏");
-
-        state.apply(Message::RightPanelToggled);
-        assert!(!state.layout.left && !state.layout.right, "左右都收");
+        assert!(!state.layout.left, "收左栏");
 
         state.apply(Message::SidebarToggled);
-        assert!(state.layout.left && !state.layout.right, "只开左栏");
+        assert!(state.layout.left, "再开左栏");
     }
 
     /// 快速打开(#24)的开关归约:`ToggleQuickOpen` 翻转可见标志,再翻
@@ -4690,11 +4665,11 @@ mod tests {
             ..State::default()
         };
         // 不经过任何 Message,模拟 ui 侧 show_collapsible 的原地翻转
-        state.layout.right = false;
+        state.layout.left = false;
         state.end_of_logic();
 
         assert!(
-            !LayoutSettings::load_from(&dir).unwrap().right,
+            !LayoutSettings::load_from(&dir).unwrap().left,
             "把手翻转同样落到 layout.json"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -6657,22 +6632,12 @@ mod tests {
         let revision = state.tabs.current().editor.revision();
         let tab_id = state.tabs.current().id;
         assert_eq!(state.render_mode, RenderMode::Live);
-        assert!(!state.layout.right);
         state.apply(Message::ToggleLivePreview);
         assert_eq!(state.render_mode, RenderMode::Source);
-        assert!(!state.layout.right, "首次源码不强制开对照");
         state.apply(Message::ToggleLivePreview);
-        state.apply(Message::RightPanelToggled);
+        assert_eq!(state.render_mode, RenderMode::Live);
+        state.apply(Message::ToggleLivePreview);
         assert_eq!(state.render_mode, RenderMode::Source);
-        assert!(state.layout.right, "写作中的对照入口进入源码并展开");
-        state.apply(Message::ToggleLivePreview);
-        assert!(!state.layout.right);
-        state.apply(Message::ToggleLivePreview);
-        assert!(state.layout.right, "回到源码恢复用户的对照选择");
-        state.apply(Message::RightPanelToggled);
-        state.apply(Message::ToggleLivePreview);
-        state.apply(Message::ToggleLivePreview);
-        assert!(!state.layout.right, "主动关闭也要记住");
         assert_eq!(state.tabs.current().id, tab_id);
         assert_eq!(state.tabs.current().editor.text(), text);
         assert_eq!(state.tabs.current().editor.revision(), revision);
@@ -6684,12 +6649,13 @@ mod tests {
         let dir = temp_path("writing-layout");
         std::fs::create_dir_all(&dir).unwrap();
         for right in [false, true] {
-            // 旧版本没有模式字段，升级默认写作，但保留原预览选择。
+            // 旧版本没有模式字段,升级默认写作;旧版 `right` 键(右栏对照
+            // 预览,P4 退役)按 serde(default) 结构体级口径**静默忽略** ——
+            // 升级不因多出来的键失败。
             std::fs::write(dir.join("layout.json"), format!(r#"{{"right":{right}}}"#)).unwrap();
             let mut state = State::default();
             state.restore_layout(LayoutSettings::load_from(&dir).unwrap());
             assert_eq!(state.render_mode, RenderMode::Live);
-            assert!(!state.layout.right);
             for mode in [RenderMode::Live, RenderMode::Source] {
                 if state.render_mode != mode {
                     state.apply(Message::ToggleLivePreview);
@@ -6698,33 +6664,23 @@ mod tests {
                 let mut restarted = State::default();
                 restarted.restore_layout(LayoutSettings::load_from(&dir).unwrap());
                 assert_eq!(restarted.render_mode, mode);
-                assert_eq!(restarted.layout.right, mode == RenderMode::Source && right);
-                if mode == RenderMode::Live {
-                    restarted.apply(Message::ToggleLivePreview);
-                }
-                assert_eq!(restarted.layout.right, right);
             }
         }
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn mode_commands_exit_zen_without_reviving_duplicate_preview() {
-        for comparison in [false, true] {
-            let mut state = State::default();
-            state.layout.right = comparison;
-            state.apply(Message::ZenToggled);
-            state.apply(Message::ToggleLivePreview);
-            assert!(!state.layout.zen && !state.layout.right);
-            assert_eq!(state.render_mode, RenderMode::Live);
-            state.apply(Message::ZenToggled);
-            state.apply(Message::ZenToggled);
-            assert!(!state.layout.right);
-            state.apply(Message::ZenToggled);
-            state.apply(Message::RightPanelToggled);
-            assert!(!state.layout.zen && state.layout.right);
-            assert_eq!(state.render_mode, RenderMode::Source);
-        }
+    fn mode_commands_exit_zen_first() {
+        let mut state = State::default();
+        state.apply(Message::ZenToggled);
+        state.apply(Message::ToggleLivePreview);
+        assert!(!state.layout.zen, "模式命令先退出禅定");
+        assert_eq!(state.render_mode, RenderMode::Live);
+        state.apply(Message::ZenToggled);
+        state.apply(Message::ZenToggled);
+        state.apply(Message::ZenToggled);
+        state.apply(Message::ToggleLivePreview);
+        assert!(!state.layout.zen && state.render_mode == RenderMode::Source);
     }
 
     #[test]
@@ -6738,9 +6694,9 @@ mod tests {
         let mut restarted = State::default();
         restarted.restore_layout(LayoutSettings::load_from(&dir).unwrap());
         assert_eq!(restarted.render_mode, RenderMode::Live);
-        assert!(!restarted.layout.left && !restarted.layout.right && !restarted.layout.zen);
+        assert!(!restarted.layout.left && !restarted.layout.zen);
         restarted.apply(Message::ToggleLivePreview);
-        assert!(restarted.layout.right);
+        assert_eq!(restarted.render_mode, RenderMode::Source);
         let _ = std::fs::remove_dir_all(dir);
     }
 

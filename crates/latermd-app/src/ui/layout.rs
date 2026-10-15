@@ -390,14 +390,8 @@ impl LaterMdApp {
         //
         // 宽度下限走 `SIDEBAR_MIN_W`(180,M2 三段式起够用):160 是二分栏
         // 时代的数字(docs/ui-shell-redesign.md §11 R4)。
-        let reserve_preview = if self.state.layout.right {
-            tokens::PREVIEW_MIN_W
-        } else {
-            0.0
-        };
-        let sidebar_max =
-            (ui.available_width() - crate::ui::workbench::EDITOR_MIN_W - reserve_preview)
-                .clamp(tokens::SIDEBAR_MIN_W, 400.0);
+        let sidebar_max = (ui.available_width() - crate::ui::workbench::EDITOR_MIN_W)
+            .clamp(tokens::SIDEBAR_MIN_W, 400.0);
         crate::ui::workbench::restore_panel_width(ui, "nav", self.state.layout.left_width);
         let layout = &mut self.state.layout;
         let left = &mut layout.left;
@@ -454,88 +448,10 @@ impl LaterMdApp {
             &mut self.state.layout.left_width,
         );
 
-        // ④ 右栏:只读预览。审阅 Git diff 时临时让出空间,不改写用户的
-        // layout.right 或保存的 preview 宽度;退出审阅后原样恢复。
-        // 判定走 diff_target(工作区或历史文件),两者都把中央区交给 diff。
+        // Git diff 审阅开启时中央区交给 diff 视图(工作区或历史文件,
+        // 判定走 diff_target)。编辑器分支内消费。
         let git_diff_workspace =
             self.state.git.diff_workspace_open && self.state.git.diff_target.is_some();
-        let preview_max = (ui.available_width() - crate::ui::workbench::EDITOR_MIN_W)
-            .clamp(tokens::PREVIEW_MIN_W, 880.0);
-        crate::ui::workbench::restore_panel_width(ui, "preview", self.state.layout.right_width);
-        let right = &mut self.state.layout.right;
-        if !git_diff_workspace {
-            // 拖动命中半径**只在预览面板这一帧**局部抬高(出厂 3.0 → 6.0,
-            // 命中带宽 6px → 12px)。理由与取值见
-            // [`crate::ui::tokens::PREVIEW_DIVIDER_GRAB`]:6px 带宽落在同底色的
-            // 面板之间,没有任何视觉线索指向它,实测完全找不到可拖处。
-            //
-            // **必须局部改而不是改全局 `Style`**:egui 的 resize 半径是
-            // `Style.interaction` 上的单值,全局抬高会连带 nav 右缘 ——
-            // 那里紧贴编辑区正文,凭空多出 6px 误吞点击的窗口(选中文字会
-            // 失手)。这里在 `show_collapsible` 前打一个临时 style,面板读完
-            // 即恢复,nav 与后续 panel 拿到的仍是出厂值。
-            let grab_radius = ui.style().interaction.resize_grab_radius_side;
-            let restore_grab = grab_radius != tokens::PREVIEW_DIVIDER_GRAB;
-            if restore_grab {
-                ui.style_mut().interaction.resize_grab_radius_side = tokens::PREVIEW_DIVIDER_GRAB;
-            }
-            egui::Panel::right("preview")
-                .resizable(true)
-                .show_separator_line(false)
-                .default_size(if workbench {
-                    ((ui.available_width() - 32.0) * 0.5).max(crate::ui::tokens::PREVIEW_MIN_W)
-                } else {
-                    crate::ui::tokens::PREVIEW_DEFAULT_W
-                })
-                .size_range(crate::ui::tokens::PREVIEW_MIN_W..=preview_max)
-                .frame(
-                    egui::Frame::default()
-                        // 预览正文到面板边界的贴边:workbench 16 / 经典 8(main 的
-                        // workbench 外观分支)。16 无 inset 档(SM4/MD8/LG12),一半换
-                        // 一半留更乱 → 与 nav 的 Margin::symmetric(8,2) 同判,整处
-                        // 保留字面量(设计系统 T2b 判例;inset::MD 另有 OVERLAY_MARGIN 消费)。
-                        .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
-                        .fill(crate::theme::shell(ui).content)
-                        // 左缘那根常显细线走 [`crate::ui::workbench::preview_divider`]
-                        // 自绘(画在面板内容之外的 layer 上),故此处仍为 NONE:
-                        // `Frame::stroke` 是**四边**描边,会给预览的顶/右/底也描上,
-                        // 而那三边紧贴标题栏/窗口缘,是多余的线。
-                        .stroke(egui::Stroke::NONE),
-                )
-                .show_collapsible(ui, right, |ui| {
-                    crate::ui::workbench::pane_heading(ui, "对照预览", "只读");
-                    let tab = self.state.tabs.current_mut();
-                    // heal 只在 AI 流式写入本标签时开:补闭合是流式残缺帧的
-                    // 必需品,完整文档上是恒等变换但逐行全文扫描,稳态帧不该付。
-                    let streaming_here =
-                        self.state.ai.is_streaming() && self.state.ai_active_tab == Some(tab.id);
-                    crate::ui::preview::ui(
-                        ui,
-                        &mut tab.preview,
-                        &self.state.ai,
-                        tab.id,
-                        streaming_here,
-                        // 相对图片以文档所在目录为锚拼 file://(未落盘为 None)
-                        tab.document
-                            .path
-                            .as_deref()
-                            .and_then(std::path::Path::parent),
-                        &mut self.outbox,
-                    );
-                });
-            if restore_grab {
-                // nav 在本函数里**更早** show(③ 在 ④ 之前),它读到的已经是出厂值,
-                // 临时 style 全程没碰过它。这里恢复后,受影响的只有后续 panel
-                // ——而它们都不 resizable,故这行等价于「不留任何全局副作用」。
-                ui.style_mut().interaction.resize_grab_radius_side = grab_radius;
-            }
-        }
-        crate::ui::workbench::remember_panel_width(
-            ui,
-            "preview",
-            self.state.layout.right,
-            &mut self.state.layout.right_width,
-        );
 
         // ⑤ 编辑器:源文本这份唯一真源住在中央,标签条/提示行/格式工具条在其上。
         // `CentralPanel` 最后加(顺序铁律 AGENTS §8 / adr-005 §3.2)。
@@ -773,19 +689,6 @@ impl LaterMdApp {
         // 不参与 panel 嵌套,画在 panel 之后取语义上的「最上层」。三栏与
         // 禅定两条布局路径共用,理由见 [`Self::draw_overlay_dialogs`]。
         self.draw_overlay_dialogs(ui);
-
-        // ⑥「对照预览」左缘的常显分隔线。**必须在全部 panel 之后**:
-        // 它走 `layer_painter` 在所有 panel 的 painter 之上单画一根线,
-        // 而同一 `Order::Middle` 内层序按 id 排,独立 id 天然压过 panel。
-        // 若挪到 ④ 之后立刻调,中央编辑区(⑤)的 `Frame::fill` 会盖掉整根线。
-        //
-        // 这条线与 egui 自带的 hover/drag 高亮线**并存且不冲突**:后者画在
-        // `parent_ui.painter()` 上(本函数下就是这层之下),且只在交互时出现。
-        // Git diff 审阅帧没有右预览面板:跳过分隔线,否则 PanelState 里
-        // 残留的上一次矩形会把线画进 diff 区。
-        if !git_diff_workspace {
-            crate::ui::workbench::preview_divider(ui, self.state.layout.right);
-        }
 
         // ⑥ 自绘窗口骨架之二:屏幕四边/四角的透明缩放命令区。**必须在
         // 全部 panel 之后分配**(机制见 ui::titlebar::edge_resize_zones 的
@@ -2232,7 +2135,6 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = LaterMdApp::default();
         app.state.layout.left_width = Some(320.0);
-        app.state.layout.right_width = Some(650.0);
         for width in [1600.0, 900.0, 1600.0] {
             let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 800.0));
             for _ in 0..3 {
@@ -2249,26 +2151,23 @@ mod tests {
                 .unwrap()
                 .size()
                 .x;
-            let preview = egui::PanelState::load(&ctx, egui::Id::new("preview"))
-                .unwrap()
-                .size()
-                .x;
             assert!(
-                width - nav - preview >= 379.0,
-                "{width}: editor squeezed by {nav}/{preview}"
+                width - nav >= 379.0,
+                "{width}: editor squeezed by {nav}(编辑器最小预算,右栏退役后是唯一邻居)"
             );
             assert_eq!(app.state.layout.left_width, Some(320.0));
-            assert_eq!(app.state.layout.right_width, Some(650.0));
             if width == 1600.0 {
-                assert!((nav - 320.0).abs() < 1.0 && (preview - 650.0).abs() < 1.0);
+                assert!((nav - 320.0).abs() < 1.0);
             }
         }
     }
 
     #[test]
     fn automatic_minimap_follows_document_and_window_size() {
+        // 900px 档:右栏对照预览退役(live-unify P4)后中央编辑区
+        // ≈660px 已过 600 门槛,auto 判据翻真。
         for (width, lines, manual, expected) in [
-            (900.0, 400, false, false),
+            (900.0, 400, false, true),
             (1920.0, 10, false, false),
             (1920.0, 400, false, true),
             (900.0, 400, true, true),
@@ -2398,426 +2297,6 @@ mod tests {
             );
             std::fs::remove_dir_all(dir).ok();
         }
-    }
-
-    /// 走完整 draw 后交回「贯穿全高的分隔线」的 (x, 色) 与面板底色。
-    ///
-    /// 与首版那组裸调 `preview_divider` 的测试的根本区别:这里跑的是
-    /// **真实 `Panel::right`**,故 `preview_divider` 能读到真实的
-    /// `resize` response 与 `PanelState` —— 首版那组测试手工
-    /// `insert_persisted` 造 PanelState,测的是一条**生产中不存在的路径**,
-    // 于是「线不跟手」这个真 bug 从它下面溜了过去(2026-10-13)。
-    /// `divider_geometry` 的交回值。
-    ///
-    /// **带 `width_px`** 是因为 hover 反馈的主通道是**线宽**(1px → 3px),
-    /// 只交回颜色的话那条测试压根看不见加粗 —— 2026-10-13 坤哥实测
-    /// 「没看见 hover 加粗」而当时颜色通道明明是生效的。
-    struct DividerProbe {
-        /// 线中心的 x(逻辑像素)。
-        x: f32,
-        /// 线色。
-        color: egui::Color32,
-        /// 面板底色,用来算与线色的落差。
-        content: egui::Color32,
-        /// 线宽(物理像素)。idle 应为 1,hover 应 ≥3。
-        width_px: f32,
-    }
-
-    fn divider_geometry(
-        app: &mut LaterMdApp,
-        ctx: &egui::Context,
-        screen: Rect,
-        events: Vec<Event>,
-    ) -> Option<DividerProbe> {
-        // 线必须落在**预览面板边界**上,故以边界为锚来挑线,而不是「取最左的
-        // 那根」。实测 hover/drag 帧里画面上会同时存在多根贯穿全高的竖线
-        // —— 本模块的线在 `边界 - 0.5`,egui 自己在 resize 边界又画一根
-        // `hovered.fg_stroke`(落在 `边界 - 0.75`,浅色皮肤下是纯黑
-        // #000000FF)。按 x 猜永远挑中后者,读到的是无关颜色。改用**颜色
-        // 判据**(见下)后顺带多验一层「线不得画成纯黑或纯底色」。
-        //
-        // 锚点用与 `preview_divider` **同一套判据**:拖动中 `PanelState` 停在
-        // 拖动前的位置(egui 刻意不写),故锚点必须改取指针 x —— 否则线一移出
-        // 旧锚点 ±1.5px 就再也找不到它,那是尺子没跟着动,不是线没画。
-        //
-        // 注意:`PanelState::load` 与 `read_response` 内部都取 Context **写锁**,
-        // 故它们**不能**被包在 `ctx.data(...)`(读锁)里 —— parking_lot RwLock
-        // 不可重入,那样会自死锁(实测 `epaint/mutex.rs:101` 10 秒写超时)。
-        let panel_left =
-            egui::PanelState::load(ctx, egui::Id::new("preview")).map(|p| p.outer_rect.left());
-        let resize = ctx.read_response(egui::Id::new("preview").with("__resize"));
-        let dragging = resize
-            .as_ref()
-            .is_some_and(|r| r.dragged() || r.drag_stopped());
-        let pointer_x = resize
-            .as_ref()
-            .filter(|_| dragging)
-            .and_then(|r| r.interact_pointer_pos())
-            .map(|p| p.x);
-        let anchor = pointer_x.or(panel_left);
-        let mut output = ctx.run_ui(
-            RawInput {
-                events,
-                screen_rect: Some(screen),
-                ..Default::default()
-            },
-            |ui| {
-                // 取色必须在 `data_mut` **之外**:`data_mut` 已持 Context 写锁,
-                // 闭包内再调 `theme::shell`(内部 `ctx.data` 取读锁)会自死锁
-                // —— parking_lot RwLock 不可重入,实测 `epaint/mutex.rs:81`
-                // 10 秒 RwLock 超时。
-                let probe = egui::Id::new("__divider_probe_content");
-                let shell = crate::theme::shell(ui);
-                let (content, full) = (shell.content, luma_gap(shell.border, shell.content));
-                ui.data_mut(|d| {
-                    d.insert_temp(probe, content);
-                    d.insert_temp(egui::Id::new("__shell_full_probe"), full);
-                });
-                app.draw(ui);
-            },
-        );
-        let content = ctx
-            .data(|d| d.get_temp::<egui::Color32>(egui::Id::new("__divider_probe_content")))
-            .expect("探针应在闭包里写入");
-        let mut spans: Vec<(f32, f32, egui::Color32, f32)> = Vec::new();
-        fn spans_of(shape: &egui::Shape, out: &mut Vec<(f32, f32, egui::Color32, f32)>) {
-            match shape {
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| spans_of(s, out)),
-                egui::Shape::LineSegment { points, stroke }
-                    if (points[0].x - points[1].x).abs() < 0.01 && stroke.width > 0.0 =>
-                {
-                    out.push((
-                        points[0].x,
-                        (points[1].y - points[0].y).abs(),
-                        stroke.color,
-                        stroke.width,
-                    ))
-                }
-                _ => {}
-            }
-        }
-        output
-            .shapes
-            .iter()
-            .for_each(|s| spans_of(&s.shape, &mut spans));
-        output.textures_delta.clear();
-        // 靠 x 挑线靠不住:实测 hover/drag 帧里画面上有**两根**贯穿全高的
-        // 竖线 —— 本模块的线在 `anchor - 0.5`,而 egui 自己在 resize 边界
-        // 又画一根 `hovered.fg_stroke`(落在 `anchor - 0.75`,浅色皮肤下是
-        // 纯黑 #000000FF)。取「最左竖线」永远挑中后者,读到的是无关颜色。
-        //
-        // 故改用**颜色判据**:本模块的线是 `border → content` 的 lerp,
-        // 故其与底色的亮度落差必然落在 `(0, full]`(full = border↔content 全距)
-        // 这个开区间内;纯黑线的落差是 full 的 10 倍以上,天然被排除。
-        // 这条判据顺带成了一条独立断言:**线不得画成纯黑或纯底色**。
-        let full = ctx.data(|d| d.get_temp::<f32>(egui::Id::new("__shell_full_probe")));
-        let (anchor, full) = (anchor?, full?);
-        spans
-            .into_iter()
-            .filter(|(_, len, _, _)| *len > screen.height() * 0.7)
-            .filter(|(x, _, color, _)| (*x - anchor).abs() <= 1.5 && color.a() > 0)
-            .find(|(_, _, color, _)| {
-                let gap = luma_gap(*color, content);
-                gap > 0.05 && gap <= full
-            })
-            .map(|(x, _, color, width)| DividerProbe {
-                x,
-                color,
-                content,
-                width_px: width * ctx.pixels_per_point(),
-            })
-    }
-
-    /// 建一个「只有预览栏」的三栏应用实例,并空跑到布局稳定。
-    fn preview_only_app(screen: Rect, dark: bool) -> (egui::Context, LaterMdApp) {
-        // **刻意不调 `crate::fonts::install`**:本组只量分隔线,一个字符都
-        // 不渲染。装字体不只是多余 —— CI runner 上没有 CJK 字体,
-        // `install` 返回 `None`,那个 `.expect` 会让 4 条测试在 CI 上齐红
-        // (2026-10-13 实测 run 38360023782:本地全绿、CI Gate 失败)。
-        let ctx = egui::Context::default();
-        ctx.set_visuals(if dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        });
-        let mut app = LaterMdApp {
-            frameless: true,
-            ..Default::default()
-        };
-        app.state.layout.left = false;
-        app.state.layout.right = true;
-        // 空跑两帧:让 panel 建立 PanelState、让 shell 色板投影到位。
-        for _ in 0..2 {
-            let mut out = ctx.run_ui(
-                RawInput {
-                    screen_rect: Some(screen),
-                    ..Default::default()
-                },
-                |ui| app.draw(ui),
-            );
-            out.textures_delta.clear();
-        }
-        (ctx, app)
-    }
-
-    /// 当前皮肤 `border ↔ content` 的亮度全距(灰阶)。
-    ///
-    /// 取法同样走探针:`run_ui` 只返回 `FullOutput`,闭包内的 `theme::shell`
-    /// 拿不出来,而在 `run_ui` **之外**再 `data_mut` 就已错过当帧的色板投影。
-    fn shell_full_gap(ctx: &egui::Context) -> f32 {
-        let probe = egui::Id::new("__shell_full_probe");
-        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let gap = {
-                let s = crate::theme::shell(ui);
-                luma_gap(s.border, s.content)
-            };
-            ui.data_mut(|d| d.insert_temp(probe, gap));
-        });
-        out.textures_delta.clear();
-        ctx.data(|d| d.get_temp::<f32>(probe))
-            .expect("探针应在闭包里写入")
-    }
-
-    /// 亮度落差(灰阶,1 ≈ 1/255)。取绝对差而非相对百分比:`intensity()` 是
-    /// 0..1 感知亮度,暗色皮肤底色本身就在 0.1 附近,除它会把几级灰差放大成
-    /// 几十个百分点,阈值无法跨深浅皮肤复用。
-    fn luma_gap(a: egui::Color32, b: egui::Color32) -> f32 {
-        (a.intensity() - b.intensity()).abs() * 100.0
-    }
-
-    /// 空闲态就要看得见一条界 —— 这是改动的全部要点。
-    ///
-    /// 判据用「相对 `border ↔ content` 全距的百分比」而非绝对灰阶:每套
-    /// 皮肤的 `border = mix(sidebar, text, 0.16)` 与 content 全距本就不同,
-    /// 绝对阈值只能对其中一套成立(首版只测浅色,`gamma_multiply` 方向反转
-    /// 的 bug 正是靠补深色才发现的)。
-    ///
-    /// 25%..=60%:下限「退到底色去但仍看得见」,上限「别把面板切成两半」。
-    #[test]
-    fn preview_divider_is_visible_while_idle() {
-        for dark in [false, true] {
-            for (w, h) in [(1400.0_f32, 900.0_f32), (900.0, 700.0)] {
-                let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(w, h));
-                let (ctx, mut app) = preview_only_app(screen, dark);
-                let probe = divider_geometry(&mut app, &ctx, screen, vec![])
-                    .unwrap_or_else(|| panic!("dark={dark} {w}x{h}: 预览左缘应有分隔线"));
-                let full = shell_full_gap(&ctx);
-                let ratio = luma_gap(probe.color, probe.content) / full * 100.0;
-                assert!(
-                    (25.0..=60.0).contains(&ratio),
-                    "dark={dark} {w}x{h}: 空闲线深度 {ratio:.0}%(x={:.1},全距 {full:.2} 灰阶)\
-                     应落在 25..=60% —— 太浅等于没有线,太深把面板切成两半",
-                    probe.x
-                );
-                // 空闲必须是 1 物理像素:「hover 加粗」要有对比基准,空闲若也
-                // 是 3px,加粗就没有意义了(且面板会被切成两半)。
-                assert!(
-                    (probe.width_px - 1.0).abs() < 0.01,
-                    "dark={dark} {w}x{h}: 空闲线宽应为 1 物理像素,实得 {:.2}",
-                    probe.width_px
-                );
-            }
-        }
-    }
-
-    /// 指针进命中带内线要**明显比空闲更深**,拖动中更深 —— 方向不得反。
-    ///
-    /// 硬编码 5.5px(带内必亮)/ 9px(带外必不亮),**不引用
-    /// `PREVIEW_DIVIDER_GRAB`**:首版拿 token 当期望值,红绿验证时把半径
-    /// 退回 egui 出厂 3.0 照样全绿(越界点取 `GRAB + 3`,半径缩一半后仍在
-    /// 带外)—— 与 2026-10-08 nav 段高度上界同款事故。
-    #[test]
-    fn preview_divider_deepens_on_hover_within_the_grab_zone() {
-        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1400.0, 900.0));
-        for dark in [false, true] {
-            let (ctx, mut app) = preview_only_app(screen, dark);
-            let idle_probe = divider_geometry(&mut app, &ctx, screen, vec![]).expect("应有分隔线");
-            let (edge, idle, content) = (idle_probe.x, idle_probe.color, idle_probe.content);
-            let y = screen.height() / 2.0;
-            let at = |app: &mut LaterMdApp, ctx: &egui::Context, x: f32| {
-                divider_geometry(app, ctx, screen, vec![Event::PointerMoved(Pos2::new(x, y))])
-                    .expect("hover 帧应有线")
-            };
-            for d in [0.0_f32, 3.0, 5.5] {
-                let (in_pos, in_neg) = (at(&mut app, &ctx, edge + d), at(&mut app, &ctx, edge - d));
-
-                // ① **加粗是主通道,先断它**。2026-10-13 坤哥实测「没看见
-                // hover 加粗」时颜色通道明明是生效的 —— 1px 线的深浅变化要
-                // 「盯住看」才分辨得出,指针扫过时每帧只停几十毫秒。故这条
-                // 断言独立于颜色,少一个通道就红。
-                //
-                // 硬编码 ≥2.5 而不引用 `PREVIEW_DIVIDER_HOT_W`:后者就是被
-                // 断言的实现,拿它当期望值 = 断言自我满足(同 2026-10-08
-                // nav 段高度 / 2026-10-13 hot_zone 两处事故)。2.5 是「肉眼
-                // 一眼可辨为变粗」的下沿,留出量化余量。
-                assert!(
-                    in_pos.width_px >= 2.5,
-                    "dark={dark}: 距边 {d}px 在带内应已**加粗**(≥2.5 物理像素),\
-                     实得 {:.2}(空闲 {:.2})。加粗是 hover 的主通道,颜色只是辅助",
-                    in_pos.width_px,
-                    idle_probe.width_px
-                );
-                // 加粗必须仍**以边界为中心**:线心 `x` 不该因加粗而偏移。
-                assert!(
-                    (in_pos.x - in_neg.x).abs() <= 0.01 && (in_pos.x - edge).abs() <= 1.5,
-                    "dark={dark}: 距边 {d}px 两侧的线心应重合于边界({edge:.1}),\
-                     实得 +{:.2} / {:.2}",
-                    in_pos.x,
-                    in_neg.x
-                );
-
-                // ② 色深是辅助通道,方向不得反。
-                assert!(
-                    luma_gap(in_pos.color, content) > luma_gap(idle, content),
-                    "dark={dark}: 距边 {d}px 在带内应已提亮。若反了,说明线色用了朝黑\
-                     缩放的 gamma_multiply 而非朝底色 lerp"
-                );
-                assert_eq!(
-                    in_pos.color, in_neg.color,
-                    "dark={dark}: 距边 {d}px 应两侧对称(命中带以边界为中心)"
-                );
-            }
-            // 出带必须**完全回落**:线宽回 1px 且色回 idle,否则线会在半屏
-            // 范围内乱亮。
-            for d in [9.0_f32, 40.0] {
-                let far = at(&mut app, &ctx, edge + d);
-                assert_eq!(
-                    far.color, idle,
-                    "dark={dark}: 距边 {d}px 已超出命中带,应回落到空闲色"
-                );
-                assert!(
-                    (far.width_px - idle_probe.width_px).abs() < 0.01,
-                    "dark={dark}: 距边 {d}px 应把线宽收回到空闲的 {:.2},实得 {:.2}",
-                    idle_probe.width_px,
-                    far.width_px
-                );
-            }
-        }
-    }
-
-    /// 预览收起时不得留下悬空的线。
-    #[test]
-    fn preview_divider_disappears_when_panel_is_closed() {
-        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1400.0, 900.0));
-        let (ctx, mut app) = preview_only_app(screen, false);
-        assert!(
-            divider_geometry(&mut app, &ctx, screen, vec![]).is_some(),
-            "前置条件:预览开着时有线"
-        );
-        // 走真实归约路径(Ctrl-less:直接改状态后跑一帧 reduce+draw)。
-        app.state.layout.right = false;
-        let mut out = ctx.run_ui(
-            RawInput {
-                screen_rect: Some(screen),
-                ..Default::default()
-            },
-            |ui| {
-                app.reduce(ui.ctx());
-                app.draw(ui);
-            },
-        );
-        out.textures_delta.clear();
-        assert!(
-            divider_geometry(&mut app, &ctx, screen, vec![]).is_none(),
-            "预览收起后不该有线悬在编辑区右缘"
-        );
-    }
-
-    /// 预览左缘的分隔线必须**跟着拖动走**。
-    ///
-    /// 2026-10-13 坤哥实测反馈「线不跟着我拉的框走」。根因:`preview_divider`
-    /// 读 `PanelState`,而 egui 在**拖动期间刻意不写** `PanelState`
-    /// (`panel.rs` 的 `resize_drag_in_progress` 守卫:存的是**拖动前**的宽度,
-    /// 好让「拖到最小宽再拖回来」能恢复原宽)。故线永远钉在拖动前的位置。
-    ///
-    /// 本测试用真实事件流(press → move → release)走完整 draw 路径,
-    /// 逐步量线的 x,断言它**单调跟随**指针。
-    #[test]
-    fn preview_divider_follows_the_drag() {
-        // 同上:只量线,不渲染文字,故不装字体(CI runner 无 CJK 字体)。
-        let ctx = egui::Context::default();
-        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(1400.0, 900.0));
-        let mut app = LaterMdApp {
-            frameless: true,
-            ..Default::default()
-        };
-        app.state.layout.left = false;
-        app.state.layout.right = true;
-
-        // 每帧的字体图集纹理无人消费,不 clear 会在 FullOutput drop 时 panic。
-        let frame = |app: &mut LaterMdApp, events: Vec<Event>| {
-            let mut out = ctx.run_ui(
-                RawInput {
-                    events,
-                    screen_rect: Some(screen),
-                    ..Default::default()
-                },
-                |ui| app.draw(ui),
-            );
-            out.textures_delta.clear();
-            out
-        };
-        // 先空跑两帧,让 panel 建立 PanelState。
-        let _ = frame(&mut app, vec![]);
-        let _ = frame(&mut app, vec![]);
-
-        let start_x = divider_geometry(&mut app, &ctx, screen, vec![])
-            .expect("三栏布局下预览左缘应有分隔线")
-            .x;
-        // 线的位置 = 预览面板左缘;据此算出指针起点(压在边界上)。
-        let press_y = screen.height() / 2.0;
-        let press = Pos2::new(start_x, press_y);
-        let mut xs = Vec::new();
-        // 按下必须**单独占一帧**:egui 要先落一次 press 才把该 widget 标记为
-        // 按压中,同帧再发 PointerMoved 不构成「拖动」(首版把 press+move 塞进
-        // 一帧,实测 `dragged()` 恒 false、`interact_pointer_pos()` 恒 None,
-        // 拖动压根没启动 —— 现象与「线不跟手」一模一样,差点误判成实现问题)。
-        frame(&mut app, vec![Event::PointerMoved(press)]);
-        frame(
-            &mut app,
-            vec![Event::PointerButton {
-                pos: press,
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: Default::default(),
-            }],
-        );
-        for step in 1..=5 {
-            let target_x = start_x + step as f32 * 24.0;
-            frame(
-                &mut app,
-                vec![Event::PointerMoved(Pos2::new(target_x, press_y))],
-            );
-            let x = divider_geometry(&mut app, &ctx, screen, vec![])
-                .expect("拖动过程中线仍在")
-                .x;
-            xs.push(x);
-        }
-        frame(
-            &mut app,
-            vec![Event::PointerButton {
-                pos: Pos2::new(start_x + 5.0 * 24.0, press_y),
-                button: PointerButton::Primary,
-                pressed: false,
-                modifiers: Default::default(),
-            }],
-        );
-        let mut prev = start_x;
-        let mut moved = 0;
-        for x in &xs {
-            assert!(
-                *x > prev - 0.5,
-                "线应随指针右移而单调跟随,却从 {prev:.1} 退到 {x:.1}(全序列 {xs:?})"
-            );
-            if *x > prev + 1.0 {
-                moved += 1;
-            }
-            prev = *x;
-        }
-        assert!(
-            moved >= 4,
-            "5 步拖动里应至少 4 步看到线在动,实得 {moved} 步(xs={xs:?}, 起点 {start_x:.1})"
-        );
     }
 
     fn find_test_app(name: &str) -> (LaterMdApp, std::path::PathBuf) {
@@ -5698,135 +5177,6 @@ mod tests {
         assert!(app.outbox.is_empty());
     }
 
-    /// 自绘标题栏的「关闭右侧」按钮在**完整三栏 draw** 路径下真的能点到,
-    /// 且翻转的是右栏而非左栏(M1 验收点)。
-    ///
-    /// 走 `LaterMdApp::draw`(而非单独渲 `titlebar::ui`)是有意的:三栏重排后
-    /// 新加的 `Panel::right("preview")` 与边缘缩放命令区挤在同一命中层里,
-    /// 只测孤立标题栏会漏掉「谁抢走了这次点击」这类回归。
-    #[test]
-    fn titlebar_right_button_toggles_only_the_right_panel() {
-        let ctx = egui::Context::default();
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
-        let mut app = LaterMdApp {
-            frameless: true,
-            ..Default::default()
-        };
-        assert!(
-            app.state.layout.left && app.state.layout.right,
-            "出厂三栏全开"
-        );
-
-        let bar = egui::Rect::from_min_max(
-            screen.left_top(),
-            screen.left_top() + egui::vec2(screen.width(), crate::ui::tokens::TITLEBAR_H),
-        );
-        // 六个按钮从左至右:`TITLE_BUTTONS` 顺序,右栏是第 2 个(下标 1)
-        let center = crate::ui::titlebar::button_rects(bar)[1].center();
-        let click = |pressed| Event::PointerButton {
-            pos: center,
-            button: PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        let frame = |app: &mut LaterMdApp, events: Vec<Event>| {
-            ctx.run_ui(
-                RawInput {
-                    events,
-                    screen_rect: Some(screen),
-                    ..Default::default()
-                },
-                |ui| app.draw(ui),
-            )
-            .drop_without_applying_deltas();
-        };
-
-        // 面板层前几遍为 sizing pass,widget 尚不参与命中测试
-        frame(&mut app, Vec::new());
-        frame(&mut app, Vec::new());
-        frame(&mut app, vec![Event::PointerMoved(center)]);
-        frame(&mut app, vec![click(true)]);
-        frame(&mut app, vec![click(false)]);
-        assert_eq!(app.outbox, vec![Message::RightPanelToggled]);
-
-        // 归约在下一帧:只翻右栏,左栏纹丝不动
-        ctx.run_ui(
-            RawInput {
-                screen_rect: Some(screen),
-                ..Default::default()
-            },
-            |ui| app.reduce(ui.ctx()),
-        )
-        .drop_without_applying_deltas();
-        assert!(
-            app.state.layout.left && !app.state.layout.right,
-            "只收右栏,左栏保持:left={} right={}",
-            app.state.layout.left,
-            app.state.layout.right
-        );
-    }
-
-    /// #42 M2:预览面板不可见(右栏收起)时点大纲 —— 源码侧照跳、预览请求
-    /// 悬置不炸;重开面板消费一次(补跳,不因「没看见」就吞掉)。悬置期间
-    /// 文档一旦变更,帧内同步 rebuild 把残留请求丢弃,重开不再跳旧目标。
-    /// 整条走完整 `draw`(面板开合、编辑器消费 jump_to、快照同步都是真实
-    /// 路径),断言之外任何一步 panic 都会直接红在本测试。
-    #[test]
-    fn outline_click_with_preview_collapsed_pending_then_dropped_after_edit() {
-        let ctx = egui::Context::default();
-        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 600.0));
-        let mut app = LaterMdApp::default();
-
-        // —— 第一段:收起 → 点击 → 悬置;重开 → 消费 ——
-        app.state.apply(Message::RightPanelToggled);
-        assert!(!app.state.layout.right, "前置:右栏已收起");
-        let span = app.state.tabs.current().preview.outline[1].span.clone();
-        app.state.apply(Message::OutlineItemClicked(span.clone()));
-        draw_frames(&mut app, &ctx, screen, 3);
-        assert!(
-            app.state.tabs.current().cursor.jump_to.is_none(),
-            "面板不可见,源码侧照常消费跳转"
-        );
-        assert_eq!(
-            app.state.tabs.current().preview.scroll_target,
-            Some(span.start),
-            "预览未绘制,请求悬置不消费、不 panic"
-        );
-
-        app.state.apply(Message::RightPanelToggled);
-        draw_frames(&mut app, &ctx, screen, 3);
-        assert_eq!(
-            app.state.tabs.current().preview.scroll_target,
-            None,
-            "重开面板消费悬置请求(补跳),一次即清"
-        );
-
-        // —— 第二段:收起 → 点击 → 文档变更 → 残留丢弃;重开不复活 ——
-        app.state.apply(Message::RightPanelToggled);
-        let span = app.state.tabs.current().preview.outline[1].span.clone();
-        app.state.apply(Message::OutlineItemClicked(span));
-        // 修订号前进:编辑器 draw 帧内按生产同步规则(editor.rs)rebuild 快照
-        app.state
-            .tabs
-            .current_mut()
-            .editor
-            .insert_chars(0, "改动\n\n");
-        draw_frames(&mut app, &ctx, screen, 3);
-        assert_eq!(
-            app.state.tabs.current().preview.scroll_target,
-            None,
-            "文档变更后残留请求随快照重建丢弃"
-        );
-
-        app.state.apply(Message::RightPanelToggled);
-        draw_frames(&mut app, &ctx, screen, 3);
-        assert_eq!(
-            app.state.tabs.current().preview.scroll_target,
-            None,
-            "旧请求不复燃:重开不带着旧偏移跳新文本"
-        );
-    }
-
     /// M5 收口:标题栏齿轮(2026-09-27 迁自左栏底段设置行)在**完整
     /// frameless draw** 路径下点得动,且走完归约后设置对话框真的打开
     /// (decisions-pending #31;左栏版本的能力迁移验收点)。
@@ -7732,11 +7082,12 @@ mod tests {
         // 「文件」= menubar 首项、「248 字」= statusbar 的字数统计、
         // 「选择一个目录作为文件树根」= 左栏文件树的引导语。
         //
-        // 格式工具条的信号 2026-10-08 S2-2 从「H1」换成「更多」:H1 已
-        // 连同标题组收进溢出菜单,**菜单关闭时不绘制**,拿它取证会在
-        // S2-2 落地后恒失败。「更多」是溢出按钮的本体文案,只由格式工具条
-        // 画出,且**与菜单开合无关**(直出位恒在),是更稳的取证点。
-        for present in ["文件", "248 字", "选择一个目录作为文件树根", "更多"] {
+        // 格式工具条的信号 2026-10-08 S2-2 从「H1」换成「更多」(H1 收进
+        // 溢出菜单,菜单关闭时不绘制);live-unify P4 删右栏后编辑区变宽,
+        // 工具条恒在宽档 —— 标题组直出,「H1」回到恒绘位。「更多」在宽档
+        // **不画**(宽档全直出),不能再当信号;「H1」只由格式工具条的
+        // RichText 字形画出,样例文档不含该字面,取证不与正文串台。
+        for present in ["文件", "248 字", "选择一个目录作为文件树根", "H1"] {
             assert!(
                 three.iter().any(|t| t.contains(present)),
                 "取证有效:三栏帧里能找到 {present:?}"
@@ -8000,7 +7351,7 @@ mod tests {
         )
         .drop_without_applying_deltas();
         assert!(!app.state.layout.zen, "已退出禅定");
-        assert!(app.state.layout.left && app.state.layout.right, "三栏还原");
+        assert!(app.state.layout.left, "侧栏还原");
     }
 
     /// 禅定的**迭代性**:进/出一整轮后面板组合与进入前逐项一致(§12 验收点),
@@ -8012,16 +7363,15 @@ mod tests {
         let mut app = LaterMdApp::default();
         // 先把 left 关掉:如果退出禅定一律全开,这条用例会当场红
         app.state.apply(Message::SidebarToggled);
-        assert!(!app.state.layout.left && app.state.layout.right);
+        assert!(!app.state.layout.left);
 
         app.state.apply(Message::ZenToggled);
         draw_frames(&mut app, &ctx, screen, 2);
         app.state.apply(Message::ZenToggled);
         assert!(
-            !app.state.layout.left && app.state.layout.right,
-            "逐项还原:left={} right={}",
-            app.state.layout.left,
-            app.state.layout.right
+            !app.state.layout.left,
+            "逐项还原:left={}(右栏对照预览已随 live-unify P4 退役)",
+            app.state.layout.left
         );
     }
 
