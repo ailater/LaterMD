@@ -190,85 +190,53 @@ impl SidebarTab {
     }
 }
 
-/// 文档派生视图快照:预览文本 + 大纲,与编辑器修订号绑定。
+/// 文档派生视图快照:**大纲**与编辑器修订号绑定(P5 瘦身后的全部内容)。
 ///
-/// 只在编辑器修订号前进(或整篇换入)时重建,与预览同步是同一时机;
-/// vendored 层内部还会按 text hash 二次缓存,空闲帧零开销。
+/// 只在编辑器修订号前进(或整篇换入)时重建;`outline` 的 `span` 直接索引
+/// [`Self::text`] 这份快照。
+///
+/// **P5(live-unify)之前这里还产一份整篇渲染文本与四层偏移映射** —— 它们
+/// 只为右栏对照预览存在,而预览已退役:写作渲染在 Live 侧**按块**做同样的
+/// 五层改写(`LiveState::rich_block_with_base`,结果进块级 `rich_cache`),
+/// 与之共享的是 `latermd_md` 的纯函数与 `ui::rich_widgets` 的绘制件,不是
+/// 这份整篇产物。删掉后每次修订号前进省四遍全文扫描 + 四份映射分配。
 pub struct PreviewState {
     /// 当前快照的**源文本**(大纲 `span` 索引它,与编辑器缓冲同源)。
     ///
-    /// 渲染走 [`Self::rendered`] —— wikilink 展开会改变偏移,渲染文本不能
-    /// 与源码偏移混用。`text` 是快照真源:大纲 `span` 索引它;LP2-4 起
-    /// 偏移换算走 [`Self::offset_map`],不再由此字段反推,字段保留作
-    /// 「大纲 span 锚定的文本」与快照一致性断言的锚点,非测试构建无读取。
+    /// 渲染文本的偏移口径与源码不同(五层改写会位移),故这份拷贝只作
+    /// 「大纲 span 锚定的文本」与快照一致性断言的锚点;渲染侧另有块级
+    /// 改写产物(`LiveState::rich_block_with_base`),不读这里。
     #[cfg_attr(not(test), allow(dead_code))]
     pub text: String,
     /// 快照对应的 [`EditorBuffer::revision`]。
     pub synced_rev: u64,
     /// 文档大纲,与 `text` 同一次重建产出,`span` 直接索引该文本。
     pub outline: Vec<OutlineItem>,
-    /// 喂给预览的**渲染文本**:`[[wikilink]]` 已展开成 `wiki://` 链接
-    /// (P3 双向链接),`==文本==` 已改写成 `hl://` 链接(#65),覆盖集内的
-    /// emoji 已改写成 `emoji://` 链接(#48 B1)。源码 `text` 一字不改 ——
-    /// 各层改写都只影响渲染。
-    pub rendered: String,
-    /// 「源码偏移 ↔ wikilink 展开后偏移」映射表(LP2-4 第一层):与
-    /// `rendered` 同一次重建产出(`latermd_md::expand_wikilinks_with_map`)。
-    /// 预览侧消费(大纲跳转/section anchor 的偏移换算,见 `ui::preview`),
-    /// 只读派生物,不回写编辑缓冲。
-    pub offset_map: latermd_md::OffsetMap,
-    /// 「wikilink 展开后偏移 ↔ 高亮层输出偏移」映射表(#65 第二层:
-    /// `==文本==` 改写成 `hl://` 链接),与 `rendered` 同次产出
-    /// (`latermd_md::expand_highlight_links`)。消费点与相邻表**按改写顺序
-    /// 串行穿过**(可组合口径见 `latermd_md::OffsetMap`),不预合并。
-    pub highlight_map: latermd_md::OffsetMap,
-    /// 「高亮层输出偏移 ↔ `rendered` 偏移」映射表(#48 B1 第三层:emoji
-    /// 链接改写),与 `rendered` 同次产出。消费点把它与前两层**按改写顺序
-    /// 串行穿过**(可组合口径见 `latermd_md::OffsetMap`),不与前者预合并。
-    pub emoji_map: latermd_md::OffsetMap,
-    /// 「emoji 层输出偏移 ↔ `rendered` 偏移」映射表(#63 第四层:任务列表
-    /// checkbox 链接改写),与 `rendered` 同次产出。正向消费(大纲跳转)
-    /// 四层串行穿过;任务链接载荷本身是 emoji 层输出坐标,点击回写时逆穿
-    /// 本表与 `emoji_map`、`highlight_map` 三层即回源码。
-    pub task_map: latermd_md::OffsetMap,
-    /// 待滚动到的字节偏移(大纲点击交下来的目标),由预览绘制消费一次。
-    /// 面板收起期间悬置(消费只发生在预览绘制帧);快照 rebuild(文档
-    /// 变更)即丢弃 —— 旧偏移对重建后的文本没有意义。
-    /// 属 UI 关注点(同侧边栏把手与键位捕获),不进归约:滚动位置不是文档状态。
-    pub scroll_target: Option<usize>,
+    //
+    // P5(live-unify)瘦身:`rendered` 与四层渲染映射(`offset_map` /
+    // `highlight_map` / `emoji_map` / `task_map`)、`scroll_target` 已删。
+    // 它们只为右栏预览存在;写作渲染在 Live 侧**按块**做同样的五层改写
+    // (`LiveState::rich_block_with_base`),共享的是 `latermd_md` 的纯函数与
+    // `ui::rich_widgets` 的绘制件,不是这份整篇产物。删后每次修订号前进
+    // 省掉四遍全文扫描 + 四份映射分配;大纲只需要下面的 `outline`。
 }
 
 impl PreviewState {
     /// 以编辑器当前内容建立快照(文本 + 大纲)。
+    ///
+    /// P5 起**不再产出渲染文本**:整篇改写链(cached 四层 + 图片 URI)的
+    /// 唯一消费者是已退役的右栏预览,每次修订号前进都重算它们是纯浪费。
+    /// Live 侧按块改写并缓存结果(`rich_cache`),稳态帧零解析;大纲仍在
+    /// 这里一次性算出侧栏要用。
     pub fn new(editor: &EditorBuffer) -> Self {
         let text = editor.text().to_owned();
-        // 四层改写都放在重建里而不是每帧:wikilink 展开要遍历全文、高亮/
-        // emoji/任务标记改写要解析全文,空闲帧不该付这个代价(与「修订号
-        // 前进才重建」同一条规则)。顺序固定 **wikilink 展开 → 高亮 `==`
-        // 链接改写 → emoji 链接改写 → 任务 checkbox 链接改写**(再往预览
-        // 绘制帧叠相对图片 URI):wikilink 展开把 `[[X]]` 变成链接后,高亮
-        // 层才能靠豁免清单不拆坏它;高亮层在 emoji 之前,`==😀==` 先成
-        // `hl://` 链接,emoji 层的「链接文本/目标整体豁免」顺势保护它;
-        // 任务层最后,它的载荷偏移因此是 emoji 层输出坐标(点击回写时逆穿
-        // 三层映射)。每层一张映射表,与渲染串同次产出,消费点按同一顺序
-        // 串行穿过。
-        let (after_wikilinks, offset_map) = latermd_md::expand_wikilinks_with_map(&text);
-        let (after_highlight, highlight_map) = latermd_md::expand_highlight_links(&after_wikilinks);
-        let (after_emoji, emoji_map) = latermd_md::expand_emoji_links(
-            &after_highlight,
-            crate::ui::emoji_data::covered_glyphs(),
-        );
-        let (rendered, task_map) = latermd_md::expand_task_links(&after_emoji);
+        // 顺序曾固定为 **wikilink 展开 → 高亮 `==` 链接改写 → emoji 链接
+        // 改写 → 任务 checkbox 链接改写**,那条顺序纪律搬去了
+        // `LiveState::rich_block_with_base` 的层序注释(五层含图片改写)。
         Self {
-            rendered,
-            offset_map,
-            highlight_map,
-            emoji_map,
-            task_map,
             outline: latermd_md::outline(&text),
             text,
             synced_rev: editor.revision(),
-            scroll_target: None,
         }
     }
 
@@ -1288,9 +1256,10 @@ impl State {
                 self.open_search_hit(&path, line_no);
             }
             Message::OutlineItemClicked(span) => {
-                // 编辑器跳光标 + 预览滚到该标题(P3「大纲预览跳转」):同一个
-                // span 两处消费,预览侧在绘制时换算成 y
-                self.tabs.current_mut().preview.scroll_target = Some(span.start);
+                // 大纲点击只驱动一处:编辑器/写作块跳光标。右栏预览退役
+                // (live-unify P5)后不再有第二处消费 —— 写作模式与禅定同走
+                // Live 浏览态的块级滚动(`live::ui` 的 `jump_to`),归约侧不再
+                // 挂跨帧的悬置滚动目标。
                 self.jump_cursor_to_heading(span);
             }
             Message::WikilinkClicked { target } => self.open_wikilink(&target),
@@ -4761,196 +4730,6 @@ mod tests {
         assert!(state.tabs.current().preview.text[outline[1].span.clone()].contains("## 常用元素"));
     }
 
-    /// LP2-4:快照携带「源码偏移 ↔ 渲染偏移」映射,与 `rendered` 同次产出
-    /// 且换算正确(标题 span 穿表后落在渲染串的同一文本处)。映射只服务
-    /// 预览侧消费 —— 建快照前后,编辑缓冲的修订号与 dirty 标志分毫不动
-    /// (源码/rope/撤销栈不在映射的服务面内)。
-    #[test]
-    fn preview_offset_map_translates_without_touching_editor_buffer() {
-        let mut editor =
-            EditorBuffer::new("开场白。\n\n见 [[架构决策]] 的后续。\n\n## 标题\n\n正文。\n");
-        // 制造一个已编辑态:dirty=true、rev>0,任何对缓冲的写都会改变两者
-        editor.clear_dirty();
-        editor.insert_chars(0, "引:");
-        let (rev, dirty) = (editor.revision(), editor.is_dirty());
-        assert!(dirty, "前置:缓冲处于已编辑态,见证量非平凡");
-
-        let preview = PreviewState::new(&editor);
-        assert_eq!(editor.revision(), rev, "建快照不推进修订号");
-        assert_eq!(editor.is_dirty(), dirty, "建快照不动 dirty 标志");
-        assert_eq!(editor.text(), preview.text, "快照文本与缓冲一致(只读拷贝)");
-
-        // 渲染串与映射同源一致;标题(在 wikilink 之后)的源码偏移穿表后
-        // 落在渲染串的同一文本处,反向穿回
-        assert_eq!(
-            preview.rendered,
-            latermd_md::expand_wikilinks(preview.text.as_str())
-        );
-        let heading_src = preview.text.find("## 标题").expect("heading in snapshot");
-        let heading_out = preview
-            .rendered
-            .find("## 标题")
-            .expect("heading in rendered");
-        let mapped = preview.offset_map.source_to_rendered(heading_src);
-        assert_eq!(mapped, heading_out, "标题偏移按展开位移平移");
-        assert_eq!(
-            preview.offset_map.rendered_to_source(mapped),
-            heading_src,
-            "反向换算回到源码原处"
-        );
-        // 换算后取到的确实是渲染串里的标题文本(落点正确,不是恰好数字相等)
-        assert!(preview.rendered[mapped..].starts_with("## 标题"));
-    }
-
-    /// #48 B1:emoji 链接改写只进 `rendered` 渲染副本 —— 源码、快照真源
-    /// 一字不动;两层映射(wikilink → emoji)串行穿过,标题偏移落在渲染串
-    /// 同一文本处;代码区(围栏 + 行内)与既有链接内部豁免。
-    #[test]
-    fn preview_emoji_rewrite_touches_only_rendered_copy() {
-        let source =
-            "开场 😀 与 [[架构决策]]\n\n## 标题\n\n```rust\nlet e = \"😀\";\n```\n\n行内 `😀` 免\n";
-        let mut editor = EditorBuffer::new(source);
-        editor.clear_dirty();
-        let (rev, dirty) = (editor.revision(), editor.is_dirty());
-        let preview = PreviewState::new(&editor);
-
-        // 源码零外泄:缓冲、快照真源、修订号与 dirty 分毫不动
-        assert_eq!(editor.text(), source);
-        assert_eq!(preview.text, source);
-        assert_eq!(editor.revision(), rev);
-        assert_eq!(editor.is_dirty(), dirty);
-
-        // 渲染副本:裸 😀 成 emoji:// 链接;wikilink 照旧展开且不被拆坏;
-        // 围栏与行内代码豁免
-        assert!(preview
-            .rendered
-            .starts_with("开场 [😀](<emoji://😀>) 与 [架构决策](<wiki://架构决策>)\n"));
-        assert!(preview.rendered.contains("let e = \"😀\";"));
-        assert!(preview.rendered.contains("行内 `😀` 免"));
-
-        // 两层串行穿过:标题(在两类改写之后)落在渲染串同一文本处
-        let heading_src = source.find("## 标题").expect("heading in source");
-        let after1 = preview.offset_map.source_to_rendered(heading_src);
-        let after2 = preview.emoji_map.source_to_rendered(after1);
-        assert_eq!(
-            after2,
-            preview.rendered.find("## 标题").expect("in rendered")
-        );
-        assert_eq!(
-            preview
-                .offset_map
-                .rendered_to_source(preview.emoji_map.rendered_to_source(after2)),
-            heading_src,
-            "两层逆穿回源码原处"
-        );
-    }
-
-    /// #48 B1:改写零外泄到落盘 —— emoji 文档建预览快照后保存,盘上字节与
-    /// 源码逐字节相同(改写只活在渲染副本,保存走编辑缓冲)。
-    #[test]
-    fn emoji_rewrite_never_leaks_into_saved_bytes() {
-        let path = temp_path("emoji-b1.md");
-        let source = "# 标题 😀\n\n正文 🚀 与 [[链接]]\n\n```rust\nlet e = \"😀\";\n```\n";
-        let mut state = State::default();
-        {
-            let tab = state.tabs.current_mut();
-            tab.editor.replace_all(source);
-            tab.preview.rebuild(&tab.editor);
-        }
-        assert_ne!(
-            state.tabs.current().preview.rendered,
-            source,
-            "前置:渲染副本确实被改写(断言非恒真)"
-        );
-
-        state.save_to(path.clone());
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            source.as_bytes(),
-            "盘上字节 == 源码,emoji 改写零外泄"
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// #65 M1:高亮改写只进 `rendered` 渲染副本 —— `==文本==` 成 `hl://`
-    /// 链接;源码、快照真源、修订号与 dirty 分毫不动;四层映射串行穿过,
-    /// 标题偏移落在渲染串同一文本处、逆穿回源码;代码区豁免。
-    #[test]
-    fn preview_highlight_rewrite_touches_only_rendered_copy() {
-        let source = "重点 ==高亮内容== 与 [[架构决策]]\n\n## 标题\n\n```rust\nlet a == b;\n```\n\n行内 `a == b` 免\n";
-        let mut editor = EditorBuffer::new(source);
-        editor.clear_dirty();
-        let (rev, dirty) = (editor.revision(), editor.is_dirty());
-        let preview = PreviewState::new(&editor);
-
-        // 源码零外泄:缓冲、快照真源、修订号与 dirty 分毫不动
-        assert_eq!(editor.text(), source);
-        assert_eq!(preview.text, source);
-        assert_eq!(editor.revision(), rev);
-        assert_eq!(editor.is_dirty(), dirty);
-
-        // 渲染副本:`==…==` 成 hl:// 链接;wikilink 照旧展开;围栏与行内
-        // 代码豁免(代码里的 == 是等号,原样)
-        assert!(preview
-            .rendered
-            .starts_with("重点 [高亮内容](<hl://>) 与 [架构决策](<wiki://架构决策>)\n"));
-        assert!(preview.rendered.contains("let a == b;"));
-        assert!(preview.rendered.contains("行内 `a == b` 免"));
-
-        // 四层串行穿过:标题(在全部改写之后)落在渲染串同一文本处
-        let heading_src = source.find("## 标题").expect("heading in source");
-        let after1 = preview.offset_map.source_to_rendered(heading_src);
-        let after2 = preview.highlight_map.source_to_rendered(after1);
-        let after3 = preview.emoji_map.source_to_rendered(after2);
-        let after4 = preview.task_map.source_to_rendered(after3);
-        assert_eq!(
-            after4,
-            preview.rendered.find("## 标题").expect("in rendered")
-        );
-        assert_eq!(
-            preview.offset_map.rendered_to_source(
-                preview.highlight_map.rendered_to_source(
-                    preview
-                        .emoji_map
-                        .rendered_to_source(preview.task_map.rendered_to_source(after4))
-                )
-            ),
-            heading_src,
-            "四层逆穿回源码原处"
-        );
-    }
-
-    /// #65 硬红线:高亮改写零外泄到落盘 —— #32 快照护栏同法(#48 口径),
-    /// 建快照后保存,盘上字节与源码逐字节相同。
-    #[test]
-    fn highlight_rewrite_never_leaks_into_saved_bytes() {
-        let path = temp_path("highlight-m1.md");
-        let source = "# 标题 ==高亮==\n\n正文 ==x== 与 😀\n\n```rust\nlet a == b;\n```\n";
-        let mut state = State::default();
-        {
-            let tab = state.tabs.current_mut();
-            tab.editor.replace_all(source);
-            tab.preview.rebuild(&tab.editor);
-        }
-        assert!(
-            state
-                .tabs
-                .current()
-                .preview
-                .rendered
-                .contains("[高亮](<hl://>)"),
-            "前置:渲染副本确实被改写(断言非恒真)"
-        );
-
-        state.save_to(path.clone());
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            source.as_bytes(),
-            "盘上字节 == 源码,高亮改写零外泄"
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
     // —— 任务列表 checkbox 回写(#63)——
 
     /// 切换语义:未勾 → 写小写 `x`;已勾(小写/大写 X)→ 写空格;嵌套
@@ -5056,18 +4835,6 @@ mod tests {
             "盘上字节 == 切换后的源码"
         );
         let _ = std::fs::remove_file(&path);
-    }
-
-    /// #63 第三层改写只进渲染副本:任务标记在 `rendered` 里已是 `task://`
-    /// 链接,editor 缓冲与源码一字不动(#48 B1 口径)。
-    #[test]
-    fn preview_task_rewrite_touches_only_rendered_copy() {
-        let source = "- [ ] 任务 😀\n\n```rust\nlet a = [ ];\n```\n";
-        let editor = EditorBuffer::new(source);
-        let preview = PreviewState::new(&editor);
-        assert!(preview.rendered.contains("task://u"), "未勾载荷在渲染副本");
-        assert_eq!(editor.text(), source, "源码一字不动");
-        assert!(!editor.is_dirty(), "渲染改写不置 dirty");
     }
 
     /// 大纲点击归约:跳过 span 吸收的前置换行落到标题行首,并按当前缓冲
@@ -6095,85 +5862,6 @@ mod tests {
         assert_eq!(reloaded.editor_font_size, font_before, "排版偏好不受影响");
         assert!(reloaded.show_minimap, "minimap 开关不受影响");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 大纲点击同时驱动两处:编辑器跳光标(既有)+ 预览滚到该标题(P3)。
-    #[test]
-    fn outline_click_sets_cursor_jump_and_preview_scroll() {
-        let mut state = State::default();
-        state.apply(Message::OutlineItemClicked(10..19));
-        assert_eq!(state.tabs.current().preview.scroll_target, Some(10));
-        assert!(
-            state.tabs.current().cursor.jump_to.is_some(),
-            "编辑器侧照旧跳光标"
-        );
-    }
-
-    /// 连续点击大纲:预览请求按**最新**一条覆盖(不排队、不残留旧值);
-    /// 重复点击当前条目照样重登请求(幂等重跳,不是「已在原地就吞掉」),
-    /// 源码侧 `jump_to` 同步重置。
-    #[test]
-    fn outline_click_overwrites_request_and_reclick_rearms() {
-        let mut state = State::default();
-        let (first, second) = {
-            let outline = &state.tabs.current().preview.outline;
-            (outline[0].span.clone(), outline[1].span.clone())
-        };
-        assert_ne!(first.start, second.start, "前置:两个条目偏移不同");
-
-        state.apply(Message::OutlineItemClicked(first.clone()));
-        assert_eq!(
-            state.tabs.current().preview.scroll_target,
-            Some(first.start)
-        );
-
-        state.apply(Message::OutlineItemClicked(second.clone()));
-        assert_eq!(
-            state.tabs.current().preview.scroll_target,
-            Some(second.start),
-            "请求被最新点击覆盖"
-        );
-
-        state.apply(Message::OutlineItemClicked(second.clone()));
-        assert_eq!(
-            state.tabs.current().preview.scroll_target,
-            Some(second.start),
-            "重复点击当前条目仍重登请求(幂等重跳)"
-        );
-        assert!(
-            state.tabs.current().cursor.jump_to.is_some(),
-            "源码侧跳转同步重置"
-        );
-    }
-
-    /// 文档变更后残留的预览请求被丢弃:请求偏移属于旧快照,快照 rebuild
-    /// (生产同步规则:修订号前进即重建,editor.rs)一发生就清,重开预览
-    /// 面板绝不带着旧偏移去跳新文本。
-    #[test]
-    fn outline_click_residual_request_dropped_after_rebuild() {
-        let mut state = State::default();
-        let span = state.tabs.current().preview.outline[1].span.clone();
-        state.apply(Message::OutlineItemClicked(span.clone()));
-        assert_eq!(
-            state.tabs.current().preview.scroll_target,
-            Some(span.start),
-            "前置:请求在册"
-        );
-
-        {
-            let tab = state.tabs.current_mut();
-            tab.editor.replace_all("# 新文档\n\n内容\n");
-            assert!(
-                tab.preview.synced_rev != tab.editor.revision(),
-                "前置:修订号已前进"
-            );
-            tab.preview.rebuild(&tab.editor);
-        }
-        assert_eq!(
-            state.tabs.current().preview.scroll_target,
-            None,
-            "残留请求随快照重建丢弃"
-        );
     }
 
     /// `[[wikilink]]`:命中即打开同名文档(与文件树点击同一条路径),找不到

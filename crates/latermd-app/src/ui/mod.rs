@@ -16,7 +16,6 @@ pub mod layout;
 pub mod menubar;
 pub mod mermaid;
 pub mod minimap;
-pub mod preview;
 pub mod quick_open;
 pub mod rich_widgets;
 pub mod selection_ai;
