@@ -3288,4 +3288,50 @@ mod tests {
             cell_text(borrowed_table, 1, 1)
         );
     }
+
+    /// 块级 heal 契约(live-unify-plan P1/R1):AI 流式的残缺尾部以「块」为
+    /// 单位喂给 Live 富渲染(`MarkdownLabel::heal(true)` 逐块开启),heal 必须
+    /// 在**块片段**上就把残缺补齐。达标即块级 heal 够用,不必退回「流式期间
+    /// 整篇 heal 后再切块」—— 那条的 healed 偏移与编辑缓冲的原始字节对不上,
+    /// Live 的块表(编辑安全底线:块区间必须落在原始文本上)不可用。
+    #[test]
+    fn block_level_heal_closes_streaming_fragments() {
+        // 残缺 fence(流式最常见):尾部块补闭合。流式尾部即文档尾,块级
+        // 补的位置与整篇 heal 相同,两者渲染等价。
+        let streaming = "# 标题\n\n正文。\n\n```rust\nfn main() {\n";
+        let tail = blocks(streaming).last().expect("流式尾部成块").clone();
+        let tail = &streaming[tail];
+        assert!(
+            tail.starts_with("```rust"),
+            "未闭合 fence 的尾部自成一块:{tail:?}"
+        );
+        assert_eq!(egui_markdown::heal(tail).into_owned(), format!("{tail}```"));
+        // 残缺表格(流式次常见):表头已出、分隔行只流到一半 → 补完整列数,
+        // 解析出 Table token(截断的是**数据行**时 heal 不动它 —— 渲染仍合法,
+        // 不构成残缺排版,见 vendored heal_table 的契约)。
+        let partial = "| 列甲 | 列乙 |\n|---";
+        let healed = egui_markdown::heal(partial).into_owned();
+        assert!(
+            parse(&healed)
+                .tokens
+                .iter()
+                .any(|token| matches!(token, Token::Table(_))),
+            "半截分隔行应补齐成可解析表格:{healed:?}"
+        );
+        // 未闭合 **:补对侧标记
+        assert_eq!(
+            egui_markdown::heal("加粗 **重点").into_owned(),
+            "加粗 **重点**"
+        );
+        // 完整块零改动(稳态帧恒等,Cow::Borrowed 不付分配)
+        let complete = "## 小节\n\n普通段落,标记完整闭合 **粗**。\n";
+        for range in blocks(complete) {
+            let block = &complete[range];
+            assert_eq!(
+                egui_markdown::heal(block).into_owned(),
+                block,
+                "完整块 heal 恒等:{block:?}"
+            );
+        }
+    }
 }

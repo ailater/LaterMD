@@ -616,6 +616,17 @@ impl LaterMdApp {
                     return;
                 }
                 let tab = state.tabs.current_mut();
+                // Live 分支(live-unify-plan P1)的两个渲染条件,与右栏预览
+                // 同源同口径:`base_dir` 锚定相对图片的 file:// 改写(未落盘
+                // 为 None),`heal` 仅 AI 流式写入本标签时开(残缺补闭合)。
+                // 都在 destructure 前取 —— document 不进下面的解构,借用随
+                // 即结束,不与 editor/preview 的 &mut 冲突。
+                let live_heal = state.ai.is_streaming() && state.ai_active_tab == Some(tab.id);
+                let base_dir = tab
+                    .document
+                    .path
+                    .as_deref()
+                    .and_then(std::path::Path::parent);
                 let crate::tabs::TabState {
                     editor,
                     preview,
@@ -712,6 +723,10 @@ impl LaterMdApp {
                     // 活动块,源码模式不接线 —— 边界见 decisions-pending #122;
                     // 关闭 = 现状零变化)。
                     state.theme.show_focus_mode,
+                    // live-unify-plan P1:相对图片锚定目录与流式 heal,
+                    // 仅 Live 分支消费(见 editor::ui 文档)。
+                    base_dir,
+                    live_heal,
                     // 右键菜单条目的键位标注与菜单栏同源(context-menu-plan §3 M1)。
                     &state.keymap,
                     outbox,

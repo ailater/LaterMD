@@ -184,6 +184,10 @@ pub struct CursorChannel<'a> {
 /// ThemeSettings 同路)。关闭时走与从前逐字节相同的路径 —— TextEdit 宽
 /// 度、ScrollArea、gutter 全部不变,minimap 的注册/绘制/行模型缓存一概
 /// 不进。仅源码模式生效:Live 分支在更早处返回。
+///
+/// `base_dir` / `heal` 只被 Live 分支消费(live-unify-plan P1):前者锚定
+/// 相对图片的 `file://` 改写(未落盘为 None),后者仅在 AI 流式写入本标签
+/// 时为 true(残缺 markdown 补闭合)。源码模式两者无用。
 // 参数各自属于 State 的不同字段,打包成结构会造出人为聚合;同款豁免
 // 先例见 settings.rs `dialog`。
 #[allow(clippy::too_many_arguments)]
@@ -198,6 +202,8 @@ pub fn ui(
     show_minimap: bool,
     show_typewriter: bool,
     show_focus: bool,
+    base_dir: Option<&std::path::Path>,
+    heal: bool,
     keymap: &crate::keymap::Keymap,
     outbox: &mut Vec<Message>,
     find_marks: &[std::ops::Range<usize>],
@@ -226,6 +232,8 @@ pub fn ui(
             editor_id,
             show_typewriter,
             show_focus,
+            base_dir,
+            heal,
             keymap,
             outbox,
         );
@@ -1089,8 +1097,11 @@ mod tests {
                         // 渲染与跳转的验收在 ui::minimap 的 tests 里);
                         // 打字机开关由调用方给(既有测试 false,打字机
                         // 测试组显式 true);专注关(验收在 ui::live)。
+                        // base_dir/heal 是 Live 专属,源码模式测试给空档。
                         false,
                         show_typewriter,
+                        false,
+                        None,
                         false,
                         &crate::keymap::Keymap::builtin(),
                         outbox,
