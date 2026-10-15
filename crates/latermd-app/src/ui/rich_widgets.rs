@@ -1,6 +1,6 @@
 //! 富渲染共享件(右栏预览与 Live 写作渲染两条路径都用的部分)。
 //!
-//! 2026-10-14 从 [`crate::ui::preview`] 搬出(live-unify-plan P0):右栏对照
+//! 2026-10-14 从 `ui::preview`（已于 P5 删除） 搬出(live-unify-plan P0):右栏对照
 //! 预览要退役,但这些件 —— 代码块复制头、任务 checkbox、`==高亮==` 排版段、
 //! 相对图片 `file://` 改写、几枚主题色 —— 在 Live 写作渲染里同样要用,
 //! 不能跟着面板一起删。搬出来的收益是 `live.rs` 不再靠 `crate::ui::preview`
@@ -16,7 +16,6 @@
 //! section/token 映射到不了 handler(#63 实测)。
 
 use eframe::egui;
-use std::borrow::Cow;
 use std::ops::Range;
 use std::path::Path;
 
@@ -100,34 +99,7 @@ pub(crate) fn append_highlight_section(
     );
 }
 
-/// 把渲染文本里的**相对图片地址**改写成 `file://` 绝对 URI(docs/image-plan.md
-/// §4.1,B 段唯一硬骨头)。
-///
-/// 文档里存相对路径是对的(`./foo.assets/x.png` 随目录走,可移植),但
-/// vendored 层把 url 原样喂 `egui::Image::new`,egui 没有「文档目录」概念,
-/// 相对地址一律加载失败。改写发生在**喂给预览之前的字符串层**,源码与
-/// `PreviewState` 一字不动;vendored 一行不动(等上游 `Token::Image` 加
-/// `base_dir`,vendor/README.md 已登记待上游化)。
-///
-/// `base_dir` 为 `None`(文档未落盘)或空串(裸相对文件名,`Path::parent`
-/// 的产物)时原样借回:没有锚点可拼,交给加载器按失败处理,与改写前一致。
-// P4 起唯一生产消费者(预览面板)退役;Live 走 `image_rewrites` 直取。
-// P5 随预览测试迁移定去留。
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn resolve_relative_images<'a>(
-    text: &'a str,
-    base_dir: Option<&'a Path>,
-) -> Cow<'a, str> {
-    let rewrites = image_rewrites(text, base_dir);
-    if rewrites.is_empty() {
-        return Cow::Borrowed(text);
-    }
-    // 拼串交给 `OffsetMap::apply`:改写清单只有一份,「渲染串长什么样」与
-    // 「偏移怎么换算」(map_source_offset 的第二层)不漂移。
-    Cow::Owned(latermd_md::OffsetMap::from_rewrites(rewrites).apply(text))
-}
-
-/// 相对图片地址的改写清单(改写逻辑见 [`resolve_relative_images`]):每处
+/// 相对图片地址的改写清单:每处
 /// 是一个 `latermd_md::Rewrite`(与 wikilink 展开层**同一结构**),字符串
 /// 改写与偏移映射(`map_source_offset`)共用同一份,两处不漂移。
 pub(crate) fn image_rewrites(text: &str, base_dir: Option<&Path>) -> Vec<latermd_md::Rewrite> {
@@ -253,10 +225,8 @@ fn file_uri(base_dir: &Path, dest: &str) -> String {
 /// 各话,必须带上出身才不会串台。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum TaskProbeDomain {
-    /// 右栏预览:emoji 层输出坐标,消费时逆穿 `offset_map` +
-    /// `highlight_map` + `emoji_map`。(P4 起仅预览测试路径消费,随 P5
-    /// 迁移定去留。)
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// 右栏预览(P4 已退役,仅测试路径保留)。
+    #[cfg(test)]
     Preview,
     /// 编辑器 Live 富渲染块:块内坐标,消费时加记录时的块首字节偏移。
     Live(usize),
@@ -586,5 +556,87 @@ pub(crate) fn code_copy_buttons(ui: &mut egui::Ui, code: &str, lang: &str) {
         response.on_hover_text("已复制");
     } else {
         response.on_hover_text("复制代码");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Live 第 5 层([`crate::live::LiveState::rich_block_with_base`])的实
+    /// 际写法:先取改写清单,再交给 `OffsetMap::apply` 拼串。下面的
+    /// `rewrite` 复刻这两步,测试由此直接钉**生产路径的两件 religion**,
+    /// 而不是某个包装函数。
+    fn rewrite(text: &str, base_dir: Option<&Path>) -> String {
+        let rewrites = image_rewrites(text, base_dir);
+        if rewrites.is_empty() {
+            return text.to_owned();
+        }
+        latermd_md::OffsetMap::from_rewrites(rewrites).apply(text)
+    }
+
+    /// 相对图片改写:A 段自产形态(`./foo.assets/中文.png`)、上级目录、
+    /// `<…>` 包裹保持包裹、多张图与周边文本逐字节保留;无相对图与未落盘
+    /// 时零改写(清单为空 ≡ 文本原样,不产生分配)。
+    ///
+    /// 这一组随 live-unify P5 从已删的 `ui::preview` 迁来:右栏退役后
+    /// 改写由 Live 接管,这四条判定用例随函数留在原地。
+    #[test]
+    fn relative_images_resolve_against_base_dir() {
+        let base = Path::new("/home/u/docs");
+        let out = rewrite("![图](./foo.assets/中文.png)", Some(base));
+        assert_eq!(out, "![图](file:///home/u/docs/foo.assets/中文.png)");
+        let out = rewrite("![a](../img/x.png)", Some(base));
+        assert_eq!(out, "![a](file:///home/u/docs/../img/x.png)");
+        let out = rewrite("![a](<./d/屏幕 截图.png>)", Some(base));
+        assert_eq!(out, "![a](<file:///home/u/docs/d/屏幕 截图.png>)");
+        let doc = "前文\n\n![一](a.png)中间![二](<b c.png>)\n\n后文";
+        let out = rewrite(doc, Some(base));
+        assert_eq!(
+            out,
+            "前文\n\n![一](file:///home/u/docs/a.png)中间![二](<file:///home/u/docs/b c.png>)\n\n后文"
+        );
+        // 无相对图 / 未落盘:改写清单为空 ≡ 零改写
+        let clean = "![x](https://e.com/a.png) 与 [链](rel.md)";
+        assert!(image_rewrites(clean, Some(base)).is_empty());
+        assert!(image_rewrites("![x](a.png)", None).is_empty());
+    }
+
+    /// 不该改写的一律不动:绝对 URL、`wiki://`(wikilink 展开产物)、绝对
+    /// 路径、锚点、空目标、围栏代码块内的 `![]()`、链接本身、`data:` 与
+    /// Windows 盘符路径。
+    #[test]
+    fn non_relative_and_non_image_targets_stay_put() {
+        let base = Path::new("/home/u/docs");
+        let doc = "![a](https://e.com/x.png?w=1)\n![b](<wiki://架构决策>)\n\
+                   ![c](/abs/path.png)\n![d](#anchor)\n![]()\n[e 链](./rel.md)\n\
+                   ![f](data:image/png;base64,AAAA)\n![g](C:/win.png)\n\n\
+                   ```rust\nlet x = ![](inner.png);\n```\n\n![h](ok.png)";
+        let out = rewrite(doc, Some(base));
+        let expected = doc.replace("![h](ok.png)", "![h](file:///home/u/docs/ok.png)");
+        assert_eq!(out, expected);
+    }
+
+    /// 存盘 URL 往返:图片落盘产出的相对地址(含空格时包 `<>`)能还原成
+    /// 绝对 URI —— 存盘文本与渲染改写两侧的约定互相咬合(`crate::assets`
+    /// 单测钉落盘,这里钉「这条地址进渲染后能出图」)。
+    #[test]
+    fn stored_url_round_trips_into_file_uri() {
+        let base = Path::new("/home/u/docs");
+        let stored = "<./笔记.assets/屏幕 截图 (1).png>";
+        let doc = format!("![alt]({stored})");
+        let out = rewrite(&doc, Some(base));
+        assert_eq!(
+            out,
+            "![alt](<file:///home/u/docs/笔记.assets/屏幕 截图 (1).png>)"
+        );
+    }
+
+    /// 带标题的内联图片:`![a](./x.png "标题")` 目标到空白即止,标题保留。
+    #[test]
+    fn titled_image_keeps_its_title() {
+        let base = Path::new("/d");
+        let out = rewrite("![a](./x.png \"题\")", Some(base));
+        assert_eq!(out, "![a](file:///d/x.png \"题\")");
     }
 }

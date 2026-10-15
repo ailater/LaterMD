@@ -13,7 +13,7 @@
 | P2 | Live 补齐：AI 指令卡与 ai:// 链接 | 完成 | 2026-10-15 | [#240](https://github.com/ailater/LaterMd/pull/240) |
 | P3 | 禅定切到 Live 浏览态 | 完成 | 2026-10-15 | [#241](https://github.com/ailater/LaterMd/pull/241) |
 | P4 | 删右栏（面板 / 布局状态 / 命令 / 入口 / 常量） | 完成 | 2026-10-15 | [#242](https://github.com/ailater/LaterMd/pull/242) |
-| P5 | 测试迁移 + PreviewState 瘦身 | 未开始 | | |
+| P5 | 测试迁移 + PreviewState 瘦身 | 完成 | 2026-10-15 | [#243](https://github.com/ailater/LaterMd/pull/243) |
 | P6 | 文档与 CHANGELOG | 未开始 | | |
 
 ### 执行备注(每次推进一步时在此登记,供下一轮接手)
@@ -35,6 +35,9 @@
 
 - **P4 已落地(净删 945 行)**:面板/命令/布局字段/入口/常量全链摘除;`LayoutSettings` 删 `right`/`right_width`/`pre_live_right`,`pre_zen` 快照退化为单值(`Option<bool>`);`Command::ALL` 44→43,Ctrl/Cmd+Alt+R 消失;`TITLE_BUTTONS` 7→6。**几何连锁效应**(既有断言因此改写,后来者勿误判为回归):①中央编辑区变宽 → minimap `automatic_visible` 的 600px 门槛在 900px 窗口档翻真;②格式工具条恒在宽档 → 「更多」溢出按钮不再绘制,三栏取证信号改用恒绘的「H1」;③`automatic_visible`/`EDITOR_MIN_W` 预算断言的唯一邻居变成中央区。R6 裁定:keymap.json 残留 `toggle_right_preview` 键是 BTreeMap 多余条目,`get()` 按 Command id 查询永远查不到它,**无副作用,不清理**;R7 复定:两个 perf harness 直用 vendored label 自建 id,不受影响。**R6/R7 至此销账**。
 - **P5 开工注意**:①`preview.rs` 已挂模块级 `cfg_attr(not(test), allow(dead_code))`,P5 迁移测试后删 `pub mod preview;` 时连同豁免一起摘;②`PreviewState` 五字段(`rendered`/四张映射)生产侧已零读者(仅 state 归约在写),P5 瘦身时 `state.rs` 归约侧的 4 次 `expand_*_with_map` 全文扫描一并删;③大纲跳转悬置测试已删(决策 #80 作废),`PreviewState::scroll_target` 与 `ScrollProbe` 的删除在 P5 清;④`docs/m5-acceptance.md` 已加 P4 后记,其余文档(P6 清单)未动。
+
+- **P5 已落地(净删 3277 行)**:`PreviewState` 只剩 `text`/`synced_rev`/`outline`(`new()` 不再做五层改写),`ui::preview` 整模块删除。迁移存留 5 条测试:相对图片改写 4 条 → `ui::rich_widgets`(`image_rewrites` + `OffsetMap::apply`,即 Live 第 5 层的实际写法),`is_openable_href` 判定矩阵 → `ui::ai_card`。**决策 #80(面板收起期间跳转悬置)随 `scroll_target` 一并作废**,P6 必须清档(decisions-pending 那条 + roadmap 提及)。
+- **P6 开工注意**:①代码侧到此全部完成,剩文档与 CHANGELOG;②本模块 doc 死链已在 P5 清(5 处),P6 改文档时若再删符号须同步 `cargo doc`;③`docs/decisions-pending.md` 待处理条目:#80(作废)、#78/#79(重写为 Live 通道)、#115(交付面删右栏)、#121/#122/#129(Alt 系七条变六条),另需把 #147(D1)/#148(D2)两位 newcomer 与现有体系串起来;④R2(id 含块序号的缓存抖动)仍未解决,登记进 decisions-pending 作为后续性能项。
 
 
 ## 阻塞

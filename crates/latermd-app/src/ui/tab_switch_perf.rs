@@ -9,7 +9,7 @@
 //! 四路测量:
 //! **A 归约/快照侧**(打开与编辑修订号前进时付,不在切换帧):expand_wikilinks /
 //! outline / open_tab 整篇换入;
-//! **B 预览渲染侧**(每帧):heal / parse / resolve_relative_images /
+//! **B 预览渲染侧**(每帧):heal / parse / 第 5 层相对图片改写 /
 //! [`MarkdownLabel`] 冷帧(缓存 miss 全量)与热帧(命中);
 //! **C 编辑器侧**:multiline `TextEdit` 冷帧(文本变化触发整篇 layout)与热帧;
 //! **D 整帧(生产路径)**:tab A 稳态 → `TabActivate` → B 首帧/次帧/稳态 →
@@ -270,27 +270,31 @@ fn tab_switch_finding_report() {
         }
         median(samples)
     });
-    row("resolve_relative_images(有相对图,Some(base))", {
+    row("image_rewrites+apply(有相对图,Some(base))", {
         let mut samples = Vec::new();
         for _ in 0..20 {
             let start = Instant::now();
-            let out = crate::ui::rich_widgets::resolve_relative_images(
+            // Live 第 5 层同款两步:改写清单 → OffsetMap::apply
+            let rewrites = crate::ui::rich_widgets::image_rewrites(
                 std::hint::black_box(&doc_a),
                 Some(std::path::Path::new("/home/u/docs")),
             );
+            let out = latermd_md::OffsetMap::from_rewrites(rewrites).apply(&doc_a);
             std::hint::black_box(&out);
             samples.push(start.elapsed());
         }
         median(samples)
     });
-    row("resolve_relative_images(无相对图,借回)", {
+    row("image_rewrites+apply(无相对图,借回)", {
         let mut samples = Vec::new();
         for _ in 0..20 {
             let start = Instant::now();
-            let out = crate::ui::rich_widgets::resolve_relative_images(
+            // Live 第 5 层同款两步:改写清单 → OffsetMap::apply
+            let rewrites = crate::ui::rich_widgets::image_rewrites(
                 std::hint::black_box(&doc_b),
                 Some(std::path::Path::new("/home/u/docs")),
             );
+            let out = latermd_md::OffsetMap::from_rewrites(rewrites).apply(&doc_b);
             std::hint::black_box(&out);
             samples.push(start.elapsed());
         }

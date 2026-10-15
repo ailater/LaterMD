@@ -1,6 +1,6 @@
 //! AI 指令卡与富渲染链接 handler(右栏预览与 Live 写作渲染**同一套**)。
 //!
-//! 2026-10-15 从 [`crate::ui::preview`] 搬出并拆层(live-unify-plan P2/D1):
+//! 2026-10-15 从 `ui::preview`（已于 P5 删除） 搬出并拆层(live-unify-plan P2/D1):
 //! 原 preview::AiLinkHandler(右栏 handler,已随之退役)是纯右栏能力,右栏退役后 AI 卡
 //! 必须有宿主。拆法:
 //!
@@ -171,25 +171,6 @@ impl RichLinkHandler {
     /// 判定用)。
     pub(crate) fn intercepted_is_empty(&self) -> bool {
         self.clicked.borrow().is_empty()
-    }
-
-    /// 本帧已拦下的消息快照(测试断言用)。
-    #[cfg(test)]
-    pub(crate) fn intercepted(&self) -> Vec<Message> {
-        self.clicked.borrow().clone()
-    }
-
-    /// 本帧 emoji 占位区快照(手型抑制 + 无头探针消费)。预览面板 P4 起
-    /// 无生产调用者,唯一消费者是其测试 → 挂 cfg(test)(P5 随迁移定去留)。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn emoji_rects_snapshot(&self) -> Vec<egui::Rect> {
-        self.emoji_rects.borrow().clone()
-    }
-
-    /// 本帧卡片 widget id 快照(测试断言 id 稳定性用)。
-    #[cfg(test)]
-    pub(crate) fn card_ids_snapshot(&self) -> Vec<egui::Id> {
-        self.card_ids.borrow().clone()
     }
 
     /// 指令卡状态:指令文本与最近一次发起的 prompt 相等才认领 —— 防重入
@@ -433,8 +414,9 @@ impl LinkHandler for RichLinkHandler {
         });
     }
 
-    /// 图片右键:「在浏览器打开 / 复制图片地址」。`resolve_relative_images`
-    /// 已把相对地址改写为 `file://` 绝对 URI,系统浏览器直接可用。
+    /// 图片右键:「在浏览器打开 / 复制图片地址」。Live 的第 5 层改写
+    /// (`image_rewrites`)已把相对地址改成 `file://` 绝对 URI,系统浏览器
+    /// 直接可用。
     fn image_response(&self, _ui: &egui::Ui, _alt: &str, url: &str, response: &egui::Response) {
         let clicked = Rc::clone(&self.clicked);
         response.context_menu(|ui| {
@@ -525,5 +507,37 @@ fn status_label(ui: &mut egui::Ui, status: AiCardStatus, ai_color: egui::Color32
         AiCardStatus::Done => {
             ui.colored_label(done_color(ui.visuals().dark_mode), "已完成");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 右键菜单挂点判定(context-menu-plan §3 M3):协议链接一律不弹菜单
+    /// (它们的 click 各有归属),普通 URL / 本地路径 / 锚点 / `file://` 弹。
+    ///
+    /// 随 live-unify P5 从已删的 `ui::preview` 迁来 —— 判定函数留在
+    /// `ai_card`,它的覆盖不能随面板一起消失。
+    #[test]
+    fn openable_href_matrix() {
+        assert!(is_openable_href("https://example.com/a"));
+        assert!(is_openable_href("http://example.com"));
+        assert!(is_openable_href("file:///tmp/x.png"));
+        assert!(is_openable_href("relative/doc.md"));
+        assert!(!is_openable_href(&format!("{}润色", SCHEME)));
+        assert!(!is_openable_href(&format!(
+            "{}架构",
+            latermd_md::WIKI_SCHEME
+        )));
+        assert!(!is_openable_href(&format!(
+            "{}😀",
+            latermd_md::EMOJI_SCHEME
+        )));
+        assert!(!is_openable_href(&format!("{}0", latermd_md::TASK_SCHEME)));
+        assert!(!is_openable_href(&format!(
+            "{}x",
+            latermd_md::HIGHLIGHT_SCHEME
+        )));
     }
 }
