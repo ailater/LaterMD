@@ -11,7 +11,7 @@
 | P0 | 共享渲染件搬家(零行为变化) | 完成 | 2026-10-14 | [#238](https://github.com/ailater/LaterMd/pull/238) |
 | P1 | Live 补齐：图片 / heal / 延迟高亮 / emoji 探针 | 完成 | 2026-10-15 | [#239](https://github.com/ailater/LaterMd/pull/239) |
 | P2 | Live 补齐：AI 指令卡与 ai:// 链接 | 完成 | 2026-10-15 | [#240](https://github.com/ailater/LaterMd/pull/240) |
-| P3 | 禅定切到 Live 浏览态 | 未开始 | | |
+| P3 | 禅定切到 Live 浏览态 | 完成 | 2026-10-15 | [#241](https://github.com/ailater/LaterMd/pull/241) |
 | P4 | 删右栏（面板 / 布局状态 / 命令 / 入口 / 常量） | 未开始 | | |
 | P5 | 测试迁移 + PreviewState 瘦身 | 未开始 | | |
 | P6 | 文档与 CHANGELOG | 未开始 | | |
@@ -29,6 +29,9 @@
 - **P2 已落地,新宿主叫 `crate::ui::ai_card::RichLinkHandler`**:`preview::AiLinkHandler` 已删,拆层=基础 handler(两栏同一套)+ `with_ai(color, &AiState)` 显式开关;预览恒开(行为零变化)、Live 显式开(D1,#147 in decisions-pending,含回退指南:live.rs 删 `.with_ai(..)` 一行即整体回落)。`LiveRichHandler` 与 `LiveMermaidHandler` 都已退役——Live 每块一个 `RichLinkHandler`(task 坐标域 `Live(块首)`,emoji 收集器全块共享 Rc);mermaid 分派内嵌于 RichLinkHandler,Live 侧块内序号从 0 起(widget id 由块标签 id 命名空间兜住,两块各序 0 不相撞)。`is_openable_href` 安置在 `ui::ai_card`(P0 口子收口,live.rs 不再引 `ui::preview`)。
 - **P2 的传参链**:`layout.rs`(编辑器调用点传 `&state.ai`,与 tab 字段借用不相交)→ `editor::ui`(新增 `ai: &crate::ai::AiState`,插在 preview 之后)→ `live::ui` 同位。卡片流状态取全局面态(同时至多一个流),**不受 ai_active_tab 门槛** —— 与预览 handler 同口径:流结束后 last_prompt 仍在,卡片显「已完成」。
 - **P3 开工注意**:①`live::ui` 现在 14 参,禅定切 Live 浏览态(D2「只滚不编辑」)要给 `LiveState` 加只滚语义;②mermaid/ai 卡在禅定下会随 `live::ui` 自动可用(无需额外接线),但 `AiState` 传参照抄 layout.rs 编辑器调用点;③preview.rs 的 ScrollProbe/scroll_target 与 `map_source_offset` 五层正向映射仍只在预览侧,P4 删面板前无碍。
+
+- **P3 已落地,D2 定案为 `LiveState::browse_locked` 新字段(#148)**(不是扩展 `browse_only`):`browse_only` 是「还没开始写」的软状态,`browse_locked` 是「该视图不提供写入」的硬锁。禅定帧每帧置 `browse_only=true` + `browse_enabled=false` + `browse_locked=true` **并清 `active`/`pending_caret`/`pending_range`**;锁定下 `jump_to` 只置 pending 做块级滚动,写作浏览态维持既有落点+进编辑。**父 Ui 会被 Live 的 ScrollArea 撑高 ~2px**(auto_shrink false),禅定里必须把正文关进固定矩形的 `new_child` —— 否则其后 `ui::zen_nav` 读到的根 Ui max_rect 越过窗口底缘,两条既有禅定测试几何漂移(2026-10-15 实测,P4 时 `preview::ui` 不再被调用,这条经验随之失效)。退出禅定在 `State::toggle_zen` 还原 `browse_enabled`。
+- **P4 开工注意**:①禅定已不调 `preview::ui`,三栏预览 (`layout.rs` 的 `Panel::right("preview")`) 成为最后一个生产消费者;②`LiveScrollProbe` 已在 live.rs(`scroll_probe_id`),P5 把它当预览 `ScrollProbe` 的替代品,预览侧那套可连同胞弟 `map_source_offset` 一起删;③`is_openable_href`(P0 口子)已在 P2 安置到 `ui::ai_card`,此时 `grep -rn "ui::preview::" crates/` 应只剩 `preview::ui` 自身的调用与模块判定;④`browse_locked` 不持久化、不进 `State`,`enter_zen`/`exit_zen` 的序列化不受影响。
 
 
 ## 阻塞
