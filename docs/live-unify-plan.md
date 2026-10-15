@@ -12,7 +12,7 @@
 | P1 | Live 补齐：图片 / heal / 延迟高亮 / emoji 探针 | 完成 | 2026-10-15 | [#239](https://github.com/ailater/LaterMd/pull/239) |
 | P2 | Live 补齐：AI 指令卡与 ai:// 链接 | 完成 | 2026-10-15 | [#240](https://github.com/ailater/LaterMd/pull/240) |
 | P3 | 禅定切到 Live 浏览态 | 完成 | 2026-10-15 | [#241](https://github.com/ailater/LaterMd/pull/241) |
-| P4 | 删右栏（面板 / 布局状态 / 命令 / 入口 / 常量） | 未开始 | | |
+| P4 | 删右栏（面板 / 布局状态 / 命令 / 入口 / 常量） | 完成 | 2026-10-15 | [#242](https://github.com/ailater/LaterMd/pull/242) |
 | P5 | 测试迁移 + PreviewState 瘦身 | 未开始 | | |
 | P6 | 文档与 CHANGELOG | 未开始 | | |
 
@@ -32,6 +32,9 @@
 
 - **P3 已落地,D2 定案为 `LiveState::browse_locked` 新字段(#148)**(不是扩展 `browse_only`):`browse_only` 是「还没开始写」的软状态,`browse_locked` 是「该视图不提供写入」的硬锁。禅定帧每帧置 `browse_only=true` + `browse_enabled=false` + `browse_locked=true` **并清 `active`/`pending_caret`/`pending_range`**;锁定下 `jump_to` 只置 pending 做块级滚动,写作浏览态维持既有落点+进编辑。**父 Ui 会被 Live 的 ScrollArea 撑高 ~2px**(auto_shrink false),禅定里必须把正文关进固定矩形的 `new_child` —— 否则其后 `ui::zen_nav` 读到的根 Ui max_rect 越过窗口底缘,两条既有禅定测试几何漂移(2026-10-15 实测,P4 时 `preview::ui` 不再被调用,这条经验随之失效)。退出禅定在 `State::toggle_zen` 还原 `browse_enabled`。
 - **P4 开工注意**:①禅定已不调 `preview::ui`,三栏预览 (`layout.rs` 的 `Panel::right("preview")`) 成为最后一个生产消费者;②`LiveScrollProbe` 已在 live.rs(`scroll_probe_id`),P5 把它当预览 `ScrollProbe` 的替代品,预览侧那套可连同胞弟 `map_source_offset` 一起删;③`is_openable_href`(P0 口子)已在 P2 安置到 `ui::ai_card`,此时 `grep -rn "ui::preview::" crates/` 应只剩 `preview::ui` 自身的调用与模块判定;④`browse_locked` 不持久化、不进 `State`,`enter_zen`/`exit_zen` 的序列化不受影响。
+
+- **P4 已落地(净删 945 行)**:面板/命令/布局字段/入口/常量全链摘除;`LayoutSettings` 删 `right`/`right_width`/`pre_live_right`,`pre_zen` 快照退化为单值(`Option<bool>`);`Command::ALL` 44→43,Ctrl/Cmd+Alt+R 消失;`TITLE_BUTTONS` 7→6。**几何连锁效应**(既有断言因此改写,后来者勿误判为回归):①中央编辑区变宽 → minimap `automatic_visible` 的 600px 门槛在 900px 窗口档翻真;②格式工具条恒在宽档 → 「更多」溢出按钮不再绘制,三栏取证信号改用恒绘的「H1」;③`automatic_visible`/`EDITOR_MIN_W` 预算断言的唯一邻居变成中央区。R6 裁定:keymap.json 残留 `toggle_right_preview` 键是 BTreeMap 多余条目,`get()` 按 Command id 查询永远查不到它,**无副作用,不清理**;R7 复定:两个 perf harness 直用 vendored label 自建 id,不受影响。**R6/R7 至此销账**。
+- **P5 开工注意**:①`preview.rs` 已挂模块级 `cfg_attr(not(test), allow(dead_code))`,P5 迁移测试后删 `pub mod preview;` 时连同豁免一起摘;②`PreviewState` 五字段(`rendered`/四张映射)生产侧已零读者(仅 state 归约在写),P5 瘦身时 `state.rs` 归约侧的 4 次 `expand_*_with_map` 全文扫描一并删;③大纲跳转悬置测试已删(决策 #80 作废),`PreviewState::scroll_target` 与 `ScrollProbe` 的删除在 P5 清;④`docs/m5-acceptance.md` 已加 P4 后记,其余文档(P6 清单)未动。
 
 
 ## 阻塞
