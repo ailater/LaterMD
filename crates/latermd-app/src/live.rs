@@ -46,9 +46,12 @@ type RichCacheEntry = (
     Arc<latermd_md::OffsetMap>,
     Arc<latermd_md::OffsetMap>,
     Arc<latermd_md::OffsetMap>,
+    Arc<latermd_md::OffsetMap>,
+    Option<std::path::PathBuf>,
 );
 type RichBlock = (
     Arc<str>,
+    Arc<latermd_md::OffsetMap>,
     Arc<latermd_md::OffsetMap>,
     Arc<latermd_md::OffsetMap>,
     Arc<latermd_md::OffsetMap>,
@@ -174,22 +177,40 @@ impl LiveState {
     }
 
     /// 富渲染块的链接改写(#63 checkbox + #65 高亮):缓存命中直取,未命中
-    /// 重算并入表。返回渲染文本与**逆穿方向**的两张映射(渲染坐标 → 上一
-    /// 层坐标):层序与预览四层链一致(高亮在任务之前,生产顺序 wikilink →
-    /// 高亮 → emoji → 任务的 Live 子集);两层各有「无目标字符不启动解析」
-    /// 的快路径,两层快路径直接恒等返回。
-    fn rich_block(&mut self, index: usize, _rev: u64, block_text: &str) -> RichBlock {
+    /// 重算并入表。返回渲染文本与**逆穿方向**的映射组(渲染坐标 → 上一层
+    /// 坐标,最后一元是图片层):层序与预览链一致(wikilink → 高亮 → emoji
+    /// → 任务 → 相对图片 `file://` 改写),各层有「无目标字符不启动解析」
+    /// 的快路径,快路径直接恒等返回。
+    ///
+    /// `base_dir`(相对图片锚定的文档目录)是缓存维度之一(live-unify-plan
+    /// R4):同一块源码在不同目录下改写结果不同,换目录/首次落盘必须失效;
+    /// 测试传 `None` 走未落盘分支。
+    fn rich_block_with_base(
+        &mut self,
+        index: usize,
+        block_text: &str,
+        base_dir: Option<&std::path::Path>,
+    ) -> RichBlock {
         let hash = self.block_hashes.get(index).copied();
-        if let Some((seen_hash, rendered, offset_map, highlight_map, emoji_map, task_map)) =
-            self.rich_cache.get(&index)
+        if let Some((
+            seen_hash,
+            rendered,
+            offset_map,
+            highlight_map,
+            emoji_map,
+            task_map,
+            image_map,
+            seen_base,
+        )) = self.rich_cache.get(&index)
         {
-            if Some(*seen_hash) == hash {
+            if Some(*seen_hash) == hash && seen_base.as_deref() == base_dir {
                 return (
                     Arc::clone(rendered),
                     Arc::clone(offset_map),
                     Arc::clone(highlight_map),
                     Arc::clone(emoji_map),
                     Arc::clone(task_map),
+                    Arc::clone(image_map),
                 );
             }
         }
@@ -199,12 +220,24 @@ impl LiveState {
             &after_highlight,
             crate::ui::emoji_data::covered_glyphs(),
         );
-        let (rendered, task_map) = latermd_md::expand_task_links(&after_emoji);
+        let (after_task, task_map) = latermd_md::expand_task_links(&after_emoji);
+        // 第 5 层(live-unify-plan P1):相对图片地址按文档目录改写成
+        // `file://` URI —— 写作模式下 `./x.assets/a.png` 同样要出图。与预览
+        // 同一份扫描实现(`ui::rich_widgets`),源码不动、只改喂给渲染的串。
+        let rewrites = crate::ui::rich_widgets::image_rewrites(&after_task, base_dir);
+        let (rendered, image_map) = if rewrites.is_empty() {
+            (after_task, latermd_md::OffsetMap::empty())
+        } else {
+            let map = latermd_md::OffsetMap::from_rewrites(rewrites);
+            let out = map.apply(&after_task);
+            (out, map)
+        };
         let rendered = Arc::<str>::from(rendered);
         let offset_map = Arc::new(offset_map);
         let highlight_map = Arc::new(highlight_map);
         let emoji_map = Arc::new(emoji_map);
         let task_map = Arc::new(task_map);
+        let image_map = Arc::new(image_map);
         self.rich_cache.insert(
             index,
             (
@@ -214,9 +247,18 @@ impl LiveState {
                 Arc::clone(&highlight_map),
                 Arc::clone(&emoji_map),
                 Arc::clone(&task_map),
+                Arc::clone(&image_map),
+                base_dir.map(std::path::Path::to_path_buf),
             ),
         );
-        (rendered, offset_map, highlight_map, emoji_map, task_map)
+        (
+            rendered,
+            offset_map,
+            highlight_map,
+            emoji_map,
+            task_map,
+            image_map,
+        )
     }
 
     /// 把点击点的光标落点换算成块内字符偏移(#170):点击帧富渲染块已
@@ -232,6 +274,7 @@ impl LiveState {
         label_id: egui::Id,
         pos: egui::Pos2,
         rendered: &str,
+        image_map: &latermd_md::OffsetMap,
         offset_map: &latermd_md::OffsetMap,
         highlight_map: &latermd_md::OffsetMap,
         emoji_map: &latermd_md::OffsetMap,
@@ -263,12 +306,14 @@ impl LiveState {
                 }
             }
         };
-        // 逆穿改写层(生产顺序 高亮 → 任务,逆序 任务 → 高亮);改写段
-        // 内部命中映回段首,是映射表的既定语义。
-        let after_task = task_map.rendered_to_source(rendered_byte);
-        let after_emoji = emoji_map.rendered_to_source(after_task);
-        let after_highlight = highlight_map.rendered_to_source(after_emoji);
-        let source_byte = offset_map.rendered_to_source(after_highlight);
+        // 逆穿改写层(生产顺序 wikilink → 高亮 → emoji → 任务 → 图片,
+        // 逆序 图片 → 任务 → emoji → 高亮 → wikilink);改写段内部命中映
+        // 回段首,是映射表的既定语义。
+        let after_task = image_map.rendered_to_source(rendered_byte);
+        let after_emoji = task_map.rendered_to_source(after_task);
+        let after_highlight = emoji_map.rendered_to_source(after_emoji);
+        let after_wikilink = highlight_map.rendered_to_source(after_highlight);
+        let source_byte = offset_map.rendered_to_source(after_wikilink);
         let clamped = source_byte.min(block_source_len);
         Some(clamped)
     }
@@ -326,14 +371,29 @@ struct LiveRichHandler<'a> {
     text_color: egui::Color32,
     dark_mode: bool,
     clicked: std::rc::Rc<std::cell::RefCell<Vec<Message>>>,
+    /// 本帧全部 emoji inline widget 占位区(P1,与预览 handler 同一收尾
+    /// 纪律):全块共享一份(一次分配,逐块 clone 句柄),帧末①悬停手型
+    /// 抑制 —— vendored 对悬停中的 inline widget 无条件置 PointingHand,
+    /// `link_style` 管不到光标,只能在帧末压回 Default;②写进探针供无头
+    /// 测试断言。
+    emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>>,
+}
+
+/// Live 帧 emoji 占位区探针的 data 键(P1,与预览 `emoji_probe_id` 同款,
+/// 按编辑器 id 分标签):生产只写不读,无头测试读它断言「widget 在该段
+/// 生效」。
+fn emoji_probe_id(editor_id: egui::Id) -> egui::Id {
+    egui::Id::new("latermd-live-emoji-rects").with(editor_id)
 }
 
 impl<'a> LiveRichHandler<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         mermaid: &'a crate::ui::mermaid::LiveMermaidHandler,
         task_base: usize,
         text_color: egui::Color32,
         dark_mode: bool,
+        emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>>,
     ) -> Self {
         Self {
             mermaid,
@@ -341,6 +401,7 @@ impl<'a> LiveRichHandler<'a> {
             text_color,
             dark_mode,
             clicked: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            emoji_rects,
         }
     }
 
@@ -523,16 +584,21 @@ impl LinkHandler for LiveRichHandler<'_> {
             );
         } else if let Some(glyph) = href.strip_prefix(latermd_md::EMOJI_SCHEME) {
             let side = rect.width().min(rect.height());
-            if side > 0.0 && ui.is_rect_visible(rect) {
-                if let Some(texture) = crate::ui::emoji_panel::inline_texture(ui, glyph) {
-                    let paint_rect =
-                        egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
-                    ui.painter().image(
-                        texture.id(),
-                        paint_rect,
-                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
+            if side > 0.0 {
+                // 占位区先记探针(与预览同款:含纹理缺失/视口外的),悬停
+                // 抑制的判定面是「指针落在 widget 占位区」,不看纹理出没出。
+                self.emoji_rects.borrow_mut().push(rect);
+                if ui.is_rect_visible(rect) {
+                    if let Some(texture) = crate::ui::emoji_panel::inline_texture(ui, glyph) {
+                        let paint_rect =
+                            egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
+                        ui.painter().image(
+                            texture.id(),
+                            paint_rect,
+                            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
                 }
             }
         }
@@ -675,6 +741,8 @@ pub fn ui(
     editor_id: egui::Id,
     show_typewriter: bool,
     show_focus: bool,
+    base_dir: Option<&std::path::Path>,
+    heal: bool,
     keymap: &crate::keymap::Keymap,
     outbox: &mut Vec<Message>,
 ) -> egui::Response {
@@ -757,395 +825,358 @@ pub fn ui(
     // Live 列此前不接任何 handler,不能借 mermaid 顺手改变 ai 卡/emoji/
     // wikilink 的渲染行为(否决线);其余块照走 vendored 默认。
     let mermaid_handler = crate::ui::mermaid::LiveMermaidHandler::new();
+    // emoji 探针(P1,与预览同一收尾纪律):全块共享一份收集器,块循环内
+    // 逐 handler 记占位区,ScrollArea 之后统一消费。
+    let emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>> = Default::default();
 
-    let scrolled = egui::ScrollArea::vertical()
-        .id_salt("live-preview")
-        .auto_shrink([false, false])
-        .show(panel, |ui| {
-            // 块间节奏完全由 [`block_gap`] 前距决定(与右栏预览同口径,
-            // 2026-10-10):egui 出厂 item_spacing.y = 3px 会叠加在演算值
-            // 上,归零让前距成为唯一间距源。
-            ui.spacing_mut().item_spacing.y = 0.0;
-            if block_count == 0 {
-                if live.browse_only {
-                    // 空文档的浏览态没有可渲染块，只显示非编辑提示。双击
-                    // 提示后下一帧才创建 TextEdit，避免打开新文档就抢焦点。
-                    let response = ui.add(
-                        egui::Label::new(
-                            egui::RichText::new("双击此处开始写作")
-                                .color(ui.visuals().weak_text_color()),
-                        )
-                        .sense(egui::Sense::click()),
-                    );
-                    if response.double_clicked() {
-                        live.browse_only = false;
-                    }
-                } else {
-                    // 写作态使用共享缓冲，不另建镜像。
-                    let mut buffer = BlockBuffer {
-                        buffer: editor,
-                        range: 0..0,
-                    };
-                    let response_id = editor_id.with("live-empty");
-                    let output = egui::TextEdit::multiline(&mut buffer)
-                        .id(response_id)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(1)
-                        .hint_text("从这里开始写作")
-                        .lock_focus(true)
-                        .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)))
-                        .show(ui);
-                    cursor.byte = output
-                        .state
-                        .cursor
-                        .char_range()
-                        .map(|range| editor.char_to_byte(range.primary.index.0));
-                    // 右键菜单:空文档块与活动块同一挂点(条目表共用)。
-                    // 排在 active_response 之前 —— 那条会移走 response。
-                    crate::ui::editor_menu::attach(ui, &output, keymap, true, outbox);
-                    active_response = Some(output.response.response);
-                }
-            }
-            // 前一块的分类(首块无前距:vendored `had_content` 同语义,
-            // 文档顶贴顶不悬空)。
-            let mut prev_kind: Option<BlockKind> = None;
-            for index in 0..block_count {
-                let range = live.blocks[index].clone();
-                // 块文本直接借用共享缓冲；渲染缓存持有改写结果，稳态帧不再复制整块。
-                let block_text = BlockBuffer::slice(editor.text(), &range);
-                let kind = block_kind(block_text);
-                if let Some(prev) = prev_kind {
-                    let style = egui_markdown_style::global_style(ui.ctx());
-                    ui.add_space(block_gap(
-                        &style,
-                        crate::theme::editor_font_size(ui.ctx()),
-                        prev,
-                        kind,
-                    ));
-                }
-                prev_kind = Some(kind);
-                if !live.browse_only && live.active == Some(index) {
-                    let char_len = live.block_char_len(editor, index);
-                    let lines = block_text.lines().count().max(1);
-                    let mut buffer = BlockBuffer {
-                        buffer: editor,
-                        range: range.clone(),
-                    };
-                    // 稳定 id:按块序号(不带长度/hash),AGENTS §6.7 的红线
-                    let response_id = editor_id.with(("live-block", index));
-                    let focus_memory_id = editor_id.with(("live-ime-focus", index));
-                    let focused_last_frame = ui
-                        .ctx()
-                        .data(|data| data.get_temp::<bool>(focus_memory_id).unwrap_or(false));
-                    let edit = egui::TextEdit::multiline(&mut buffer)
-                        .id(response_id)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(lines.clamp(1, 40))
-                        // 与源码编辑器同样锁定焦点。活动块仍可由本模块的
-                        // 双击/单击路由显式切换，普通工具条、滚动和预览
-                        // 控件不会让写作插入点被 egui 无意收回。
-                        .lock_focus(true);
-                    // 活动块无输入框式外框(2026-10-10 mac 精修全平台化,
-                    // #169):只留文字内距,光标/选区/IME 通路不变
-                    let edit =
-                        edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)));
-                    let output = edit.show(ui);
-                    // 右键菜单(context-menu-plan §3 M1):活动块与源码
-                    // 编辑器同一挂点,条目表共用;块内坐标落光标见
-                    // editor_menu::attach。
-                    crate::ui::editor_menu::attach(ui, &output, keymap, true, outbox);
-                    let focused_now = ui.ctx().memory(|mem| mem.has_focus(response_id));
-                    let ime_event = ui.ctx().input(|input| {
-                        input
-                            .events
-                            .iter()
-                            .any(|event| matches!(event, egui::Event::Ime(_)))
-                    });
-                    // 不在输入事件帧直接抢焦点：等这个活动块的所有绘制和
-                    // 命中探针完成后再恢复，避免后续控件把恢复请求覆盖。
-                    // 指针按下表示用户正在把焦点交给别的控件，此时让出。
-                    if focused_last_frame
-                        && ime_event
-                        && !ui.ctx().input(|input| input.pointer.any_pressed())
-                    {
-                        ime_restore_focus = Some(response_id);
-                    }
-                    // egui-winit 的自动 IME spot 以整个 TextEdit 矩形为锚点，
-                    // 输入法切换时会把候选框临时移到块首。活动块有稳定光标时
-                    // 同帧补发光标矩形，保证中文候选框和插入点仍贴在原位置。
-                    if ime_event && (focused_now || ime_restore_focus == Some(response_id)) {
-                        if let Some(caret) = output
+    let scrolled =
+        egui::ScrollArea::vertical()
+            .id_salt("live-preview")
+            .auto_shrink([false, false])
+            .show(panel, |ui| {
+                // 块间节奏完全由 [`block_gap`] 前距决定(与右栏预览同口径,
+                // 2026-10-10):egui 出厂 item_spacing.y = 3px 会叠加在演算值
+                // 上,归零让前距成为唯一间距源。
+                ui.spacing_mut().item_spacing.y = 0.0;
+                if block_count == 0 {
+                    if live.browse_only {
+                        // 空文档的浏览态没有可渲染块，只显示非编辑提示。双击
+                        // 提示后下一帧才创建 TextEdit，避免打开新文档就抢焦点。
+                        let response = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("双击此处开始写作")
+                                    .color(ui.visuals().weak_text_color()),
+                            )
+                            .sense(egui::Sense::click()),
+                        );
+                        if response.double_clicked() {
+                            live.browse_only = false;
+                        }
+                    } else {
+                        // 写作态使用共享缓冲，不另建镜像。
+                        let mut buffer = BlockBuffer {
+                            buffer: editor,
+                            range: 0..0,
+                        };
+                        let response_id = editor_id.with("live-empty");
+                        let output = egui::TextEdit::multiline(&mut buffer)
+                            .id(response_id)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(1)
+                            .hint_text("从这里开始写作")
+                            .lock_focus(true)
+                            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)))
+                            .show(ui);
+                        cursor.byte = output
                             .state
                             .cursor
                             .char_range()
-                            .map(|range| range.primary.index.0)
+                            .map(|range| editor.char_to_byte(range.primary.index.0));
+                        // 右键菜单:空文档块与活动块同一挂点(条目表共用)。
+                        // 排在 active_response 之前 —— 那条会移走 response。
+                        crate::ui::editor_menu::attach(ui, &output, keymap, true, outbox);
+                        active_response = Some(output.response.response);
+                    }
+                }
+                // 前一块的分类(首块无前距:vendored `had_content` 同语义,
+                // 文档顶贴顶不悬空)。
+                let mut prev_kind: Option<BlockKind> = None;
+                for index in 0..block_count {
+                    let range = live.blocks[index].clone();
+                    // 块文本直接借用共享缓冲；渲染缓存持有改写结果，稳态帧不再复制整块。
+                    let block_text = BlockBuffer::slice(editor.text(), &range);
+                    let kind = block_kind(block_text);
+                    if let Some(prev) = prev_kind {
+                        let style = egui_markdown_style::global_style(ui.ctx());
+                        ui.add_space(block_gap(
+                            &style,
+                            crate::theme::editor_font_size(ui.ctx()),
+                            prev,
+                            kind,
+                        ));
+                    }
+                    prev_kind = Some(kind);
+                    if !live.browse_only && live.active == Some(index) {
+                        let char_len = live.block_char_len(editor, index);
+                        let lines = block_text.lines().count().max(1);
+                        let mut buffer = BlockBuffer {
+                            buffer: editor,
+                            range: range.clone(),
+                        };
+                        // 稳定 id:按块序号(不带长度/hash),AGENTS §6.7 的红线
+                        let response_id = editor_id.with(("live-block", index));
+                        let focus_memory_id = editor_id.with(("live-ime-focus", index));
+                        let focused_last_frame = ui
+                            .ctx()
+                            .data(|data| data.get_temp::<bool>(focus_memory_id).unwrap_or(false));
+                        let edit = egui::TextEdit::multiline(&mut buffer)
+                            .id(response_id)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(lines.clamp(1, 40))
+                            // 与源码编辑器同样锁定焦点。活动块仍可由本模块的
+                            // 双击/单击路由显式切换，普通工具条、滚动和预览
+                            // 控件不会让写作插入点被 egui 无意收回。
+                            .lock_focus(true);
+                        // 活动块无输入框式外框(2026-10-10 mac 精修全平台化,
+                        // #169):只留文字内距,光标/选区/IME 通路不变
+                        let edit = edit
+                            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)));
+                        let output = edit.show(ui);
+                        // 右键菜单(context-menu-plan §3 M1):活动块与源码
+                        // 编辑器同一挂点,条目表共用;块内坐标落光标见
+                        // editor_menu::attach。
+                        crate::ui::editor_menu::attach(ui, &output, keymap, true, outbox);
+                        let focused_now = ui.ctx().memory(|mem| mem.has_focus(response_id));
+                        let ime_event = ui.ctx().input(|input| {
+                            input
+                                .events
+                                .iter()
+                                .any(|event| matches!(event, egui::Event::Ime(_)))
+                        });
+                        // 不在输入事件帧直接抢焦点：等这个活动块的所有绘制和
+                        // 命中探针完成后再恢复，避免后续控件把恢复请求覆盖。
+                        // 指针按下表示用户正在把焦点交给别的控件，此时让出。
+                        if focused_last_frame
+                            && ime_event
+                            && !ui.ctx().input(|input| input.pointer.any_pressed())
                         {
-                            let caret = output
+                            ime_restore_focus = Some(response_id);
+                        }
+                        // egui-winit 的自动 IME spot 以整个 TextEdit 矩形为锚点，
+                        // 输入法切换时会把候选框临时移到块首。活动块有稳定光标时
+                        // 同帧补发光标矩形，保证中文候选框和插入点仍贴在原位置。
+                        if ime_event && (focused_now || ime_restore_focus == Some(response_id)) {
+                            if let Some(caret) = output
+                                .state
+                                .cursor
+                                .char_range()
+                                .map(|range| range.primary.index.0)
+                            {
+                                let caret = output
+                                    .galley
+                                    .pos_from_cursor(egui::text::CCursor::new(caret));
+                                let caret_rect = egui::Rect::from_min_max(
+                                    output.galley_pos
+                                        + caret.min.to_vec2()
+                                        + egui::vec2(0.0, caret.height()),
+                                    output.galley_pos
+                                        + caret.max.to_vec2()
+                                        + egui::vec2(0.0, caret.height()),
+                                );
+                                ui.ctx()
+                                    .send_viewport_cmd(egui::ViewportCommand::IMERect(caret_rect));
+                            }
+                        }
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(
+                                focus_memory_id,
+                                focused_now || ime_restore_focus == Some(response_id),
+                            )
+                        });
+
+                        // 光标(块内字符偏移):跨块路由判定、键盘跟随与回填共用
+                        let caret = output
+                            .state
+                            .cursor
+                            .char_range()
+                            .map(|range| range.primary.index.0);
+                        // 跨块 caret 路由:块首按 ↑ 去上一块末尾;块尾按 ↓ 去下一块开头
+                        if output.response.response.has_focus() {
+                            let at_start = caret == Some(0);
+                            let at_end = caret == Some(char_len);
+                            if ui.input(|input| input.key_pressed(egui::Key::ArrowUp))
+                                && at_start
+                                && index > 0
+                            {
+                                let target = index - 1;
+                                route = Some((target, live.block_char_len(editor, target)));
+                            } else if ui.input(|input| input.key_pressed(egui::Key::ArrowDown))
+                                && at_end
+                                && index + 1 < block_count
+                            {
+                                route = Some((index + 1, 0));
+                            }
+                        }
+
+                        // 光标回填(大纲/状态栏用):块内字符偏移 + 块首
+                        cursor.byte = output.state.cursor.char_range().map(|range| {
+                            editor.char_to_byte(
+                                editor.byte_to_char(live.blocks[index].start)
+                                    + range.primary.index.0,
+                            )
+                        });
+                        // 选区 AI 浮标(#61 M1)素材:块内持久选区(#38 同源读法)
+                        // + 尾端光标条屏幕矩形(galley pos_from_cursor,IME 同先例),
+                        // ScrollArea 之后消费。选区当帧换算成**文档坐标**字符区间
+                        // (块基为字节偏移,块内光标是字符偏移,与光标回填同款换算)
+                        // —— M2 起随动作消息带走做插入点捕获,归约不读
+                        // `TabState::selection`(该字段只有源码模式回填)。活动块
+                        // 是唯一可编辑块,块基不受本帧编辑影响,换算恒成立。
+                        if let Some(range) = output.state.cursor.char_range() {
+                            let block_base = editor.byte_to_char(live.blocks[index].start);
+                            sel_ai_selection = Some((
+                                block_base + range.primary.index.0,
+                                block_base + range.secondary.index.0,
+                            ));
+                            // 同值镜像给格式工具条(帧首已起底 None):活动块是
+                            // 唯一可编辑块,块基不受本帧编辑影响,换算恒成立
+                            // (与上一行选区 AI 的换算同一条)。
+                            *selection = sel_ai_selection;
+                            let tail = range.primary.index.0.max(range.secondary.index.0);
+                            let rect = output
                                 .galley
-                                .pos_from_cursor(egui::text::CCursor::new(caret));
-                            let caret_rect = egui::Rect::from_min_max(
-                                output.galley_pos
-                                    + caret.min.to_vec2()
-                                    + egui::vec2(0.0, caret.height()),
-                                output.galley_pos
-                                    + caret.max.to_vec2()
-                                    + egui::vec2(0.0, caret.height()),
-                            );
-                            ui.ctx()
-                                .send_viewport_cmd(egui::ViewportCommand::IMERect(caret_rect));
-                        }
-                    }
-                    ui.ctx().data_mut(|data| {
-                        data.insert_temp(
-                            focus_memory_id,
-                            focused_now || ime_restore_focus == Some(response_id),
-                        )
-                    });
-
-                    // 光标(块内字符偏移):跨块路由判定、键盘跟随与回填共用
-                    let caret = output
-                        .state
-                        .cursor
-                        .char_range()
-                        .map(|range| range.primary.index.0);
-                    // 跨块 caret 路由:块首按 ↑ 去上一块末尾;块尾按 ↓ 去下一块开头
-                    if output.response.response.has_focus() {
-                        let at_start = caret == Some(0);
-                        let at_end = caret == Some(char_len);
-                        if ui.input(|input| input.key_pressed(egui::Key::ArrowUp))
-                            && at_start
-                            && index > 0
-                        {
-                            let target = index - 1;
-                            route = Some((target, live.block_char_len(editor, target)));
-                        } else if ui.input(|input| input.key_pressed(egui::Key::ArrowDown))
-                            && at_end
-                            && index + 1 < block_count
-                        {
-                            route = Some((index + 1, 0));
-                        }
-                    }
-
-                    // 光标回填(大纲/状态栏用):块内字符偏移 + 块首
-                    cursor.byte = output.state.cursor.char_range().map(|range| {
-                        editor.char_to_byte(
-                            editor.byte_to_char(live.blocks[index].start) + range.primary.index.0,
-                        )
-                    });
-                    // 选区 AI 浮标(#61 M1)素材:块内持久选区(#38 同源读法)
-                    // + 尾端光标条屏幕矩形(galley pos_from_cursor,IME 同先例),
-                    // ScrollArea 之后消费。选区当帧换算成**文档坐标**字符区间
-                    // (块基为字节偏移,块内光标是字符偏移,与光标回填同款换算)
-                    // —— M2 起随动作消息带走做插入点捕获,归约不读
-                    // `TabState::selection`(该字段只有源码模式回填)。活动块
-                    // 是唯一可编辑块,块基不受本帧编辑影响,换算恒成立。
-                    if let Some(range) = output.state.cursor.char_range() {
-                        let block_base = editor.byte_to_char(live.blocks[index].start);
-                        sel_ai_selection = Some((
-                            block_base + range.primary.index.0,
-                            block_base + range.secondary.index.0,
-                        ));
-                        // 同值镜像给格式工具条(帧首已起底 None):活动块是
-                        // 唯一可编辑块,块基不受本帧编辑影响,换算恒成立
-                        // (与上一行选区 AI 的换算同一条)。
-                        *selection = sel_ai_selection;
-                        let tail = range.primary.index.0.max(range.secondary.index.0);
-                        let rect = output
-                            .galley
-                            .pos_from_cursor(egui::text::CCursor::new(tail));
-                        sel_ai_anchor = Some(egui::Rect::from_min_max(
-                            output.galley_pos + rect.min.to_vec2(),
-                            output.galley_pos + rect.max.to_vec2(),
-                        ));
-                    }
-                    sel_ai_response_id = response_id;
-                    // LP2-1 内联标记半隐藏 + LP2-2 选区扩展。显形集合与扩
-                    // 展选区都是纯函数(`latermd_md::mark_interaction`),绘
-                    // 制仍是纯叠加 —— 不挂 widget(不参与命中测试)。交互
-                    // 边界:双击帧把 egui 选出的词扩到最内层标记对;拖选松
-                    // 手帧只有「锚点压着标记发起」的拖选才扩(从内容中部
-                    // 发起的普通拖选保持原样);键盘选区/三击选行不扩展。
-                    // 光标取 `output.state`(帧内真值)而非 `output.cursor_
-                    // range`:后者在焦点门控的键盘事件段产出,指针交互(选
-                    // 词/拖选/按压塌缩)发生在其后、只改 state —— 用陈旧值
-                    // 会把按压点读成旧光标。
-                    if let Some(cursor_range) = output.state.cursor.char_range() {
-                        let rev = editor.revision();
-                        if !matches!(&live.marks, Some((r, i, _)) if *r == rev && *i == index) {
-                            // 与 galley 同一份文本:本帧的编辑发生在 show()
-                            // 内部,这里取的也是编辑后的同一切片,缓存键即
-                            // 编辑后的修订号 —— 区间与字形永远对得上
-                            live.marks = Some((
-                                rev,
-                                index,
-                                latermd_md::inline_marks_with_pairs(BlockBuffer::slice(
-                                    editor.text(),
-                                    &range,
-                                )),
+                                .pos_from_cursor(egui::text::CCursor::new(tail));
+                            sel_ai_anchor = Some(egui::Rect::from_min_max(
+                                output.galley_pos + rect.min.to_vec2(),
+                                output.galley_pos + rect.max.to_vec2(),
                             ));
                         }
-                        let bundle: &latermd_md::InlineMarks = match &live.marks {
-                            Some((_, _, bundle)) => bundle,
-                            None => unreachable!("缓存已在上一行建立"),
-                        };
-                        let caret = cursor_range.primary.index.0;
-                        let other = cursor_range.secondary.index.0;
+                        sel_ai_response_id = response_id;
+                        // LP2-1 内联标记半隐藏 + LP2-2 选区扩展。显形集合与扩
+                        // 展选区都是纯函数(`latermd_md::mark_interaction`),绘
+                        // 制仍是纯叠加 —— 不挂 widget(不参与命中测试)。交互
+                        // 边界:双击帧把 egui 选出的词扩到最内层标记对;拖选松
+                        // 手帧只有「锚点压着标记发起」的拖选才扩(从内容中部
+                        // 发起的普通拖选保持原样);键盘选区/三击选行不扩展。
+                        // 光标取 `output.state`(帧内真值)而非 `output.cursor_
+                        // range`:后者在焦点门控的键盘事件段产出,指针交互(选
+                        // 词/拖选/按压塌缩)发生在其后、只改 state —— 用陈旧值
+                        // 会把按压点读成旧光标。
+                        if let Some(cursor_range) = output.state.cursor.char_range() {
+                            let rev = editor.revision();
+                            if !matches!(&live.marks, Some((r, i, _)) if *r == rev && *i == index) {
+                                // 与 galley 同一份文本:本帧的编辑发生在 show()
+                                // 内部,这里取的也是编辑后的同一切片,缓存键即
+                                // 编辑后的修订号 —— 区间与字形永远对得上
+                                live.marks = Some((
+                                    rev,
+                                    index,
+                                    latermd_md::inline_marks_with_pairs(BlockBuffer::slice(
+                                        editor.text(),
+                                        &range,
+                                    )),
+                                ));
+                            }
+                            let bundle: &latermd_md::InlineMarks = match &live.marks {
+                                Some((_, _, bundle)) => bundle,
+                                None => unreachable!("缓存已在上一行建立"),
+                            };
+                            let caret = cursor_range.primary.index.0;
+                            let other = cursor_range.secondary.index.0;
 
-                        // 手势判定。egui 在 show() 内部已处理双击选词(词选
-                        // 区就在本帧的 cursor_range 里)与按下塌缩光标;这里
-                        // 只读信号:双击 → 扩词;松手 + 非空选区 + 锚点 → 扩
-                        // 拖选;按下帧记/清锚点(按在别处清,防跨按压串帧)。
-                        let double_clicked = output.response.response.double_clicked();
-                        let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
-                        let primary_released = ui.input(|input| input.pointer.primary_released());
-                        if primary_pressed {
-                            live.drag_anchor = if output.response.response.contains_pointer() {
-                                Some(caret)
+                            // 手势判定。egui 在 show() 内部已处理双击选词(词选
+                            // 区就在本帧的 cursor_range 里)与按下塌缩光标;这里
+                            // 只读信号:双击 → 扩词;松手 + 非空选区 + 锚点 → 扩
+                            // 拖选;按下帧记/清锚点(按在别处清,防跨按压串帧)。
+                            let double_clicked = output.response.response.double_clicked();
+                            let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
+                            let primary_released =
+                                ui.input(|input| input.pointer.primary_released());
+                            if primary_pressed {
+                                live.drag_anchor = if output.response.response.contains_pointer() {
+                                    Some(caret)
+                                } else {
+                                    None
+                                };
+                            }
+                            let gesture = if double_clicked {
+                                live.drag_anchor = None;
+                                Some(latermd_md::MarkGesture::DoubleClick)
+                            } else if primary_released {
+                                match (live.drag_anchor.take(), caret != other) {
+                                    (Some(anchor), true) => {
+                                        Some(latermd_md::MarkGesture::DragRelease { anchor })
+                                    }
+                                    _ => None,
+                                }
                             } else {
                                 None
                             };
-                        }
-                        let gesture = if double_clicked {
-                            live.drag_anchor = None;
-                            Some(latermd_md::MarkGesture::DoubleClick)
-                        } else if primary_released {
-                            match (live.drag_anchor.take(), caret != other) {
-                                (Some(anchor), true) => {
-                                    Some(latermd_md::MarkGesture::DragRelease { anchor })
-                                }
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
 
-                        let interaction = latermd_md::mark_interaction(
-                            BlockBuffer::slice(editor.text(), &range),
-                            bundle,
-                            caret,
-                            other,
-                            gesture,
-                        );
-                        paint_mark_fades(
-                            ui,
-                            &output.galley,
-                            output.galley_pos,
-                            BlockBuffer::slice(editor.text(), &range),
-                            &bundle.segments,
-                            &interaction.revealed,
-                        );
-                        // 扩展写回:与 pending_caret 同一条通道(改 TextEdit
-                        // 光标状态,下一帧生效);primary 方向保留手势原方向。
-                        if let Some(expanded) = interaction.expanded {
-                            let (low, high) = (expanded.start, expanded.end);
-                            if low != caret.min(other) || high != caret.max(other) {
-                                let mut state = output.state.clone();
-                                let (primary, secondary) = if caret <= other {
-                                    (low, high)
-                                } else {
-                                    (high, low)
-                                };
-                                state
-                                    .cursor
-                                    .set_char_range(Some(egui::text::CCursorRange::two(
-                                        egui::text::CCursor::new(primary),
-                                        egui::text::CCursor::new(secondary),
-                                    )));
-                                state.store(ui.ctx(), response_id);
-                            }
-                        }
-                    }
-                    let response = output.response.response;
-                    // 活动块跟随(LP2-3,#29「帧内一次性标志」同款):只认
-                    // 两类帧 —— 键盘行/页导航键且活动块持焦、pending_caret
-                    // 落地帧(跨块路由/大纲跳转)。标志是帧内局部变量,当帧
-                    // 即焚;滚轮、拖滚动条、空闲帧一概不跟随,徒手滚动不被
-                    // 拽回光标处。egui 内建跟随只覆盖「事件处理改了选区」的
-                    // 帧(它按帧内前后选区比较),程序化写回改 state 再
-                    // store,内建永远比不出变化 —— 路由/跳转的落地帧必须在
-                    // 这里补,这是本层存在的硬理由;键盘导航帧内建本会跟
-                    // 随,这里再补一层是显式化并与源码模式(#29)对齐口
-                    // 径,不依赖内建的比较时机。跨块路由帧本身不跟随:光标
-                    // 这一帧还在旧块,下一帧 pending 落地时随写回同帧跟随,
-                    // 先滚旧位置只会与目标抢动画。
-                    let mut follow: Option<usize> = None;
-                    if route.is_none() {
-                        let nav_key = ui.input(|input| {
-                            input.events.iter().any(|event| {
-                                matches!(
-                                    event,
-                                    egui::Event::Key {
-                                        key: egui::Key::ArrowUp
-                                            | egui::Key::ArrowDown
-                                            | egui::Key::Home
-                                            | egui::Key::End
-                                            | egui::Key::PageUp
-                                            | egui::Key::PageDown,
-                                        pressed: true,
-                                        ..
-                                    }
-                                )
-                            })
-                        });
-                        if nav_key && ui.ctx().memory(|mem| mem.has_focus(response_id)) {
-                            follow = caret;
-                        }
-                        // 打字机模式(#64 M1)的触发面扩展:活动块持焦的
-                        // **修订号前进帧**(打字/IME/undo/redo —— 修订号是
-                        // 不依赖事件枚举的编辑信号)、键盘导航帧(接管后的
-                        // 恢复事件,与源码模式同口径)与开关开启帧也跟随。
-                        // 关闭态整块不进,LP2-3 路径原样。
-                        if show_typewriter {
-                            let edited = tw.last_rev.is_none_or(|rev| rev != editor.revision());
-                            if (edited || nav_key || tw_just_enabled)
-                                && ui.ctx().memory(|mem| mem.has_focus(response_id))
-                            {
-                                follow = follow.or(caret);
-                                tw_resumed = true;
-                                tw.phase = crate::ui::typewriter::step(
-                                    tw.phase,
-                                    crate::ui::typewriter::Turn::Edit,
-                                );
-                            }
-                        }
-                    }
-                    // 上一帧交过来的光标:落到本块的指定字符偏移并要焦点
-                    // (放在回填之后 —— `output.state` 在这里被移走)。写回
-                    // 与视口跟随同帧落地:跟随目标取写回偏移(本帧 state 是
-                    // 写回前的旧快照,但 galley 文本未变,行位置即目标行)。
-                    if let Some((block, char_idx)) = live.pending_caret {
-                        if block == index {
-                            let id = response.id;
-                            let mut state = output.state;
-                            // 落地光标:格式入口(live 归约)附带 pending_range
-                            // → 落成「内容仍选中」;其余入口塌缩单点(既有口径)。
-                            match live.pending_range.take() {
-                                Some((primary, secondary)) => {
+                            let interaction = latermd_md::mark_interaction(
+                                BlockBuffer::slice(editor.text(), &range),
+                                bundle,
+                                caret,
+                                other,
+                                gesture,
+                            );
+                            paint_mark_fades(
+                                ui,
+                                &output.galley,
+                                output.galley_pos,
+                                BlockBuffer::slice(editor.text(), &range),
+                                &bundle.segments,
+                                &interaction.revealed,
+                            );
+                            // 扩展写回:与 pending_caret 同一条通道(改 TextEdit
+                            // 光标状态,下一帧生效);primary 方向保留手势原方向。
+                            if let Some(expanded) = interaction.expanded {
+                                let (low, high) = (expanded.start, expanded.end);
+                                if low != caret.min(other) || high != caret.max(other) {
+                                    let mut state = output.state.clone();
+                                    let (primary, secondary) = if caret <= other {
+                                        (low, high)
+                                    } else {
+                                        (high, low)
+                                    };
                                     state.cursor.set_char_range(Some(
                                         egui::text::CCursorRange::two(
                                             egui::text::CCursor::new(primary),
                                             egui::text::CCursor::new(secondary),
                                         ),
                                     ));
-                                }
-                                None => {
-                                    state.cursor.set_char_range(Some(
-                                        egui::text::CCursorRange::one(egui::text::CCursor::new(
-                                            char_idx,
-                                        )),
-                                    ));
+                                    state.store(ui.ctx(), response_id);
                                 }
                             }
-                            state.store(ui.ctx(), id);
-                            ui.ctx().memory_mut(|mem| mem.request_focus(id));
-                            live.pending_caret = None;
-                            if live.caret_follow {
-                                follow = Some(char_idx);
-                                // 跨块路由/大纲跳转 = 光标移动 = 打字机恢复
-                                // 事件(#121 口径)
-                                if show_typewriter {
+                        }
+                        let response = output.response.response;
+                        // 活动块跟随(LP2-3,#29「帧内一次性标志」同款):只认
+                        // 两类帧 —— 键盘行/页导航键且活动块持焦、pending_caret
+                        // 落地帧(跨块路由/大纲跳转)。标志是帧内局部变量,当帧
+                        // 即焚;滚轮、拖滚动条、空闲帧一概不跟随,徒手滚动不被
+                        // 拽回光标处。egui 内建跟随只覆盖「事件处理改了选区」的
+                        // 帧(它按帧内前后选区比较),程序化写回改 state 再
+                        // store,内建永远比不出变化 —— 路由/跳转的落地帧必须在
+                        // 这里补,这是本层存在的硬理由;键盘导航帧内建本会跟
+                        // 随,这里再补一层是显式化并与源码模式(#29)对齐口
+                        // 径,不依赖内建的比较时机。跨块路由帧本身不跟随:光标
+                        // 这一帧还在旧块,下一帧 pending 落地时随写回同帧跟随,
+                        // 先滚旧位置只会与目标抢动画。
+                        let mut follow: Option<usize> = None;
+                        if route.is_none() {
+                            let nav_key = ui.input(|input| {
+                                input.events.iter().any(|event| {
+                                    matches!(
+                                        event,
+                                        egui::Event::Key {
+                                            key: egui::Key::ArrowUp
+                                                | egui::Key::ArrowDown
+                                                | egui::Key::Home
+                                                | egui::Key::End
+                                                | egui::Key::PageUp
+                                                | egui::Key::PageDown,
+                                            pressed: true,
+                                            ..
+                                        }
+                                    )
+                                })
+                            });
+                            if nav_key && ui.ctx().memory(|mem| mem.has_focus(response_id)) {
+                                follow = caret;
+                            }
+                            // 打字机模式(#64 M1)的触发面扩展:活动块持焦的
+                            // **修订号前进帧**(打字/IME/undo/redo —— 修订号是
+                            // 不依赖事件枚举的编辑信号)、键盘导航帧(接管后的
+                            // 恢复事件,与源码模式同口径)与开关开启帧也跟随。
+                            // 关闭态整块不进,LP2-3 路径原样。
+                            if show_typewriter {
+                                let edited = tw.last_rev.is_none_or(|rev| rev != editor.revision());
+                                if (edited || nav_key || tw_just_enabled)
+                                    && ui.ctx().memory(|mem| mem.has_focus(response_id))
+                                {
+                                    follow = follow.or(caret);
                                     tw_resumed = true;
                                     tw.phase = crate::ui::typewriter::step(
                                         tw.phase,
@@ -1153,149 +1184,230 @@ pub fn ui(
                                     );
                                 }
                             }
-                            live.caret_follow = false;
                         }
-                    }
-                    if let Some(index) = follow {
-                        let row_rect = output
-                            .galley
-                            .pos_from_cursor(egui::text::CCursor::new(index));
-                        if show_typewriter {
-                            // 打字机落地:与源码模式同一决策面(1/3 目标线 +
-                            // 死区),单像素矩形 + TOP 对齐一次到位,文首/
-                            // 文末钳位由 egui end() 兜底。
-                            let clip = ui.clip_rect();
-                            let cursor_screen_y = output.galley_pos.y + row_rect.min.y;
-                            let ask = crate::ui::typewriter::ScrollAsk {
-                                view_y: cursor_screen_y - clip.top(),
-                                row_h: row_rect.height().max(1.0),
-                                viewport: clip.height(),
-                            };
-                            if let Some(delta) = crate::ui::typewriter::scroll_delta(&ask) {
-                                let land_rect = egui::Rect::from_min_size(
-                                    egui::pos2(
-                                        clip.left() + 1.0,
-                                        clip.top() + delta + ui.spacing().item_spacing.y,
-                                    ),
-                                    egui::vec2(1.0, 1.0),
-                                );
-                                ui.scroll_to_rect_animation(
-                                    land_rect,
-                                    Some(egui::Align::TOP),
-                                    egui::style::ScrollAnimation::none(),
-                                );
-                                tw_landed = true;
+                        // 上一帧交过来的光标:落到本块的指定字符偏移并要焦点
+                        // (放在回填之后 —— `output.state` 在这里被移走)。写回
+                        // 与视口跟随同帧落地:跟随目标取写回偏移(本帧 state 是
+                        // 写回前的旧快照,但 galley 文本未变,行位置即目标行)。
+                        if let Some((block, char_idx)) = live.pending_caret {
+                            if block == index {
+                                let id = response.id;
+                                let mut state = output.state;
+                                // 落地光标:格式入口(live 归约)附带 pending_range
+                                // → 落成「内容仍选中」;其余入口塌缩单点(既有口径)。
+                                match live.pending_range.take() {
+                                    Some((primary, secondary)) => {
+                                        state.cursor.set_char_range(Some(
+                                            egui::text::CCursorRange::two(
+                                                egui::text::CCursor::new(primary),
+                                                egui::text::CCursor::new(secondary),
+                                            ),
+                                        ));
+                                    }
+                                    None => {
+                                        state.cursor.set_char_range(Some(
+                                            egui::text::CCursorRange::one(
+                                                egui::text::CCursor::new(char_idx),
+                                            ),
+                                        ));
+                                    }
+                                }
+                                state.store(ui.ctx(), id);
+                                ui.ctx().memory_mut(|mem| mem.request_focus(id));
+                                live.pending_caret = None;
+                                if live.caret_follow {
+                                    follow = Some(char_idx);
+                                    // 跨块路由/大纲跳转 = 光标移动 = 打字机恢复
+                                    // 事件(#121 口径)
+                                    if show_typewriter {
+                                        tw_resumed = true;
+                                        tw.phase = crate::ui::typewriter::step(
+                                            tw.phase,
+                                            crate::ui::typewriter::Turn::Edit,
+                                        );
+                                    }
+                                }
+                                live.caret_follow = false;
                             }
-                        } else {
-                            ui.scroll_to_rect(
-                                egui::Rect::from_min_max(
-                                    output.galley_pos + row_rect.min.to_vec2(),
-                                    output.galley_pos + row_rect.max.to_vec2(),
-                                )
-                                .expand(1.5),
-                                None,
-                            );
                         }
-                    }
-                    active_response = Some(response);
-                } else {
-                    // 富渲染。区域用渲染前后的 cursor 差值框出来;「点击进
-                    // 编辑」的命中不走 egui widget,理由见 [`clicked_for_edit`]。
-                    let top = ui.cursor().top();
-                    // 链接改写(#63 checkbox + #65 高亮):块文本先过改写层
-                    // (缓存键是源码指纹 + 块序号,稳态帧零解析),`task://`
-                    // 链接由本块专属 handler 画成自绘 checkbox、`hl://` 画
-                    // 成底色段 —— 探针坐标域带块首,点击切换由 `ui` 帧末的
-                    // 探针命中判定统一发出。无目标字符的块改写恒等,渲染
-                    // 零变化。
-                    let (block_rendered, offset_map, highlight_map, emoji_map, task_map) =
-                        live.rich_block(index, editor.revision(), block_text);
-                    // 字体与右栏预览同源(#23 F3):size = 用户字号偏好,
-                    // 族 = 预览专用族(#43 M2 的行 metrics 对齐副本,无 CJK
-                    // 回落 Proportional)。源码/Live 两种模式下排版偏好同观感。
-                    let rich_handler = LiveRichHandler::new(
-                        &mermaid_handler,
-                        range.start,
-                        ui.visuals().text_color(),
-                        matches!(ui.ctx().theme(), egui::Theme::Dark),
-                    );
-                    MarkdownLabel::new(
-                        editor_id.with(("live-render", index)),
-                        block_rendered.as_ref(),
-                    )
-                    .font(egui::FontId::new(
-                        crate::theme::editor_font_size(ui.ctx()),
-                        crate::fonts::preview_body_family(ui.ctx()),
-                    ))
-                    .wrap()
-                    .overflow_wrap(egui_markdown::OverflowWrap::BreakAll)
-                    // 代码块复制头(#38)与右栏预览同一份:Live 模式的
-                    // 富渲染块也是「code 预览的地方」。
-                    .scroll_code_blocks(true)
-                    .shrink_code_blocks(true)
-                    .code_block_min_width(Some(200.0))
-                    .code_block_buttons(&crate::ui::rich_widgets::code_copy_buttons)
-                    // mermaid 块出图(#51 M3)+ 任务 checkbox(#63),
-                    // 与右栏预览同一渲染入口。
-                    .link_handler(&rich_handler)
-                    .show(ui);
-                    // drain 前先取「本块拦截了链接点击」标志(wikilink/本地
-                    // 文档链接都走消息、无 OpenUrl,`clicked_for_edit` 的
-                    // OpenUrl 探测看不见它们,须显式排除 —— 点击归链接,
-                    // 不连带切入编辑)。
-                    let link_intercepted = !rich_handler.clicked.borrow().is_empty();
-                    rich_handler.drain_into(outbox);
-                    let bottom = ui.cursor().top();
-                    let rect = egui::Rect::from_min_max(
-                        egui::pos2(ui.min_rect().left(), top),
-                        egui::pos2(ui.min_rect().right(), bottom.max(top + 1.0)),
-                    );
-                    // 专注模式(#64 M2):非活动块整块蒙一层背景色遮罩(#81
-                    // 内联标记半隐藏同款纯绘制 —— 后画覆盖,不注册交互、
-                    // 不参与命中测试),淡化块的点击仍走 `clicked_for_edit`
-                    // 进入编辑,进入即变活动块、下帧起不再淡化。关闭态整块
-                    // 不进(逐像素现状,否决线)。
-                    if show_focus && crate::ui::focus::dimmed(live.active, index) {
-                        paint_block_fade(ui, rect);
-                    }
-                    // 点击进编辑(#170):光标落**点击处**而非块尾。点击帧
-                    // 富渲染块刚画出,帧内命中表把点击点映到渲染文本字符,
-                    // 经两张改写映射逆穿回块源码字节;文本 galley 之外回退
-                    // 最近子块起点,全落空(块被剔除等)保持旧行为落块尾。
-                    // 落点不滚动跟随:指针刚把视口定位到点击处。
-                    // 浏览态只响应滚动和左键双击，不因单击抢入插入模式；
-                    // 已经进入写作态后，单击其他块才切换活动编辑块。
-                    let edit_pos = if live.browse_only {
-                        live.browse_enabled
-                            .then(|| clicked_for_edit(ui, rect, editor_id, true, link_intercepted))
-                            .flatten()
+                        if let Some(index) = follow {
+                            let row_rect = output
+                                .galley
+                                .pos_from_cursor(egui::text::CCursor::new(index));
+                            if show_typewriter {
+                                // 打字机落地:与源码模式同一决策面(1/3 目标线 +
+                                // 死区),单像素矩形 + TOP 对齐一次到位,文首/
+                                // 文末钳位由 egui end() 兜底。
+                                let clip = ui.clip_rect();
+                                let cursor_screen_y = output.galley_pos.y + row_rect.min.y;
+                                let ask = crate::ui::typewriter::ScrollAsk {
+                                    view_y: cursor_screen_y - clip.top(),
+                                    row_h: row_rect.height().max(1.0),
+                                    viewport: clip.height(),
+                                };
+                                if let Some(delta) = crate::ui::typewriter::scroll_delta(&ask) {
+                                    let land_rect = egui::Rect::from_min_size(
+                                        egui::pos2(
+                                            clip.left() + 1.0,
+                                            clip.top() + delta + ui.spacing().item_spacing.y,
+                                        ),
+                                        egui::vec2(1.0, 1.0),
+                                    );
+                                    ui.scroll_to_rect_animation(
+                                        land_rect,
+                                        Some(egui::Align::TOP),
+                                        egui::style::ScrollAnimation::none(),
+                                    );
+                                    tw_landed = true;
+                                }
+                            } else {
+                                ui.scroll_to_rect(
+                                    egui::Rect::from_min_max(
+                                        output.galley_pos + row_rect.min.to_vec2(),
+                                        output.galley_pos + row_rect.max.to_vec2(),
+                                    )
+                                    .expand(1.5),
+                                    None,
+                                );
+                            }
+                        }
+                        active_response = Some(response);
                     } else {
-                        clicked_for_edit(ui, rect, editor_id, false, link_intercepted)
-                    };
-                    if let Some(pos) = edit_pos {
-                        let label_id = editor_id.with(("live-render", index));
-                        let block_source = BlockBuffer::slice(editor.text(), &range);
-                        let local = LiveState::click_caret_local(
-                            ui,
-                            label_id,
-                            pos,
+                        // 富渲染。区域用渲染前后的 cursor 差值框出来;「点击进
+                        // 编辑」的命中不走 egui widget,理由见 [`clicked_for_edit`]。
+                        let top = ui.cursor().top();
+                        // 链接改写(#63 checkbox + #65 高亮):块文本先过改写层
+                        // (缓存键是源码指纹 + 块序号,稳态帧零解析),`task://`
+                        // 链接由本块专属 handler 画成自绘 checkbox、`hl://` 画
+                        // 成底色段 —— 探针坐标域带块首,点击切换由 `ui` 帧末的
+                        // 探针命中判定统一发出。无目标字符的块改写恒等,渲染
+                        // 零变化。
+                        let (
+                            block_rendered,
+                            offset_map,
+                            highlight_map,
+                            emoji_map,
+                            task_map,
+                            image_map,
+                        ) = live.rich_block_with_base(index, block_text, base_dir);
+                        // 字体与右栏预览同源(#23 F3):size = 用户字号偏好,
+                        // 族 = 预览专用族(#43 M2 的行 metrics 对齐副本,无 CJK
+                        // 回落 Proportional)。源码/Live 两种模式下排版偏好同观感。
+                        let rich_handler = LiveRichHandler::new(
+                            &mermaid_handler,
+                            range.start,
+                            ui.visuals().text_color(),
+                            matches!(ui.ctx().theme(), egui::Theme::Dark),
+                            std::rc::Rc::clone(&emoji_rects),
+                        );
+                        MarkdownLabel::new(
+                            editor_id.with(("live-render", index)),
                             block_rendered.as_ref(),
-                            offset_map.as_ref(),
-                            highlight_map.as_ref(),
-                            emoji_map.as_ref(),
-                            task_map.as_ref(),
-                            block_source.len(),
                         )
-                        .map(|byte| {
-                            editor.byte_to_char(range.start + byte)
-                                - editor.byte_to_char(range.start)
-                        })
-                        .unwrap_or_else(|| live.block_char_len(editor, index));
-                        activate = Some((index, local));
+                        .font(egui::FontId::new(
+                            crate::theme::editor_font_size(ui.ctx()),
+                            crate::fonts::preview_body_family(ui.ctx()),
+                        ))
+                        .wrap()
+                        .overflow_wrap(egui_markdown::OverflowWrap::BreakAll)
+                        // 代码块复制头(#38)与右栏预览同一份:Live 模式的
+                        // 富渲染块也是「code 预览的地方」。
+                        .scroll_code_blocks(true)
+                        .shrink_code_blocks(true)
+                        .code_block_min_width(Some(200.0))
+                        .code_block_buttons(&crate::ui::rich_widgets::code_copy_buttons)
+                        // heal(live-unify-plan P1/R1):AI 流式写入本标签的帧
+                        // 开启,残缺 fence / 未闭合 ** 在块片段上补闭合 —— 块级
+                        // 契约由 latermd_md 的 block_level_heal_closes_streaming_
+                        // fragments 钉住。完整块上 heal 恒等(Cow::Borrowed),
+                        // 开关切换不改变完整块渲染(与预览同一口径)。
+                        .heal(heal)
+                        // 视口外代码块高亮延迟(#59/#60,vendor ①类配套):缓存
+                        // miss 帧里起始于视口下缘之外的 flush 段不做 syntect
+                        // 高亮,滚到可见前的同帧补齐 —— 大文档写作模式首切
+                        // 同享 20k 行 876→173ms 的收益(预览同参数)。
+                        .defer_offscreen_highlight(true)
+                        // mermaid 块出图(#51 M3)+ 任务 checkbox(#63),
+                        // 与右栏预览同一渲染入口。
+                        .link_handler(&rich_handler)
+                        .show(ui);
+                        // drain 前先取「本块拦截了链接点击」标志(wikilink/本地
+                        // 文档链接都走消息、无 OpenUrl,`clicked_for_edit` 的
+                        // OpenUrl 探测看不见它们,须显式排除 —— 点击归链接,
+                        // 不连带切入编辑)。
+                        let link_intercepted = !rich_handler.clicked.borrow().is_empty();
+                        rich_handler.drain_into(outbox);
+                        let bottom = ui.cursor().top();
+                        let rect = egui::Rect::from_min_max(
+                            egui::pos2(ui.min_rect().left(), top),
+                            egui::pos2(ui.min_rect().right(), bottom.max(top + 1.0)),
+                        );
+                        // 专注模式(#64 M2):非活动块整块蒙一层背景色遮罩(#81
+                        // 内联标记半隐藏同款纯绘制 —— 后画覆盖,不注册交互、
+                        // 不参与命中测试),淡化块的点击仍走 `clicked_for_edit`
+                        // 进入编辑,进入即变活动块、下帧起不再淡化。关闭态整块
+                        // 不进(逐像素现状,否决线)。
+                        if show_focus && crate::ui::focus::dimmed(live.active, index) {
+                            paint_block_fade(ui, rect);
+                        }
+                        // 点击进编辑(#170):光标落**点击处**而非块尾。点击帧
+                        // 富渲染块刚画出,帧内命中表把点击点映到渲染文本字符,
+                        // 经两张改写映射逆穿回块源码字节;文本 galley 之外回退
+                        // 最近子块起点,全落空(块被剔除等)保持旧行为落块尾。
+                        // 落点不滚动跟随:指针刚把视口定位到点击处。
+                        // 浏览态只响应滚动和左键双击，不因单击抢入插入模式；
+                        // 已经进入写作态后，单击其他块才切换活动编辑块。
+                        let edit_pos = if live.browse_only {
+                            live.browse_enabled
+                                .then(|| {
+                                    clicked_for_edit(ui, rect, editor_id, true, link_intercepted)
+                                })
+                                .flatten()
+                        } else {
+                            clicked_for_edit(ui, rect, editor_id, false, link_intercepted)
+                        };
+                        if let Some(pos) = edit_pos {
+                            let label_id = editor_id.with(("live-render", index));
+                            let block_source = BlockBuffer::slice(editor.text(), &range);
+                            let local = LiveState::click_caret_local(
+                                ui,
+                                label_id,
+                                pos,
+                                block_rendered.as_ref(),
+                                image_map.as_ref(),
+                                offset_map.as_ref(),
+                                highlight_map.as_ref(),
+                                emoji_map.as_ref(),
+                                task_map.as_ref(),
+                                block_source.len(),
+                            )
+                            .map(|byte| {
+                                editor.byte_to_char(range.start + byte)
+                                    - editor.byte_to_char(range.start)
+                            })
+                            .unwrap_or_else(|| live.block_char_len(editor, index));
+                            activate = Some((index, local));
+                        }
                     }
                 }
-            }
-        });
+            });
+
+    // emoji inline widget 的收尾(P1,与右栏预览同一收尾:①手型抑制 ——
+    // vendored 对悬停中的 inline widget 无条件置 PointingHand(label.rs
+    // `handle_hover`),`link_style` 管不到光标,只能在帧末把指针悬停 emoji
+    // 时的光标按回 Default;中央面板后画,后写者胜,预览侧同帧的同名写被
+    // 覆盖是预期);②把本帧占位区写进探针(每帧整帧覆盖,零 emoji 帧不留
+    // 上一帧的旧区块),无头测试读它断言 widget 生效段。
+    let emoji_rects = emoji_rects.borrow().clone();
+    let hovering_emoji = panel
+        .input(|input| input.pointer.latest_pos())
+        .is_some_and(|pos| emoji_rects.iter().any(|rect| rect.contains(pos)));
+    if hovering_emoji {
+        panel.output_mut(|out| out.cursor_icon = egui::CursorIcon::Default);
+    }
+    panel
+        .ctx()
+        .data_mut(|d| d.insert_temp(emoji_probe_id(editor_id), emoji_rects));
 
     let focus_target_changed = activate.is_some() || route.is_some();
     if let Some((index, local)) = activate.take() {
@@ -1753,10 +1865,9 @@ mod tests {
     #[test]
     fn sync_keeps_rich_cache_for_unchanged_blocks() {
         let (mut editor, mut live, _) = state_with("第一段 **a**\n\n第二段 **b**\n");
-        let first_rev = editor.revision();
         for (index, range) in live.blocks.clone().into_iter().enumerate() {
             let text = &editor.text()[range];
-            live.rich_block(index, first_rev, text);
+            live.rich_block_with_base(index, text, None);
         }
         let cached = live
             .rich_cache
@@ -1768,7 +1879,7 @@ mod tests {
         live.sync(&editor, None);
 
         let second = live.blocks[1].clone();
-        let rendered = live.rich_block(1, editor.revision(), &editor.text()[second]);
+        let rendered = live.rich_block_with_base(1, &editor.text()[second], None);
         assert!(Arc::ptr_eq(&cached, &rendered.0), "未变化块不应重新改写");
     }
 
@@ -1872,6 +1983,8 @@ mod tests {
                 &mut live,
                 egui::Id::new("live-test"),
                 false,
+                false,
+                None,
                 false,
                 &crate::keymap::Keymap::builtin(),
                 &mut outbox,
@@ -2034,6 +2147,8 @@ mod tests {
                     live,
                     egui::Id::new("live-copy-test"),
                     false,
+                    false,
+                    None,
                     false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
@@ -2426,11 +2541,8 @@ mod tests {
         let char_at = editor.byte_to_char(byte);
         editor.replace_range(char_at + 1..char_at + 2, "x");
         live.sync(&editor, None);
-        let (block_rendered, _, _, _, _) = live.rich_block(
-            0,
-            editor.revision(),
-            BlockBuffer::slice(editor.text(), &live.blocks[0]),
-        );
+        let (block_rendered, _, _, _, _, _) =
+            live.rich_block_with_base(0, BlockBuffer::slice(editor.text(), &live.blocks[0]), None);
         assert!(
             block_rendered.contains("task://c"),
             "切换后块改写即时反映勾选态:{block_rendered}"
@@ -2648,6 +2760,8 @@ mod tests {
                     live,
                     egui::Id::new(FADE_EDITOR_ID),
                     false,
+                    false,
+                    None,
                     false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
@@ -3322,6 +3436,8 @@ mod tests {
                     egui::Id::new(SCROLL_EDITOR_ID),
                     show_typewriter,
                     show_focus,
+                    None,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 )
@@ -4577,6 +4693,8 @@ mod tests {
                     egui::Id::new(FOCUS_EDITOR_ID),
                     false,
                     show_focus,
+                    None,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
@@ -4813,6 +4931,8 @@ mod tests {
                     egui::Id::new(FOCUS_EDITOR_ID),
                     typewriter,
                     focus,
+                    None,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
@@ -4895,17 +5015,23 @@ mod tests {
     fn live_rich_block_stacks_highlight_and_task_layers() {
         let mut live = LiveState::default();
         let doc = "- [ ] ==完== 成\n";
-        let (rendered, _, _, _, _) = live.rich_block(0, 1, doc);
+        let (rendered, _, _, _, _, _) = live.rich_block_with_base(0, doc, None);
         assert!(rendered.contains("[完](<hl://>)"), "高亮层先跑:{rendered}");
         assert!(rendered.contains("task://"), "任务层后跑:{rendered}");
         assert!(!rendered.contains("=="), "标记被改写消费,不回流:{rendered}");
 
         // 缓存:同修订号直取同一份
-        assert_eq!(live.rich_block(0, 1, doc).0, rendered, "同修订号缓存命中");
+        assert_eq!(
+            live.rich_block_with_base(0, doc, None).0,
+            rendered,
+            "同修订号缓存命中"
+        );
 
         // 零变化护栏:无 == 无任务标记的块恒等
         assert_eq!(
-            live.rich_block(1, 1, "普通段落。\n").0.as_ref(),
+            live.rich_block_with_base(1, "普通段落。\n", None)
+                .0
+                .as_ref(),
             "普通段落。\n",
             "无目标字符的块改写恒等"
         );
@@ -4919,7 +5045,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mermaid = crate::ui::mermaid::LiveMermaidHandler::new();
         let body = egui::Color32::from_rgb(0x11, 0x22, 0x33);
-        let handler = LiveRichHandler::new(&mermaid, 0, body, false);
+        let handler = LiveRichHandler::new(&mermaid, 0, body, false, Default::default());
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let font = egui::FontId::proportional(15.0);
             let mut job = egui::text::LayoutJob::default();
@@ -4990,6 +5116,8 @@ mod tests {
                 &mut live,
                 egui::Id::new("live-highlight-test"),
                 false,
+                false,
+                None,
                 false,
                 &crate::keymap::Keymap::builtin(),
                 &mut outbox,
@@ -5120,6 +5248,8 @@ mod tests {
                 egui::Id::new("gap-test"),
                 false,
                 false,
+                None,
+                false,
                 &crate::keymap::Keymap::builtin(),
                 &mut outbox,
             );
@@ -5216,5 +5346,331 @@ mod tests {
             "行距须同源:预览行盒 {preview_row}px vs Live 行盒 {live_row}px"
         );
         out2.drop_without_applying_deltas();
+    }
+
+    // —— 相对图片 file:// 改写(live-unify-plan P1)——
+
+    /// base_dir 是 rich_cache 的维度(R4):同一块源码,换文档目录后必须
+    /// 重新改写(图片 URI 跟着换),不换则命中旧缓存;未落盘(None)无锚点
+    /// 原样渲染。换目录/首次落盘两个失效方向都钉住。
+    #[test]
+    fn rich_block_cache_invalidates_when_base_dir_changes() {
+        let doc = "![红点](./foo.assets/dot.png)\n";
+        let mut live = LiveState {
+            block_hashes: vec![source_hash(doc)],
+            ..LiveState::default()
+        };
+        let a = std::path::Path::new("/tmp/latermd-docs-a");
+        let b = std::path::Path::new("/tmp/latermd-docs-b");
+
+        // 未落盘:无锚点不改写
+        let (none_rendered, _, _, _, _, _) = live.rich_block_with_base(0, doc, None);
+        assert_eq!(none_rendered.as_ref(), doc, "未落盘不改写");
+
+        // 落盘到 a:URI 指向 a
+        let (a_rendered, _, _, _, _, _) = live.rich_block_with_base(0, doc, Some(a));
+        assert!(
+            a_rendered.contains("file:///tmp/latermd-docs-a/foo.assets/dot.png"),
+            "落盘后应改写成 a 目录的 file:// URI:{a_rendered}"
+        );
+
+        // 同目录再取:命中缓存(同一份渲染串)
+        let (again, _, _, _, _, _) = live.rich_block_with_base(0, doc, Some(a));
+        assert!(Arc::ptr_eq(&a_rendered, &again), "同目录命中缓存");
+
+        // 换到 b:缓存失效重算,URI 跟着换
+        let (b_rendered, _, _, _, _, _) = live.rich_block_with_base(0, doc, Some(b));
+        assert!(
+            b_rendered.contains("file:///tmp/latermd-docs-b/foo.assets/dot.png"),
+            "换目录后应重新改写:{b_rendered}"
+        );
+    }
+
+    /// 写作模式下相对图片出图(P1 验收,照预览
+    /// local_file_image_paints_through_loaders 改写):文档目录作 base_dir,
+    /// `./foo.assets/dot.png` 经第 5 层改写成 file:// 后由加载器画出纹理。
+    #[test]
+    fn live_local_file_image_paints_through_loaders() {
+        let dir = std::env::temp_dir().join(format!("latermd-live-img-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("foo.assets")).unwrap();
+        image::RgbImage::from_pixel(2, 2, image::Rgb([200, 40, 40]))
+            .save(dir.join("foo.assets/dot.png"))
+            .unwrap();
+
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+
+        let textured_rects = |output: &eframe::egui::FullOutput| -> usize {
+            fn collect(shape: &egui::epaint::Shape, out: &mut usize) {
+                match shape {
+                    egui::epaint::Shape::Rect(rect) => {
+                        // 0.36 起矩形纹理走 `brush`(纯色矩形/文字均为
+                        // None),带 brush 的矩形即图片
+                        if rect.brush.is_some() {
+                            *out += 1;
+                        }
+                    }
+                    egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| collect(s, out)),
+                    _ => {}
+                }
+            }
+            let mut out = 0;
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut out);
+            }
+            out
+        };
+        let render = |doc: &str| {
+            let mut editor = EditorBuffer::new(doc);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState {
+                browse_only: true,
+                browse_enabled: true,
+                ..LiveState::default()
+            };
+            let mut selection = None;
+            let mut outbox = Vec::new();
+            ctx.run_ui(egui::RawInput::default(), |panel| {
+                super::ui(
+                    panel,
+                    &mut editor,
+                    &mut preview,
+                    &mut cursor,
+                    &mut selection,
+                    &mut live,
+                    egui::Id::new("live-img-test"),
+                    false,
+                    false,
+                    Some(dir.as_path()),
+                    false,
+                    &crate::keymap::Keymap::builtin(),
+                    &mut outbox,
+                );
+            })
+        };
+
+        // 基线:无图文档出不了带纹理的矩形(防御断言),浮窗/滚动区首帧
+        // 只完成注册,与其它无头测试同节奏跑满三帧。
+        for _ in 0..3 {
+            let output = render("# 基线\n\n正文,没有图片。\n");
+            assert_eq!(textured_rects(&output), 0, "无图文档不应有图片纹理");
+            output.drop_without_applying_deltas();
+        }
+
+        let mut painted = false;
+        for _ in 0..200 {
+            let output = render("![红点](./foo.assets/dot.png)\n");
+            let textured = textured_rects(&output);
+            output.drop_without_applying_deltas();
+            if textured > 0 {
+                painted = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            painted,
+            "相对路径图片应经 file:// 画出图片纹理(写作模式出图)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // —— 流式帧 heal(live-unify-plan P1/R1)——
+
+    /// 流式帧 heal 的两条验收:
+    /// ① 未闭合 fence 的流式帧不出现残缺排版 —— fence 块在浏览态渲染成
+    ///   代码块(内容 + 语言标签),围栏标记不作正文画出。实测记录:
+    ///   CommonMark 下 pulldown 对未闭合 fence 本就在文末闭合,heal 前后
+    ///   同形 —— 本条钉的是观感结果,不依赖实现路径。
+    /// ② heal 接线的红绿锚:未闭合 ** 且块尾无换行(流式中途帧)时,
+    ///   heal=true 补闭合、星号按标记隐去;heal=false 字面画出。拆掉
+    ///   `.heal(heal)` 接线,②当场红。
+    /// (另记 vendored heal 的既有边界,预览同样存在、不属本阶段:尾带
+    /// 换行的未闭合 ** 会被把闭合符追加到换行之后,CommonMark 行首
+    /// flanking 规则使其闭合不了 —— fence 不受影响。)
+    #[test]
+    fn live_streaming_frame_heals_unclosed_marks() {
+        let ctx = egui::Context::default();
+        let render = |doc: &str, heal: bool, id: &str| -> Vec<String> {
+            let mut editor = EditorBuffer::new(doc);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState {
+                browse_only: true,
+                browse_enabled: true,
+                ..LiveState::default()
+            };
+            let mut selection = None;
+            let mut outbox = Vec::new();
+            let output = ctx.run_ui(egui::RawInput::default(), |panel| {
+                super::ui(
+                    panel,
+                    &mut editor,
+                    &mut preview,
+                    &mut cursor,
+                    &mut selection,
+                    &mut live,
+                    egui::Id::new(id),
+                    false,
+                    false,
+                    None,
+                    heal,
+                    &crate::keymap::Keymap::builtin(),
+                    &mut outbox,
+                );
+            });
+            let mut texts = Vec::new();
+            for clipped in &output.shapes {
+                if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                    texts.push(t.galley.text().to_owned());
+                }
+            }
+            output.drop_without_applying_deltas();
+            texts
+        };
+
+        // ① 未闭合 fence:代码块照常渲染,围栏标记不漏进正文
+        let frame = render(
+            "正文在前。\n\n```rust\nfn main() {\n",
+            true,
+            "live-heal-fence",
+        );
+        assert!(
+            !frame.iter().any(|text| text.contains("```")),
+            "围栏标记不得当正文画出:{frame:?}"
+        );
+        assert!(
+            frame.iter().any(|text| text.contains("fn main() {")),
+            "fence 块内容应照常渲染:{frame:?}"
+        );
+        assert!(
+            frame.iter().any(|text| text.contains("rust")),
+            "fence 语言标签应照常渲染:{frame:?}"
+        );
+
+        // ② 未闭合 **(流式中途,块尾无换行):heal=true 补闭合
+        let healed = render("正文 **加粗中", true, "live-heal-bold");
+        assert!(
+            !healed.iter().any(|text| text.contains("**")),
+            "heal 帧里未闭合 ** 应补闭合(标记不显示):{healed:?}"
+        );
+        let raw = render("正文 **加粗中", false, "live-raw-bold");
+        assert!(
+            raw.iter().any(|text| text.contains("**")),
+            "对照帧(heal=false)星号按字面渲染:{raw:?}"
+        );
+    }
+
+    // —— emoji inline widget 探针与手型抑制(live-unify-plan P1)——
+
+    /// 悬停 emoji 光标保持 Default(vendored 对悬停中的 inline widget 无条件
+    /// 置 PointingHand,帧末按探针区块压回);同文档悬停普通链接仍
+    /// PointingHand(vendored 默认不受牵连)。两个方向都钉住。
+    #[test]
+    fn live_emoji_hover_keeps_default_cursor_while_links_keep_pointing_hand() {
+        let ctx = egui::Context::default();
+        let doc = "开头 😀 结尾 [跳转链接](https://example.com/target) 完。\n";
+        let editor_id = egui::Id::new("live-emoji-test");
+        /// 夹具产物:emoji 探针区块 + 光标形态 + 文本 galley(链接定位用)。
+        #[derive(Debug)]
+        struct EmojiProbe {
+            rects: Vec<egui::Rect>,
+            cursor: egui::CursorIcon,
+            galleys: Vec<(egui::Pos2, std::sync::Arc<egui::Galley>)>,
+        }
+        let frame = |events: Vec<egui::Event>| -> EmojiProbe {
+            let mut editor = EditorBuffer::new(doc);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState {
+                browse_only: true,
+                browse_enabled: true,
+                ..LiveState::default()
+            };
+            let mut selection = None;
+            let mut outbox = Vec::new();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |panel| {
+                    super::ui(
+                        panel,
+                        &mut editor,
+                        &mut preview,
+                        &mut cursor,
+                        &mut selection,
+                        &mut live,
+                        editor_id,
+                        false,
+                        false,
+                        None,
+                        false,
+                        &crate::keymap::Keymap::builtin(),
+                        &mut outbox,
+                    );
+                },
+            );
+            fn collect(
+                shape: &egui::epaint::Shape,
+                galleys: &mut Vec<(egui::Pos2, std::sync::Arc<egui::Galley>)>,
+            ) {
+                match shape {
+                    egui::epaint::Shape::Text(t) => galleys.push((t.pos, t.galley.clone())),
+                    egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| collect(s, galleys)),
+                    _ => {}
+                }
+            }
+            let mut galleys = Vec::new();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut galleys);
+            }
+            let rects = ctx
+                .data(|d| d.get_temp::<Vec<egui::Rect>>(super::emoji_probe_id(editor_id)))
+                .unwrap_or_default();
+            let cursor = output.platform_output.cursor_icon;
+            output.drop_without_applying_deltas();
+            EmojiProbe {
+                rects,
+                cursor,
+                galleys,
+            }
+        };
+        // 行带找法照预览 row_band_of:`needle` 首字的字形行带(0 宽 caret
+        // rect),命中点向右挪半个字形落进字形内部。
+        let band_of =
+            |galleys: &[(egui::Pos2, std::sync::Arc<egui::Galley>)], needle: &str| -> egui::Rect {
+                for (origin, galley) in galleys {
+                    if let Some(byte) = galley.text().find(needle) {
+                        let chars = galley.text()[..byte].chars().count();
+                        let band = galley.pos_from_cursor(egui::text::CCursor::new(chars));
+                        return egui::Rect::from_min_max(
+                            egui::pos2(origin.x + band.left(), origin.y + band.top()),
+                            egui::pos2(origin.x + band.right(), origin.y + band.bottom()),
+                        );
+                    }
+                }
+                panic!("{needle:?} 不在任何文本 shape 内");
+            };
+
+        let probe = frame(Vec::new());
+        assert_eq!(probe.rects.len(), 1, "文档只有一枚 emoji:{probe:?}");
+        let emoji_center = probe.rects[0].center();
+        let band = band_of(&probe.galleys, "跳转链接");
+        let link_center = egui::pos2(band.left() + 8.0, band.center().y);
+
+        let on_emoji = frame(vec![egui::Event::PointerMoved(emoji_center)]);
+        assert_eq!(on_emoji.cursor, egui::CursorIcon::Default, "emoji 不吃手型");
+        let on_link = frame(vec![egui::Event::PointerMoved(link_center)]);
+        assert_eq!(
+            on_link.cursor,
+            egui::CursorIcon::PointingHand,
+            "普通链接的手型不受牵连"
+        );
     }
 }

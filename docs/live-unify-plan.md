@@ -9,7 +9,7 @@
 | 阶段 | 内容 | 状态 | 完成日期 | PR |
 |---|---|---|---|---|
 | P0 | 共享渲染件搬家(零行为变化) | 完成 | 2026-10-14 | [#238](https://github.com/ailater/LaterMd/pull/238) |
-| P1 | Live 补齐：图片 / heal / 延迟高亮 / emoji 探针 | 未开始 | | |
+| P1 | Live 补齐：图片 / heal / 延迟高亮 / emoji 探针 | 完成 | 2026-10-15 | [#239](https://github.com/ailater/LaterMd/pull/239) |
 | P2 | Live 补齐：AI 指令卡与 ai:// 链接 | 未开始 | | |
 | P3 | 禅定切到 Live 浏览态 | 未开始 | | |
 | P4 | 删右栏（面板 / 布局状态 / 命令 / 入口 / 常量） | 未开始 | | |
@@ -21,6 +21,11 @@
 - **P0 已落地的新模块叫 `crate::ui::rich_widgets`**(不是文档原设想的两个),13 个件一次性搬齐,含 `image_rewrites` / `task_checkbox_entries` / `HIGHLIGHT_BG_EXPAND` / `LINE_HEIGHT_FLOOR_SLACK_PX` 四处的可见性提升。
 - **`is_openable_href` 是 P0 的遗留口子**:它是 link 协议策略函数(右键菜单「可打开」判定),plan 定稿时还不存在。`live.rs:361` 至今靠 `crate::ui::preview::is_openable_href` 调用,**P4 删 `pub mod preview;` 之前必须先给它安置宿主**(建议随 P2 的 `RichLinkHandler` 一起搬进 `ui/ai_card.rs`,或另起 `ui/link_policy.rs`)。P4 开工时先 grep 确认这一处在零。
 - **P0 的行号已作废**:文档里所有 `preview.rs:NNN` 快照行号在 P0 之后全部漂移(搬走 564 行)。后续阶段一律以 grep 复核为准 —— P1 尤其注意,相对图片/`heal`/延迟高亮/emoji 探针四处全要重新定位。
+- **P1 已落地,生产入口统一为 `LiveState::rich_block_with_base(index, block_text, base_dir)`**(原 `rich_block` 薄封装已删,测试直接传 `None`)。五层链 wikilink → 高亮 → emoji → 任务 → 图片,`image_map` 进 `rich_cache` 第 7 元、`seen_base`(`Option<PathBuf>`)第 8 元参与命中判定;`click_caret_local` 逆穿顺序相应变为 图片 → 任务 → emoji → 高亮 → wikilink(图片最外层先逆穿)。
+- **R1 实测定案(块级 heal 达标,未触发退回)**:latermd_md::block_level_heal_closes_streaming_fragments 钉契约。实测要点:①未闭合 fence **不 heal 也渲染正确** —— pulldown 按 CommonMark 把 fence 闭到 EOF,P1 动因表「fence 渲染残缺」一项实际由解析器兜底;②heal 的可见价值在未闭合行内标记,Live 接线由「块尾无换行的 `**` 帧」红绿锚(live_streaming_frame_heals_unclosed_marks)钉住;③vendored heal 既有边界:尾带换行的未闭合 `**`,闭合符追加到换行后闭不上(CommonMark 行首 flanking),预览同病、块级与整篇 heal 在此等价 —— 将来若要修属 vendor ①类,另起议题;④「整篇 heal 后再切块」备选不可行:healed 偏移与编辑缓冲字节错位,破坏块表=原始文本的安全底线。
+- **P1 的传参链**:`layout.rs`(destructure 前取 `live_heal`/`base_dir`)→ `editor::ui`(新增 `base_dir: Option<&Path>`、`heal: bool`,仅 Live 分支消费)→ `live::ui`。defer_offscreen_highlight 固定 `true`(与预览同参,无开关)。emoji 探针 id = `live::emoji_probe_id(editor_id)`,每帧整帧覆盖。
+- **P2 开工注意**:live.rs 至今仍引 `crate::ui::preview::is_openable_href`(P0 遗留口子,plan 建议随 RichLinkHandler 安置);`LiveRichHandler` 已带共享 emoji 收集器与 `with_ai` 拆分的自然接缝(clicked 消息通道独立于渲染)。
+
 
 ## 阻塞
 
