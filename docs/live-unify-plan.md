@@ -10,7 +10,7 @@
 |---|---|---|---|---|
 | P0 | 共享渲染件搬家(零行为变化) | 完成 | 2026-10-14 | [#238](https://github.com/ailater/LaterMd/pull/238) |
 | P1 | Live 补齐：图片 / heal / 延迟高亮 / emoji 探针 | 完成 | 2026-10-15 | [#239](https://github.com/ailater/LaterMd/pull/239) |
-| P2 | Live 补齐：AI 指令卡与 ai:// 链接 | 未开始 | | |
+| P2 | Live 补齐：AI 指令卡与 ai:// 链接 | 完成 | 2026-10-15 | [#240](https://github.com/ailater/LaterMd/pull/240) |
 | P3 | 禅定切到 Live 浏览态 | 未开始 | | |
 | P4 | 删右栏（面板 / 布局状态 / 命令 / 入口 / 常量） | 未开始 | | |
 | P5 | 测试迁移 + PreviewState 瘦身 | 未开始 | | |
@@ -25,6 +25,10 @@
 - **R1 实测定案(块级 heal 达标,未触发退回)**:latermd_md::block_level_heal_closes_streaming_fragments 钉契约。实测要点:①未闭合 fence **不 heal 也渲染正确** —— pulldown 按 CommonMark 把 fence 闭到 EOF,P1 动因表「fence 渲染残缺」一项实际由解析器兜底;②heal 的可见价值在未闭合行内标记,Live 接线由「块尾无换行的 `**` 帧」红绿锚(live_streaming_frame_heals_unclosed_marks)钉住;③vendored heal 既有边界:尾带换行的未闭合 `**`,闭合符追加到换行后闭不上(CommonMark 行首 flanking),预览同病、块级与整篇 heal 在此等价 —— 将来若要修属 vendor ①类,另起议题;④「整篇 heal 后再切块」备选不可行:healed 偏移与编辑缓冲字节错位,破坏块表=原始文本的安全底线。
 - **P1 的传参链**:`layout.rs`(destructure 前取 `live_heal`/`base_dir`)→ `editor::ui`(新增 `base_dir: Option<&Path>`、`heal: bool`,仅 Live 分支消费)→ `live::ui`。defer_offscreen_highlight 固定 `true`(与预览同参,无开关)。emoji 探针 id = `live::emoji_probe_id(editor_id)`,每帧整帧覆盖。
 - **P2 开工注意**:live.rs 至今仍引 `crate::ui::preview::is_openable_href`(P0 遗留口子,plan 建议随 RichLinkHandler 安置);`LiveRichHandler` 已带共享 emoji 收集器与 `with_ai` 拆分的自然接缝(clicked 消息通道独立于渲染)。
+
+- **P2 已落地,新宿主叫 `crate::ui::ai_card::RichLinkHandler`**:`preview::AiLinkHandler` 已删,拆层=基础 handler(两栏同一套)+ `with_ai(color, &AiState)` 显式开关;预览恒开(行为零变化)、Live 显式开(D1,#147 in decisions-pending,含回退指南:live.rs 删 `.with_ai(..)` 一行即整体回落)。`LiveRichHandler` 与 `LiveMermaidHandler` 都已退役——Live 每块一个 `RichLinkHandler`(task 坐标域 `Live(块首)`,emoji 收集器全块共享 Rc);mermaid 分派内嵌于 RichLinkHandler,Live 侧块内序号从 0 起(widget id 由块标签 id 命名空间兜住,两块各序 0 不相撞)。`is_openable_href` 安置在 `ui::ai_card`(P0 口子收口,live.rs 不再引 `ui::preview`)。
+- **P2 的传参链**:`layout.rs`(编辑器调用点传 `&state.ai`,与 tab 字段借用不相交)→ `editor::ui`(新增 `ai: &crate::ai::AiState`,插在 preview 之后)→ `live::ui` 同位。卡片流状态取全局面态(同时至多一个流),**不受 ai_active_tab 门槛** —— 与预览 handler 同口径:流结束后 last_prompt 仍在,卡片显「已完成」。
+- **P3 开工注意**:①`live::ui` 现在 14 参,禅定切 Live 浏览态(D2「只滚不编辑」)要给 `LiveState` 加只滚语义;②mermaid/ai 卡在禅定下会随 `live::ui` 自动可用(无需额外接线),但 `AiState` 传参照抄 layout.rs 编辑器调用点;③preview.rs 的 ScrollProbe/scroll_target 与 `map_source_offset` 五层正向映射仍只在预览侧,P4 删面板前无碍。
 
 
 ## 阻塞
