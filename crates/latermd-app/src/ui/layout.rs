@@ -705,6 +705,9 @@ impl LaterMdApp {
                     ui,
                     editor,
                     preview,
+                    // Live 侧 AI 卡与 ai:// 拦截的流状态源(P2/D1):全局面态,
+                    // 与预览 handler 同口径(同时至多一个流)。
+                    &state.ai,
                     crate::ui::editor::CursorChannel {
                         cursor,
                         selection,

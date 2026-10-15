@@ -195,6 +195,7 @@ pub fn ui(
     panel: &mut egui::Ui,
     editor: &mut EditorBuffer,
     preview: &mut PreviewState,
+    ai: &crate::ai::AiState,
     channel: CursorChannel<'_>,
     live: &mut LiveState,
     mode: RenderMode,
@@ -226,6 +227,7 @@ pub fn ui(
             panel,
             editor,
             preview,
+            ai,
             cursor,
             selection,
             live,
@@ -1085,6 +1087,7 @@ mod tests {
                         ui,
                         editor,
                         preview,
+                        &crate::ai::AiState::default(),
                         CursorChannel {
                             cursor,
                             selection,

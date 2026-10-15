@@ -33,11 +33,14 @@ use std::{
 };
 
 use eframe::egui;
-use egui_markdown::{LinkHandler, LinkStyle, MarkdownLabel};
+use egui_markdown::MarkdownLabel;
 use egui_markdown_style::MarkdownStyle;
 use latermd_editor::EditorBuffer;
 
+use crate::ai::AiState;
 use crate::state::{Message, OutlineCursor, PreviewState};
+use crate::ui::ai_card::RichLinkHandler;
+use crate::ui::rich_widgets::TaskProbeDomain;
 
 type RichCacheEntry = (
     u64,
@@ -351,260 +354,6 @@ impl LiveState {
     }
 }
 
-/// Live 富渲染块的链接 handler(#51 M3 + #63):mermaid 围栏出图原样
-/// 转发给 [`crate::ui::mermaid::LiveMermaidHandler`](行为零变化,含块序
-/// 计数);任务 checkbox 的点击在 `task://` 前缀处**吞掉**(不交系统
-/// 浏览器、也不在此发切换消息)—— 列表项内 inline widget 的 vendored
-/// section/token 映射在 egui 0.36 下错位,这条 click 路径实测不可达
-/// (#63 live 测试断零消息);切换统一由 `ui` 帧末的探针命中判定发出,
-/// 与右栏预览同一判定层。链接的其余行为(ai:// 卡、emoji、wikilink)
-/// 维持 Live 接入 handler 前的 vendored 默认(#51 M3 否决线,不因
-/// checkbox 顺手改变);唯本地文档链接(`doclink`,相对路径/`file://`/
-/// 纯锚点)例外:点击拦下走应用内打开,不交系统浏览器 —— 这是有意的
-/// 行为新增,不是顺手改。
-struct LiveRichHandler<'a> {
-    mermaid: &'a crate::ui::mermaid::LiveMermaidHandler,
-    /// 本块在全文中的字节起点(checkbox 探针坐标域携带,帧末命中换算用)。
-    task_base: usize,
-    /// 正文文本色(#65 M2 高亮取色用;构造时取真实 visuals,与预览
-    /// handler 同一纪律 —— 不用 `Visuals::dark()/light()` 推)。
-    text_color: egui::Color32,
-    dark_mode: bool,
-    clicked: std::rc::Rc<std::cell::RefCell<Vec<Message>>>,
-    /// 本帧全部 emoji inline widget 占位区(P1,与预览 handler 同一收尾
-    /// 纪律):全块共享一份(一次分配,逐块 clone 句柄),帧末①悬停手型
-    /// 抑制 —— vendored 对悬停中的 inline widget 无条件置 PointingHand,
-    /// `link_style` 管不到光标,只能在帧末压回 Default;②写进探针供无头
-    /// 测试断言。
-    emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>>,
-}
-
-/// Live 帧 emoji 占位区探针的 data 键(P1,与预览 `emoji_probe_id` 同款,
-/// 按编辑器 id 分标签):生产只写不读,无头测试读它断言「widget 在该段
-/// 生效」。
-fn emoji_probe_id(editor_id: egui::Id) -> egui::Id {
-    egui::Id::new("latermd-live-emoji-rects").with(editor_id)
-}
-
-impl<'a> LiveRichHandler<'a> {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        mermaid: &'a crate::ui::mermaid::LiveMermaidHandler,
-        task_base: usize,
-        text_color: egui::Color32,
-        dark_mode: bool,
-        emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>>,
-    ) -> Self {
-        Self {
-            mermaid,
-            task_base,
-            text_color,
-            dark_mode,
-            clicked: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            emoji_rects,
-        }
-    }
-
-    fn drain_into(&self, outbox: &mut Vec<Message>) {
-        outbox.append(&mut self.clicked.borrow_mut());
-    }
-}
-
-impl LinkHandler for LiveRichHandler<'_> {
-    /// 右键菜单(context-menu-plan §3 M3,与右栏预览同一挂点/同一判定):
-    /// Live 富渲染块的普通链接按 [`crate::doclink::classify`] 分流 —— 本地
-    /// 文档路径与纯锚点弹「打开文档」走应用内跳转,其余弹「打开链接」交
-    /// 浏览器;协议链接不弹。
-    /// 图片菜单不挂 —— 富渲染块的图片走 MarkdownLabel 同一 images 臂,
-    /// vendored 的 image_response 同样会回调到这里;Live 是编辑视图,
-    /// 「复制图片地址」的用场与预览一致,一并挂上。
-    fn link_response(&self, _ui: &egui::Ui, _text: &str, href: &str, response: &egui::Response) {
-        if !crate::ui::preview::is_openable_href(href) {
-            return;
-        }
-        let clicked = std::rc::Rc::clone(&self.clicked);
-        let local = crate::doclink::classify(href) == crate::doclink::HrefKind::Local;
-        response.context_menu(|ui| {
-            if local {
-                if ui.button("打开文档").clicked() {
-                    clicked.borrow_mut().push(Message::DocLinkClicked {
-                        href: href.to_owned(),
-                    });
-                }
-            } else if ui.button("打开链接").clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(href.to_owned()));
-            }
-            if ui.button("复制链接地址").clicked() {
-                clicked
-                    .borrow_mut()
-                    .push(Message::CopyText(href.to_owned()));
-            }
-        });
-    }
-
-    fn image_response(&self, _ui: &egui::Ui, _alt: &str, url: &str, response: &egui::Response) {
-        let clicked = std::rc::Rc::clone(&self.clicked);
-        response.context_menu(|ui| {
-            if ui.button("在浏览器打开").clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(url.to_owned()));
-            }
-            if ui.button("复制图片地址").clicked() {
-                clicked.borrow_mut().push(Message::CopyText(url.to_owned()));
-            }
-        });
-    }
-
-    fn is_block_code_widget(&self, language: Option<&str>) -> bool {
-        self.mermaid.is_block_code_widget(language)
-    }
-
-    fn block_code_widget(
-        &self,
-        ui: &mut egui::Ui,
-        text: &str,
-        language: Option<&str>,
-    ) -> Option<egui::Response> {
-        self.mermaid.block_code_widget(ui, text, language)
-    }
-
-    /// 与预览 handler 同款意图声明:checkbox 不吃超链接样式(占位透明,
-    /// 视觉由自绘接管;同时兜住退化路径);`hl://`(#65 M2)同样不是
-    /// 可点链接,正文色 + 无下划线,下划线颜色的处理与预览一致。
-    fn link_style(&self, href: &str) -> Option<LinkStyle> {
-        if href.starts_with(latermd_md::HIGHLIGHT_SCHEME) {
-            return Some(LinkStyle {
-                color: Some(self.text_color),
-                underline: false,
-            });
-        }
-        if href.starts_with(latermd_md::EMOJI_SCHEME) {
-            return Some(LinkStyle {
-                color: Some(self.text_color),
-                underline: false,
-            });
-        }
-        if href.starts_with(latermd_md::WIKI_SCHEME) {
-            return Some(LinkStyle {
-                color: Some(crate::ui::rich_widgets::wiki_link_color(self.dark_mode)),
-                underline: true,
-            });
-        }
-        href.starts_with(latermd_md::TASK_SCHEME)
-            .then_some(LinkStyle {
-                color: None,
-                underline: false,
-            })
-    }
-
-    fn click(&self, _text: &str, href: &str, _ui: &mut egui::Ui) -> bool {
-        // `hl://`(#65 M2):高亮没有点击语义,吞掉不开浏览器,与预览
-        // handler 同一口径。
-        if href.starts_with(latermd_md::HIGHLIGHT_SCHEME) {
-            return true;
-        }
-        if href.starts_with(latermd_md::EMOJI_SCHEME) {
-            return true;
-        }
-        if let Some(target) = href.strip_prefix(latermd_md::WIKI_SCHEME) {
-            let target = target.trim();
-            if !target.is_empty() {
-                self.clicked.borrow_mut().push(Message::WikilinkClicked {
-                    target: target.to_owned(),
-                });
-                return true;
-            }
-        }
-        // 只吞不发:切换消息由帧末探针判定单点发出,这里若转发,将来
-        // vendored 错位修好时会双发(两次切换 = 一步空转 + 两份 undo)。
-        if crate::ui::rich_widgets::parse_task_href(href).is_some() {
-            return true;
-        }
-        // 本地文档链接(相对/绝对路径、`file://`、纯锚点):应用内打开,
-        // 不交系统浏览器 —— 相对路径交给浏览器只会失败,纯锚点(TOC 目录
-        // 链接)的语义就在本文档内。与右栏预览同一分流口径,解析与跳转在
-        // 归约侧(`state::open_doc_link`,那里才有文档路径与库根)。
-        if crate::doclink::classify(href) == crate::doclink::HrefKind::Local {
-            self.clicked.borrow_mut().push(Message::DocLinkClicked {
-                href: href.to_owned(),
-            });
-            return true;
-        }
-        false
-    }
-
-    /// 透明占位:与预览 handler 同一实现(链接文字本体 + 同款字体)。
-    /// `hl://`(#65 M2)走非 widget 分支:追加「正文色文字 + 推导底色」
-    /// 的排版段,与预览同一共享实现(一个真源)。
-    fn layout_link(
-        &self,
-        ui: &egui::Ui,
-        text: &str,
-        href: &str,
-        job: &mut egui::text::LayoutJob,
-        font: &egui::FontId,
-        color: egui::Color32,
-    ) -> bool {
-        if href.starts_with(latermd_md::HIGHLIGHT_SCHEME) {
-            crate::ui::rich_widgets::append_highlight_section(ui, text, job, font);
-            return true;
-        }
-        if href.starts_with(latermd_md::EMOJI_SCHEME) {
-            let format = egui::TextFormat {
-                font_id: font.clone(),
-                color: egui::Color32::TRANSPARENT,
-                ..egui::TextFormat::default()
-            };
-            job.append(text, 0.0, format);
-            return true;
-        }
-        if !href.starts_with(latermd_md::TASK_SCHEME) {
-            return false;
-        }
-        let format = egui::TextFormat {
-            font_id: font.clone(),
-            color,
-            ..egui::TextFormat::default()
-        };
-        job.append(text, 0.0, format);
-        true
-    }
-
-    fn inline_widget_size(&self, href: &str, font: &egui::FontId) -> Option<egui::Vec2> {
-        (href.starts_with(latermd_md::TASK_SCHEME) || href.starts_with(latermd_md::EMOJI_SCHEME))
-            .then(|| egui::vec2(font.size, font.size))
-    }
-
-    fn paint_inline_widget(&self, ui: &mut egui::Ui, _text: &str, href: &str, rect: egui::Rect) {
-        if href.starts_with(latermd_md::TASK_SCHEME) {
-            crate::ui::rich_widgets::paint_task_checkbox(
-                ui,
-                rect,
-                href,
-                crate::ui::rich_widgets::TaskProbeDomain::Live(self.task_base),
-            );
-        } else if let Some(glyph) = href.strip_prefix(latermd_md::EMOJI_SCHEME) {
-            let side = rect.width().min(rect.height());
-            if side > 0.0 {
-                // 占位区先记探针(与预览同款:含纹理缺失/视口外的),悬停
-                // 抑制的判定面是「指针落在 widget 占位区」,不看纹理出没出。
-                self.emoji_rects.borrow_mut().push(rect);
-                if ui.is_rect_visible(rect) {
-                    if let Some(texture) = crate::ui::emoji_panel::inline_texture(ui, glyph) {
-                        let paint_rect =
-                            egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
-                        ui.painter().image(
-                            texture.id(),
-                            paint_rect,
-                            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
-                            egui::Color32::WHITE,
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// 块的编辑代理:把 [`EditorBuffer`] 的**一块**暴露成 egui `TextBuffer`。
 ///
 /// 与源码模式的 `EditorText` 同理(孤儿规则需本地 newtype),但 `as_str` 借的是
@@ -723,6 +472,13 @@ fn block_gap(style: &MarkdownStyle, font_size: f32, prev: BlockKind, this: Block
     base + extra
 }
 
+/// Live 帧 emoji 占位区探针的 data 键(P1,与预览 `emoji_probe_id` 同款,
+/// 按编辑器 id 分标签):生产只写不读,无头测试读它断言「widget 在该段
+/// 生效」。
+fn emoji_probe_id(editor_id: egui::Id) -> egui::Id {
+    egui::Id::new("latermd-live-emoji-rects").with(editor_id)
+}
+
 /// 绘制 Live Preview:非活动块富渲染(点击即进入编辑),活动块源码编辑。
 ///
 /// `selection` 是格式工具条的选区镜像出参(与源码模式 `ui::editor` 同一
@@ -735,6 +491,7 @@ pub fn ui(
     panel: &mut egui::Ui,
     editor: &mut EditorBuffer,
     preview: &mut PreviewState,
+    ai: &AiState,
     cursor: &mut OutlineCursor,
     selection: &mut Option<(usize, usize)>,
     live: &mut LiveState,
@@ -820,11 +577,6 @@ pub fn ui(
     let mut sel_ai_anchor: Option<egui::Rect> = None;
     let mut sel_ai_response_id = egui::Id::NULL;
     let block_count = live.blocks.len();
-    // mermaid 块出图(#51 M3):富渲染块经只拦 mermaid 的 handler 接入
-    // block_code_widget 扩展点。专用 handler(而非复用 AiLinkHandler):
-    // Live 列此前不接任何 handler,不能借 mermaid 顺手改变 ai 卡/emoji/
-    // wikilink 的渲染行为(否决线);其余块照走 vendored 默认。
-    let mermaid_handler = crate::ui::mermaid::LiveMermaidHandler::new();
     // emoji 探针(P1,与预览同一收尾纪律):全块共享一份收集器,块循环内
     // 逐 handler 记占位区,ScrollArea 之后统一消费。
     let emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>> = Default::default();
@@ -1293,13 +1045,19 @@ pub fn ui(
                         // 字体与右栏预览同源(#23 F3):size = 用户字号偏好,
                         // 族 = 预览专用族(#43 M2 的行 metrics 对齐副本,无 CJK
                         // 回落 Proportional)。源码/Live 两种模式下排版偏好同观感。
-                        let rich_handler = LiveRichHandler::new(
-                            &mermaid_handler,
-                            range.start,
+                        // 两栏同一套富渲染链接 handler(P2/D1):wiki/hl/
+                        // emoji/task/mermaid + AI 卡与 ai:// 拦截(with_ai
+                        // 显式开启 —— #51 M3 岔路②的显式反向决定,
+                        // decisions-pending 在册)。task 坐标域带块首字节;
+                        // emoji 收集器全块共享。
+                        let dark_mode = matches!(ui.ctx().theme(), egui::Theme::Dark);
+                        let rich_handler = RichLinkHandler::new(
+                            TaskProbeDomain::Live(range.start),
+                            dark_mode,
                             ui.visuals().text_color(),
-                            matches!(ui.ctx().theme(), egui::Theme::Dark),
                             std::rc::Rc::clone(&emoji_rects),
-                        );
+                        )
+                        .with_ai(crate::ui::rich_widgets::ai_link_color(dark_mode), ai);
                         MarkdownLabel::new(
                             editor_id.with(("live-render", index)),
                             block_rendered.as_ref(),
@@ -1335,7 +1093,7 @@ pub fn ui(
                         // 文档链接都走消息、无 OpenUrl,`clicked_for_edit` 的
                         // OpenUrl 探测看不见它们,须显式排除 —— 点击归链接,
                         // 不连带切入编辑)。
-                        let link_intercepted = !rich_handler.clicked.borrow().is_empty();
+                        let link_intercepted = !rich_handler.intercepted_is_empty();
                         rich_handler.drain_into(outbox);
                         let bottom = ui.cursor().top();
                         let rect = egui::Rect::from_min_max(
@@ -1701,6 +1459,7 @@ fn galley_mark_rects(galley: &egui::Galley, char_range: Range<usize>) -> Vec<egu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_markdown::link::LinkHandler as _;
 
     fn state_with(text: &str) -> (EditorBuffer, LiveState, OutlineCursor) {
         let editor = EditorBuffer::new(text);
@@ -1978,6 +1737,7 @@ mod tests {
                 ui,
                 &mut editor,
                 &mut preview,
+                &AiState::default(),
                 &mut cursor,
                 &mut selection_mirror,
                 &mut live,
@@ -2142,6 +1902,7 @@ mod tests {
                     ui,
                     editor,
                     preview,
+                    &AiState::default(),
                     cursor,
                     &mut selection_mirror,
                     live,
@@ -2550,8 +2311,8 @@ mod tests {
     }
 
     /// #51 M3:Live 富渲染块里的 ```mermaid 围栏出图(生产入口 `ui` 经
-    /// `LiveMermaidHandler` 接入);解析失败的围栏回落源码(探针不出节点),
-    /// 其余块(代码块复制按钮等)不受牵连。
+    /// `RichLinkHandler` 的 mermaid 臂接入);解析失败的围栏回落源码(探针
+    /// 不出节点),其余块(代码块复制按钮等)不受牵连。
     #[test]
     fn live_rich_block_renders_mermaid_and_falls_back() {
         let ctx = egui::Context::default();
@@ -2755,6 +2516,7 @@ mod tests {
                     ui,
                     editor,
                     preview,
+                    &AiState::default(),
                     cursor,
                     &mut selection_mirror,
                     live,
@@ -3430,6 +3192,7 @@ mod tests {
                     ui,
                     editor,
                     preview,
+                    &AiState::default(),
                     cursor,
                     &mut selection_mirror,
                     live,
@@ -4687,6 +4450,7 @@ mod tests {
                     ui,
                     editor,
                     preview,
+                    &AiState::default(),
                     cursor,
                     &mut selection_mirror,
                     live,
@@ -4925,6 +4689,7 @@ mod tests {
                     ui,
                     &mut editor,
                     &mut preview,
+                    &AiState::default(),
                     &mut cursor,
                     &mut selection_mirror,
                     &mut live,
@@ -5043,9 +4808,9 @@ mod tests {
     #[test]
     fn live_highlight_handler_contained() {
         let ctx = egui::Context::default();
-        let mermaid = crate::ui::mermaid::LiveMermaidHandler::new();
         let body = egui::Color32::from_rgb(0x11, 0x22, 0x33);
-        let handler = LiveRichHandler::new(&mermaid, 0, body, false, Default::default());
+        let handler =
+            RichLinkHandler::new(TaskProbeDomain::Live(0), false, body, Default::default());
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let font = egui::FontId::proportional(15.0);
             let mut job = egui::text::LayoutJob::default();
@@ -5111,6 +4876,7 @@ mod tests {
                 ui,
                 &mut editor,
                 &mut preview,
+                &AiState::default(),
                 &mut cursor,
                 &mut selection_mirror,
                 &mut live,
@@ -5242,6 +5008,7 @@ mod tests {
                 ui,
                 &mut editor,
                 &mut preview,
+                &AiState::default(),
                 &mut cursor,
                 &mut sink,
                 &mut live,
@@ -5437,6 +5204,7 @@ mod tests {
                     panel,
                     &mut editor,
                     &mut preview,
+                    &AiState::default(),
                     &mut cursor,
                     &mut selection,
                     &mut live,
@@ -5509,6 +5277,7 @@ mod tests {
                     panel,
                     &mut editor,
                     &mut preview,
+                    &AiState::default(),
                     &mut cursor,
                     &mut selection,
                     &mut live,
@@ -5603,6 +5372,7 @@ mod tests {
                         panel,
                         &mut editor,
                         &mut preview,
+                        &AiState::default(),
                         &mut cursor,
                         &mut selection,
                         &mut live,
@@ -5672,5 +5442,220 @@ mod tests {
             egui::CursorIcon::PointingHand,
             "普通链接的手型不受牵连"
         );
+    }
+
+    // —— AI 指令卡与 ai:// 链接(live-unify-plan P2/D1)——
+
+    /// AI 指令卡在 Live 富渲染块出卡(P2 验收,照预览
+    /// ai_block_renders_card_without_panic 改写跑 live::ui 路径):```ai
+    /// 围栏经 with_ai 的 handler 认领 block widget,画出卡片标题/指令
+    /// 原文/执行按钮/状态行。
+    #[test]
+    fn live_ai_block_renders_card() {
+        let ctx = egui::Context::default();
+        let render = |doc: &str| -> Vec<String> {
+            let mut editor = EditorBuffer::new(doc);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState {
+                browse_only: true,
+                browse_enabled: true,
+                ..LiveState::default()
+            };
+            let mut selection = None;
+            let mut outbox = Vec::new();
+            let output = ctx.run_ui(egui::RawInput::default(), |panel| {
+                super::ui(
+                    panel,
+                    &mut editor,
+                    &mut preview,
+                    &AiState::default(),
+                    &mut cursor,
+                    &mut selection,
+                    &mut live,
+                    egui::Id::new("live-ai-card"),
+                    false,
+                    false,
+                    None,
+                    false,
+                    &crate::keymap::Keymap::builtin(),
+                    &mut outbox,
+                );
+            });
+            let mut texts = Vec::new();
+            for clipped in &output.shapes {
+                if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                    texts.push(t.galley.text().to_owned());
+                }
+            }
+            output.drop_without_applying_deltas();
+            texts
+        };
+
+        let all = render("# 文档\n\n```ai\n总结本文要点\n```\n");
+        let joined = all.join("\n");
+        for piece in ["AI 指令", "总结本文要点", "执行", "未执行"] {
+            assert!(
+                all.contains(&piece.to_owned()),
+                "卡片应渲染 {piece}:{joined:?}"
+            );
+        }
+        assert!(
+            !all.iter().any(|text| text.contains("```")),
+            "围栏标记不得当正文画出(卡片认领了围栏):{joined:?}"
+        );
+    }
+
+    /// `ai://` 链接点击在 Live 下可达(P2 验收):真实事件流(悬停→按下→
+    /// 抬起)落在链接字形上,vendored 命中把 click 路由进 handler,消息进
+    /// outbox;浏览态下单击不连带切入编辑(点击归链接)。
+    #[test]
+    fn live_ai_link_click_sends_message() {
+        let ctx = egui::Context::default();
+        let doc = "开头 [续写](<ai://write?prompt=%E7%BB%AD%E5%86%99>) 结尾。\n";
+        let editor_id = egui::Id::new("live-ai-link");
+        // 一帧渲染 + 消息累积。live::ui 每帧各自建 outbox,点击帧的
+        // drain 把消息带出。
+        let frame = |events: Vec<egui::Event>| -> (Vec<String>, Vec<Message>, bool) {
+            let mut editor = EditorBuffer::new(doc);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState {
+                browse_only: true,
+                browse_enabled: true,
+                ..LiveState::default()
+            };
+            let mut selection = None;
+            let mut outbox = Vec::new();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |panel| {
+                    super::ui(
+                        panel,
+                        &mut editor,
+                        &mut preview,
+                        &AiState::default(),
+                        &mut cursor,
+                        &mut selection,
+                        &mut live,
+                        editor_id,
+                        false,
+                        false,
+                        None,
+                        false,
+                        &crate::keymap::Keymap::builtin(),
+                        &mut outbox,
+                    );
+                },
+            );
+            let mut texts = Vec::new();
+            for clipped in &output.shapes {
+                if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                    texts.push(t.galley.text().to_owned());
+                }
+            }
+            let browse_kept = live.browse_only && live.active.is_none();
+            output.drop_without_applying_deltas();
+            (texts, outbox, browse_kept)
+        };
+        // 链接字形中心:渲染文本里「续写」的行带(galley 文本即链接文字)。
+        let (texts, _, _) = frame(Vec::new());
+        let galley = texts
+            .iter()
+            .find(|text| text.contains("续写"))
+            .expect("链接文字已渲染");
+        assert!(
+            galley.contains("开头") && galley.contains("结尾"),
+            "{galley:?}"
+        );
+
+        // 找「续写」的屏幕矩形:重新渲一帧按字形逐个量(galley pos +
+        // rect 布局),取「续」字形的包围盒中心。
+        let (_, _, _) = frame(Vec::new());
+        let mut link_center = None;
+        {
+            let mut editor = EditorBuffer::new(doc);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState {
+                browse_only: true,
+                browse_enabled: true,
+                ..LiveState::default()
+            };
+            let mut selection = None;
+            let mut outbox = Vec::new();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |panel| {
+                    super::ui(
+                        panel,
+                        &mut editor,
+                        &mut preview,
+                        &AiState::default(),
+                        &mut cursor,
+                        &mut selection,
+                        &mut live,
+                        editor_id,
+                        false,
+                        false,
+                        None,
+                        false,
+                        &crate::keymap::Keymap::builtin(),
+                        &mut outbox,
+                    );
+                },
+            );
+            for clipped in &output.shapes {
+                if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                    if t.galley.text().contains("续写") {
+                        let byte = t.galley.text().find("续写").unwrap();
+                        let chars = t.galley.text()[..byte].chars().count();
+                        let band = t.galley.pos_from_cursor(egui::text::CCursor::new(chars));
+                        link_center = Some(egui::pos2(
+                            t.pos.x + band.center().x + 4.0,
+                            t.pos.y + band.center().y,
+                        ));
+                    }
+                }
+            }
+            output.drop_without_applying_deltas();
+        }
+        let link_center = link_center.expect("链接字形应可定位");
+
+        // 事件帧序:悬停一帧 → 按下一帧 → 抬起一帧(13a 纪律)。
+        let primary = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut messages = Vec::new();
+        let mut browse_kept = true;
+        for events in [
+            vec![egui::Event::PointerMoved(link_center)],
+            vec![primary(link_center, true)],
+            vec![primary(link_center, false)],
+        ] {
+            let (_, outbox, kept) = frame(events);
+            messages.extend(outbox);
+            browse_kept &= kept;
+        }
+        assert_eq!(
+            messages,
+            vec![Message::AiLinkClicked {
+                prompt: Ok("续写".into())
+            }],
+            "ai:// 点击应经 Live handler 产出流式续写消息"
+        );
+        assert!(browse_kept, "点击归链接,浏览态不连带切入编辑");
     }
 }
