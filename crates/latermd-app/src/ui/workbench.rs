@@ -290,16 +290,23 @@ pub(crate) fn centered_dialog<'a>(ui: &egui::Ui, title: &'a str) -> egui::Window
 /// 一条细分隔线把标题区与正文分开。返回 × 是否被点 —— 与 footer 的
 /// 「取消」同语义,由调用方并入取消通路(浮窗本身不发消息)。
 ///
+/// **标题色显式取正文主文字色,不走 `RichText::strong()` 的默认前景**
+/// (2026-10-15 坤哥「重命名是蓝的、删除是深色,蓝色像链接」):强调色在
+/// 本项目里已被链接 / 活动页签 / 选中文字占用,标题再吃它就成了第三种
+/// 「可点」暗示。层级靠**字号 + 字重 + 上下留白**表达,不靠颜色。
+///
 /// 行内用 `right_to_left(Align::Min)` 把 × 推到右缘:cross 取 Min 而非
 /// Center,子 Ui 贴内容高、不申领 Window 剩余高度(destructive_confirm
 /// 2026-10-10 的踩坑记录:Center 在 Window 里会把窗撑高、按钮跨帧漂移)。
 pub(crate) fn dialog_header(ui: &mut egui::Ui, title: &str) -> bool {
+    let colors = crate::theme::shell(ui);
     let mut close = false;
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(title)
                 .size(crate::ui::tokens::text::TITLE)
-                .strong(),
+                .strong()
+                .color(colors.text),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             close = small_icon(ui, crate::ui::icons::Icon::Close, "关闭").clicked();
@@ -317,6 +324,192 @@ pub(crate) fn dialog_footer_divider(ui: &mut egui::Ui) {
     ui.add_space(crate::ui::tokens::SPACE_SM);
     ui.separator();
     ui.add_space(crate::ui::tokens::SPACE_SM);
+}
+
+/// 把长文本从**中间**截断成 `head … tail`(超预算时),超长路径的
+/// 标准处理(shell / 文件管理器同款)。
+///
+/// 为什么不用 [`crate::ui::tabs::elide_text`]:那个是尾部截断
+/// (`docs/…/verylongname.md`),而路径的辨识信息**两端都有** —— 开头是
+/// 挂载点/项目根,结尾是文件名。截尾会把「这是哪个文件」这一半信息
+/// 切掉,用户得靠猜。截中间保住两端,代价只是中间层级不可见(要用
+/// tooltip 看全,见 [`path_chip`])。
+///
+/// 二分的是**总显示字符数**:候选串 = 前 k/2 + `…` + 后 (k - k/2 - 1)。
+/// 等宽/比例字体的宽度都随字符数单调递增,故二分有效。
+fn middle_elide(ui: &mut egui::Ui, text: &str, font: &egui::FontId, budget: f32) -> String {
+    if measure(ui, text, font) <= budget {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() < 4 {
+        return "…".to_owned();
+    }
+    let candidate = |k: usize| {
+        // k 是省略号之外要显示的字符数;头占 ceil(k/2),尾占剩下的
+        let head = k.div_ceil(2);
+        let tail = k - head;
+        let mut shown: String = chars[..head].iter().collect();
+        shown.push('…');
+        shown.extend(chars[chars.len() - tail..].iter());
+        shown
+    };
+    let (mut lo, mut hi) = (0usize, chars.len().saturating_sub(1));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if measure(ui, &candidate(mid), font) <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    candidate(lo)
+}
+
+/// 路径 chip 的**最大**宽度:超宽则中间截断。
+///
+/// 为什么必须显式写死而不能问 `ui.available_width()`:弹窗是内容定宽的,
+/// `available_width` 在 Window 里**近无界**(设置页 card 早就踩过这个坑,
+/// 见 `destructive_confirm_dialog` 的同名注释)—— 拿它当预算等于没有
+/// 预算,长路径会把弹窗一路撑宽,「居中 + 定宽」全被破坏。320 = 默认弹窗
+/// 宽 360 减去两侧内距 20。
+const PATH_CHIP_MAX_W: f32 = 320.0;
+
+/// 弹窗里的路径展示块:等宽字体 + 浅底 + 小圆角,宽度封顶
+/// [`PATH_CHIP_MAX_W`]、超宽时**中间截断**,完整路径挂 tooltip
+/// (2026-10-15 坤哥「长路径阅读吃力 + 防止换行乱」)。
+///
+/// 用等宽字体而不只是加底色:路径里的 `/`、`.`、`_` 在比例字体下宽度
+/// 不等,一列路径扫过去对不齐;等宽 + 浅底 = 一眼可扫(与本项目代码块
+/// 同款语言,底色直接取 `shell.code_bg` —— 导出 HTML 的代码块底也是它,
+/// 同一语义同一色)。
+///
+/// 短路径按**自然宽度**显示(不拉成一条长条),长路径才截断到上限。
+///
+/// 返回 [`egui::Response`],`rect` 是整个 chip 的矩形(含内距),供测试
+/// 定位与几何断言。
+pub(crate) fn path_chip(ui: &mut egui::Ui, path: &std::path::Path) -> egui::Response {
+    let colors = crate::theme::shell(ui);
+    let full = path.display().to_string();
+    let font = egui::FontId::monospace(crate::ui::tokens::text::CAPTION);
+    let pad = crate::ui::tokens::inset::SM;
+    // 内容区宽 = chip 总宽 − 两侧内距。短路径取自然宽,长路径封顶。
+    let natural = measure(ui, &full, &font) + 2.0 * pad;
+    let content_w = natural.min(PATH_CHIP_MAX_W - 2.0 * pad);
+    let shown = middle_elide(ui, &full, &font, content_w);
+    egui::Frame::NONE
+        .fill(colors.code_bg)
+        .stroke(egui::Stroke::new(
+            1.0 / ui.ctx().pixels_per_point(),
+            colors.border,
+        ))
+        .corner_radius(egui::CornerRadius::same(crate::ui::tokens::RADIUS_SM as u8))
+        .inner_margin(egui::Margin::symmetric(pad as i8, 3))
+        .show(ui, |ui| {
+            ui.set_width(content_w);
+            ui.label(
+                egui::RichText::new(shown)
+                    .monospace()
+                    .size(crate::ui::tokens::text::CAPTION)
+                    .color(colors.secondary),
+            )
+            .on_hover_text(full)
+        })
+        // `InnerResponse::response` 是**整个 chip** 的矩形(含内距),
+        // `.inner` 只是闭包里那行文字 —— 悬浮提示挂在文字上即可(点/
+        // 悬停判定都够),但返回值给外层按 chip 矩形定位更有用。
+        .response
+}
+
+/// 量一段文本在给定字体下的渲染宽度。
+fn measure(ui: &mut egui::Ui, text: &str, font: &egui::FontId) -> f32 {
+    ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+            .rect
+            .width()
+    })
+}
+
+/// 弹窗里的单行输入框:比普通 `text_edit_singleline` 多两层东西 ——
+/// ① 控件样式覆写:**常态描边可见、focus 时描边转强调色**
+/// (2026-10-15 坤哥「输入框背景太浅,边界感不强」);② 占位提示
+/// (`hint`)与 tooltip 分开传:前者是输入框为空时的灰字,后者是鼠标
+/// 悬停说明,语义不同,混成一个参数会出现「输入框有值却在提示怎么用」。
+///
+/// 实现走 egui 的 `widgets.*.bg_stroke`:egui 0.36 的 `TextEdit` 在
+/// **未聚焦**时用 `interact(…).bg_stroke` 画框、**聚焦**时改用
+/// `visuals.selection.stroke`(`builder.rs` 里 `has_focus()` 的两分支),
+/// 所以两处都得改,只改一处等于只做了一半。
+///
+/// egui 0.36 没有 `push_style`(也没有 RAII 的 StyleGuard),故手工
+/// save/restore:`set_style` 换进局部样式、绘完立刻换回原值。作用域只包
+/// 这一个控件 —— 不还原会顺带改掉同窗内后续所有控件的观感。
+pub(crate) fn dialog_text_edit(
+    ui: &mut egui::Ui,
+    text: &mut dyn egui::widgets::text_edit::TextBuffer,
+    hint: &str,
+    tooltip: &str,
+) -> egui::Response {
+    let colors = crate::theme::shell(ui);
+    let px = ui.ctx().pixels_per_point().recip();
+    // `ui.style()` 给的是 `&Arc<Style>`:解引用两次再 `Style::clone` 才拿到
+    // 本体 —— `(*…).clone()` 会被解析成 `Arc::clone`(方法查找先命中 Arc 自身)。
+    let saved = egui::Style::clone(&**ui.style());
+    let mut style = saved.clone();
+    for widget in [
+        &mut style.visuals.widgets.inactive,
+        &mut style.visuals.widgets.hovered,
+    ] {
+        widget.bg_stroke = egui::Stroke::new(1.0 * px, colors.border);
+    }
+    style.visuals.selection.stroke = egui::Stroke::new(1.0 * px, colors.accent);
+    ui.set_style(style);
+    let response = ui.add(
+        egui::TextEdit::singleline(text)
+            .id(ui.make_persistent_id("dialog-text-edit"))
+            .hint_text(hint)
+            .desired_width(f32::INFINITY),
+    );
+    ui.set_style(saved);
+    response.on_hover_text(tooltip)
+}
+
+/// 让输入框**聚焦并选中主体**(不含扩展名)。
+///
+/// 打开重命名弹窗就能直接打字是「不用先点一下输入框」的关键;选中主体
+/// (而非全选)让最常见的「只改词不改后缀」少一次退格。
+///
+/// `pending` 是调用方状态里的「本弹窗还没做过初始选区」标志:UI 每帧
+/// 都可能调本函数,但只在首帧(标志为真)聚焦 + 设选区,随后由**调用方**
+/// 把标志打掉。判据不能写成「有没有焦点」—— 焦点是我们自己请求的,
+/// 下一帧就在,那样每帧都会重设选区,把用户已输入的内容反复清空。
+///
+/// 文本由调用方传入而不从 `TextEditState` 取:egui 0.36 的
+/// `TextEditState` 只有 `cursor` 与 undoer,不含文本快照。
+pub(crate) fn focus_and_select_stem(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    id: egui::Id,
+    text: &str,
+    pending: &mut bool,
+) {
+    if !*pending {
+        return;
+    }
+    response.request_focus();
+    *pending = false;
+    let stem_chars = crate::filetree::stem_char_len(text);
+    let Some(mut state) = egui::widgets::text_edit::TextEditState::load(ui.ctx(), id) else {
+        return;
+    };
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(stem_chars),
+        )));
+    state.store(ui.ctx(), id);
 }
 
 fn action(ui: &mut egui::Ui, rect: Rect, icon: Icon, tip: &str, selected: bool) -> bool {
@@ -908,6 +1101,363 @@ mod tests {
             "这些弹窗没用 centered_dialog(会飘到角落/自动层叠位):{}",
             offenders.join(", ")
         );
+    }
+
+    /// 标题**不吃强调色**(2026-10-15 坤哥「重命名是蓝的,蓝色像链接」):
+    /// 强调色在本项目已被链接/活动页签/选中文字占用,标题再吃就成了第三
+    /// 种「可点」暗示。判据是标题色与 `shell.accent` **逐通道不相等** ——
+    /// 用「是不是那个具体蓝值」当判据会在换肤后失效,这里比的是「有没有
+    /// 误用强调色」这件事本身。
+    #[test]
+    fn dialog_title_is_not_accent_colored() {
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let mut seen = None;
+        for _ in 0..2 {
+            let mut accent = egui::Color32::WHITE;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    ..Default::default()
+                },
+                |ui| {
+                    accent = crate::theme::shell(ui).accent;
+                    centered_dialog(ui, "标题色探针")
+                        // 必须关 title_bar:开着它,窗口标题栏里也会有一份
+                        // 同文本的「标题色探针」,`find_label_color` 取**第一个**
+                        // 匹配就落到标题栏上,断言恒绿(2026-10-15 红绿验证
+                        // 实测:把 dialog_header 改成 accent 色,测试仍绿)。
+                        // 生产弹窗同样一律 `.title_bar(false)`。
+                        .title_bar(false)
+                        .resizable(false)
+                        .show(ui.ctx(), |ui| {
+                            dialog_header(ui, "标题色探针");
+                        });
+                },
+            );
+            let color = find_label_color(&output.shapes, "标题色探针");
+            seen = color.map(|c| (c, accent));
+            output.drop_without_applying_deltas();
+        }
+        let (color, accent) = seen.expect("标题标签已绘制");
+        assert_ne!(
+            color.to_array(),
+            accent.to_array(),
+            "标题误用强调色(读起来像链接):title={color:?} accent={accent:?}"
+        );
+    }
+
+    /// 前置守卫:`find_label_color` 的前提是「该文本在本帧**唯一**」。
+    ///
+    /// 重复出现时它会取第一个匹配 —— 拿到别人的颜色,断言恒绿
+    /// (2026-10-15 实测)。这里把「唯一」钉成独立判据,而不是指望
+    /// [`dialog_title_is_not_accent_colored`] 每次都能碰巧取对。
+    #[test]
+    fn title_color_probe_label_is_unique_per_frame() {
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let mut count = 0usize;
+        for _ in 0..2 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    ..Default::default()
+                },
+                |ui| {
+                    centered_dialog(ui, "标题色探针")
+                        .title_bar(false)
+                        .resizable(false)
+                        .show(ui.ctx(), |ui| {
+                            dialog_header(ui, "标题色探针");
+                        });
+                },
+            );
+            count = output
+                .shapes
+                .iter()
+                .filter(|clipped| {
+                    matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.job.text == "标题色探针")
+                })
+                .count();
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            count, 1,
+            "探针文本在本帧应只出现 1 次,实得 {count} —— 重复会让 \
+             `find_label_color` 取到第一个匹配(可能是别人的颜色),断言恒绿"
+        );
+    }
+
+    /// 在本帧 shape 列表里找**文本**为 `needle` 的那个颜色
+    /// ([`dialog_title_is_not_accent_colored`] 用)。
+    ///
+    /// 按文本内容找而不是「取第一个 Text」:同一帧里还有「关闭」按钮等
+    /// 一堆文本,取第一个拿到的是别人的颜色,断言恒绿。
+    fn find_label_color(
+        shapes: &[egui::epaint::ClippedShape],
+        needle: &str,
+    ) -> Option<egui::Color32> {
+        shapes.iter().find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.job.text == needle => {
+                Some(text.override_text_color.unwrap_or_else(|| {
+                    // egui 0.36 的 `LayoutJob` 用 `sections`(每段自带
+                    // font/color),没有旧版的 `visuals` 数组。取**第一
+                    // 段**即可 —— 标题是单段文本。
+                    text.galley
+                        .job
+                        .sections
+                        .first()
+                        .map(|section| section.format.color)
+                        .unwrap_or(egui::Color32::WHITE)
+                }))
+            }
+            _ => None,
+        })
+    }
+
+    /// `middle_elide` 截中间、留两端(2026-10-15 坤哥:路径的辨识信息在
+    /// 头尾,截尾会把文件名切掉)。
+    ///
+    /// 判据是「结果 = 原文前缀 + … + 原文后缀」这条**结构不变式**,而不是
+    /// 「尾部等于某个具体文件名」:固定文件名要求预算恰好装得下 12 个等宽
+    /// 字符,预算一动(字号/密度档/上限常量)测试就红,而实现其实没问题。
+    /// 结构判据在任意预算下都成立,且真的能抓住「截尾」或「只留头」这两
+    /// 种改坏。
+    #[test]
+    fn middle_elide_keeps_both_ends() {
+        let ctx = egui::Context::default();
+        let long =
+            "/home/data/www/LaterMD-very-long-project-name/docs/adr/deep/nested/CHANGELOG.md";
+        // 多档预算:每一档都要满足「前缀 + … + 后缀」结构。
+        for budget in [90.0_f32, 160.0, 240.0, 320.0] {
+            let mut shown = String::new();
+            let mut full_ok = false;
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                let font = egui::FontId::monospace(crate::ui::tokens::text::CAPTION);
+                shown = middle_elide(ui, long, &font, budget);
+                full_ok = middle_elide(ui, long, &font, 10_000.0) == long;
+            })
+            .drop_without_applying_deltas();
+            assert!(full_ok, "宽预算应原样返回(预算 {budget})");
+            assert!(
+                shown.len() < long.len(),
+                "预算 {budget} 下应被截短:{shown:?}"
+            );
+            let (head, tail) = shown
+                .split_once('…')
+                .unwrap_or_else(|| panic!("预算 {budget} 下缺省略号:{shown:?}"));
+            assert!(!head.is_empty(), "头部应保留:{shown:?}");
+            assert!(!tail.is_empty(), "尾部应保留:{shown:?}");
+            assert!(
+                long.starts_with(head),
+                "头部应是原文前缀:{head:?} (预算 {budget})"
+            );
+            assert!(
+                long.ends_with(tail),
+                "尾部应是原文后缀(不能是截尾):{tail:?} (预算 {budget})"
+            );
+            // 尾段至少留够一个扩展名 —— 否则「保留尾部」形同虚设
+            // (尾部只剩 1 个字符也算「后缀」,但对读路径毫无用处)。
+            assert!(
+                tail.len() >= 4,
+                "尾部至少留 4 字符(够看出扩展名):{tail:?} (预算 {budget})"
+            );
+        }
+    }
+
+    /// `stem_char_len` 取主体不含扩展名:这是「选中主体、保留后缀」的
+    /// 选区判据(`focus_and_select_stem` 的输入)。
+    #[test]
+    fn stem_len_excludes_extension_only() {
+        for (name, want) in [
+            ("CHANGELOG.md", 9usize),
+            ("笔记", 2),
+            // 多点:主体是最后一段点号之前的全部,不是「最后一个点之前一段」
+            ("a.b.c", 3),
+            // 无扩展名 → 全选
+            ("readme", 6),
+            // 隐藏文件没有主体,全选(选空反而让用户没法改)
+            (".gitignore", 10),
+            // 尾点:主体不含它(尾点后的扩展名为空,选区取主体更合理)
+            ("weird.", 5),
+        ] {
+            assert_eq!(
+                crate::filetree::stem_char_len(name),
+                want,
+                "{name:?} 的主体长度"
+            );
+        }
+    }
+
+    /// 路径 chip 用**等宽字体**且宽度不超预算(2026-10-15 坤哥「长路径
+    /// 阅读吃力 + 防止换行乱」)。宽度判据独立于实现:量 chip 实际矩形,
+    /// 不复用 `middle_elide` 的预算公式 —— 那样改一边另一边跟着动,恒绿。
+    #[test]
+    fn path_chip_fits_and_is_monospace() {
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let mut chip_rect = None;
+        let mut mono_texts = 0usize;
+        for _ in 0..2 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    ..Default::default()
+                },
+                |ui| {
+                    centered_dialog(ui, "路径 chip 探针")
+                        .default_width(360.0)
+                        .resizable(false)
+                        .show(ui.ctx(), |ui| {
+                            let long = std::path::Path::new(
+                                "/home/data/www/LaterMD-very-long/docs/adr/deep/CHANGELOG.md",
+                            );
+                            chip_rect = Some(path_chip(ui, long).rect);
+                        });
+                },
+            );
+            mono_texts = count_mono_texts(&output.shapes);
+            output.drop_without_applying_deltas();
+        }
+        assert!(mono_texts > 0, "chip 内应有等宽字体文本");
+        let rect = chip_rect.expect("chip 已绘制");
+        // 判据挂在**独立常量** [`PATH_CHIP_MAX_W`] 上,不复用 chip 内部
+        // 的预算公式:复用等于改实现时一起变,恒绿。
+        // 容差 2.0 = chip 两侧各 1px 描边(几何量的是含描边的矩形,而
+        // 宽度预算只扣了内距)。fg 1x 下描边正好 1px。
+        assert!(
+            rect.width() <= PATH_CHIP_MAX_W + 2.0,
+            "chip 宽度超上限(长路径会把弹窗撑宽):{} > {PATH_CHIP_MAX_W}",
+            rect.width()
+        );
+        assert!(rect.width() > 60.0, "chip 不该被截成一条:{}", rect.width());
+    }
+
+    /// 文本 shape 里用等宽字体族(Proportional → Monospace)绘制的条数。
+    fn count_mono_texts(shapes: &[egui::epaint::ClippedShape]) -> usize {
+        shapes
+            .iter()
+            .filter(|clipped| {
+                matches!(
+                    &clipped.shape,
+                    egui::Shape::Text(text)
+                        if text.galley.job.sections.iter().any(|section| {
+                            section.format.font_id.family == egui::FontFamily::Monospace
+                        })
+                )
+            })
+            .count()
+    }
+
+    /// 重命名弹窗「开框即聚焦 + 选中主体」的行为守门
+    /// (2026-10-15 坤哥「极度推荐开框自动聚焦,并选中文件名主体部分」)。
+    ///
+    /// 走的是**真实生产路径**:`dialog_text_edit` 画输入框 +
+    /// `focus_and_select_stem` 设初始选区,不裸调 helper。断言三件事:
+    /// ① 首帧后输入框真的拿到焦点;② 选区恰好是主体 `[0, 9)`
+    /// (「CHANGELOG」而非「CHANGELOG.md」,也不是全选到 12);③
+    /// `pending` 打掉之后**不再**重设选区 —— 否则用户已输入的内容会被
+    /// 每帧清空(这是本函数最容易犯的错:判据写成「有没有焦点」就会
+    /// 每帧重设,因为焦点是我们自己请求的、下一帧就在)。
+    #[test]
+    fn rename_dialog_opens_focused_with_stem_selected() {
+        const NAME: &str = "CHANGELOG.md";
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let mut pending = true;
+        let mut text = NAME.to_owned();
+        let mut had_focus = false;
+        let mut selected: Option<(usize, usize)> = None;
+        // 首帧:聚焦 + 设选区。第 2 帧:pending 已为假,选区应原样保留
+        // (模拟「用户还没动手」);第 3 帧:用户把光标挪到末尾 —— 选区必须
+        // 跟着变,若被重置回主体就说明每帧都在抢控制权。
+        for frame in 0..3 {
+            let mut range_probe = None;
+            let mut focus_probe = false;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    events: if frame == 2 {
+                        find_key(egui::Key::End, Modifiers::NONE)
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                },
+                |ui| {
+                    centered_dialog(ui, "重命名")
+                        .default_width(360.0)
+                        .resizable(false)
+                        .show(ui.ctx(), |ui| {
+                            let edit_id = ui.make_persistent_id("dialog-text-edit");
+                            let response = dialog_text_edit(ui, &mut text, "新名称", "");
+                            focus_and_select_stem(ui, &response, edit_id, NAME, &mut pending);
+                            focus_probe = response.has_focus();
+                            if let Some(state) =
+                                egui::widgets::text_edit::TextEditState::load(ui.ctx(), edit_id)
+                            {
+                                if let Some(r) = state.cursor.char_range() {
+                                    // `CCursor::index` 是 `CharIndex` newtype(无 `as` 转换),
+                                    // 转 usize 便于和 `stem_char_len` 的口径对齐
+                                    range_probe = Some((
+                                        usize::from(r.primary.index),
+                                        usize::from(r.secondary.index),
+                                    ));
+                                }
+                            }
+                        });
+                },
+            )
+            .drop_without_applying_deltas();
+            match frame {
+                0 => {
+                    had_focus = focus_probe;
+                    selected = range_probe;
+                }
+                1 => assert_eq!(
+                    range_probe, selected,
+                    "pending 打掉后不该再改选区(否则每帧重设,会清空用户输入)"
+                ),
+                2 => assert_ne!(
+                    range_probe, selected,
+                    "用户按 End 挪光标后,选区不该被 focus_and_select_stem 抢回去"
+                ),
+                _ => {}
+            }
+        }
+        assert!(had_focus, "重命名弹窗打开后输入框应自动获得焦点");
+        let (primary, secondary) = selected.expect("首帧应设好选区");
+        // CCursorRange::two(0, 9) 归一化后 primary=9(尾)、secondary=0。
+        // 判据是**集合** {0, 9}:不关心哪个是头尾,只关心覆盖范围 —— 否则
+        // 断言会绑死在 CCursorRange 的方向约定上。
+        let mut ends = [primary, secondary];
+        ends.sort_unstable();
+        assert_eq!(
+            ends,
+            [0, 9],
+            "选区应恰好是主体「CHANGELOG」(不含 .md),实得 {primary}..{secondary}"
+        );
+        assert!(!pending, "pending 标志应被首帧打掉");
+    }
+
+    /// `find_key` —— 造一组「按下 + 抬起」事件。
+    fn find_key(key: egui::Key, modifiers: Modifiers) -> Vec<Event> {
+        vec![
+            Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            },
+            Event::Key {
+                key,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers,
+            },
+        ]
     }
 
     fn click(pos: Pos2) -> Vec<Event> {

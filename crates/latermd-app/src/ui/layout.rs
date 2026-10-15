@@ -156,6 +156,37 @@ impl LaterMdApp {
         {
             state.apply(Message::AboutClosed);
         }
+        // 输入 / 确认弹窗在场的 Esc 归**取消**(2026-10-15 坤哥「支持 Esc
+        // 关闭弹窗」):此前这些浮窗只有 × 和「取消」两条关闭路径,Esc
+        // 反而落到禅定/蒙层那些更远的语义上 —— 键盘用户关不掉自己刚开
+        // 的框。
+        //
+        // 五个弹窗互斥(各自只有一个入口,且入口都在菜单里),故判断「有没有
+        // 一个开着」再取第一个即可;顺序与 `draw_overlay_dialogs` 的绘制
+        // 顺序一致。删除确认也在列:Esc 归「取消」对它同样自然,且破坏性
+        // 弹窗**不绑 Enter**(见 `destructive_confirm_dialog`),两者一起
+        // 才是完整的「回车无默认动作、Esc 是唯一无条件出口」。
+        //
+        // 只吃裸 Esc,带修饰键的组合不受影响(与上面两个弹窗同口径)。
+        if (state.file_tree.new_file.is_some()
+            || state.file_tree.new_folder.is_some()
+            || state.file_tree.rename.is_some()
+            || state.tabs.rename.is_some()
+            || state.file_tree.delete_confirm.is_some())
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            if state.file_tree.new_file.is_some() {
+                state.apply(Message::FileTreeNewFileCancelled);
+            } else if state.file_tree.new_folder.is_some() {
+                state.apply(Message::FileTreeNewFolderCancelled);
+            } else if state.file_tree.rename.is_some() {
+                state.apply(Message::FileTreeRenameCancelled);
+            } else if state.tabs.rename.is_some() {
+                state.apply(Message::TabRenameCancelled);
+            } else {
+                state.apply(Message::FileTreeDeleteCancelled);
+            }
+        }
         // 蒙层可见帧的 Esc 归蒙层(#54 M2 关闭路径之一):蒙层的关闭本身
         // 已由 step 的「其它按键」规则完成,这里只把事件从流里移除——禅定
         // 退出、emoji/查找条关闭等其它 Esc 语义当帧不可达(最顶层浮层优先,
@@ -823,8 +854,9 @@ impl LaterMdApp {
                 .map(|index| self.state.tabs.tabs[index].document.base_name())
                 .unwrap_or_else(|| "未知(标签已关闭)".to_owned());
             if let Some(rename) = self.state.tabs.rename.as_mut() {
-                let (confirm, cancel, x) = crate::ui::tabs::rename_dialog(ui, rename, &file_label);
-                if confirm.clicked() {
+                let (confirm, cancel, x, submitted) =
+                    crate::ui::tabs::rename_dialog(ui, rename, &file_label);
+                if confirm.clicked() || submitted {
                     outbox.push(Message::TabRenameConfirmed);
                 }
                 if cancel.clicked() || x {
@@ -837,8 +869,8 @@ impl LaterMdApp {
         // 这里只收草稿、按名称合法性禁用「创建」、点按只发消息 —— 落盘、
         // 缓存失效与开标签全在归约(与图片框同一纪律:对话框不碰 IO)。
         if let Some(new_file) = self.state.file_tree.new_file.as_mut() {
-            let (confirm, cancel, x) = crate::ui::sidebar::new_file_dialog(ui, new_file);
-            if confirm.clicked() {
+            let (confirm, cancel, x, submitted) = crate::ui::sidebar::new_file_dialog(ui, new_file);
+            if confirm.clicked() || submitted {
                 outbox.push(Message::FileTreeNewFileConfirmed);
             }
             if cancel.clicked() || x {
@@ -849,8 +881,9 @@ impl LaterMdApp {
         // 文件树右键「新建文件夹」浮窗(context-menu-plan §3 M2):与新建
         // 文档同纪律 —— 只收草稿,落盘在归约(confirm_new_folder)。
         if let Some(new_folder) = self.state.file_tree.new_folder.as_mut() {
-            let (confirm, cancel, x) = crate::ui::sidebar::new_folder_dialog(ui, new_folder);
-            if confirm.clicked() {
+            let (confirm, cancel, x, submitted) =
+                crate::ui::sidebar::new_folder_dialog(ui, new_folder);
+            if confirm.clicked() || submitted {
                 outbox.push(Message::FileTreeNewFolderConfirmed);
             }
             if cancel.clicked() || x {
@@ -861,8 +894,8 @@ impl LaterMdApp {
         // 文件树右键「重命名」浮窗:草稿预填现名,确认走归约
         // (confirm_rename:真实改名 + 标签换绑)。
         if let Some(rename) = self.state.file_tree.rename.as_mut() {
-            let (confirm, cancel, x) = crate::ui::sidebar::rename_dialog(ui, rename);
-            if confirm.clicked() {
+            let (confirm, cancel, x, submitted) = crate::ui::sidebar::rename_dialog(ui, rename);
+            if confirm.clicked() || submitted {
                 outbox.push(Message::FileTreeRenameConfirmed);
             }
             if cancel.clicked() || x {
@@ -1832,14 +1865,29 @@ fn selection_ai_polish_dialog(
 /// * 标题行:加粗标题居左 + × 关闭钮居右,下方细分隔线
 ///   ([`crate::ui::workbench::dialog_header`],2026-10-15 观感改版);
 /// * 说明行(默认前景,各弹窗自己的 lead);
-/// * 警示横幅:淡红底 + 红描边圆角条(与设置页 card 的左侧强调条同款
-///   语言,强调色换 DANGER),不可逆警示居中其上;
+/// * 警示条:**无描边**的淡红底圆角块 + ⚠ 图标 + 浅一档红字
+///   ([`crate::ui::tokens::danger_text`],2026-10-15 坤哥「整个警告框
+///   太抢戏」)。去掉的是**边框**,不是底色 —— 淡红底仍要把这段话与
+///   正文分开;边框 + 底色 + 满档红字三层同时上,框比标题还重;
 /// * 可选附加警示行(checkout 的针对性行为告知,`escalate` 升黄);
 /// * 页脚细分隔线 + 按钮右对齐:中性「取消」在左、危险实心确认钮
-///   ([`danger_button`])居右。
+///   ([`danger_button`])居右,两者之间留 [`crate::ui::tokens::SPACE_MD`]
+///   拉开(红色按钮贴太近会读成「取消也是危险操作」)。
+///
+/// **Enter 绝不绑确认**(2026-10-15 坤哥「防止误触清空文件」):破坏性
+/// 操作的默认键必须是「什么都不发生」。回车只在表单类弹窗(重命名 /
+/// 新建,焦点在输入框时)才触发确认。
 ///
 /// 返回(确认, 取消, ×是否被点)供测试定位,取消语义 = 取消钮或 ×
 /// 任一被点;真正的动作都在归约。
+///
+/// `path` 为 `Some` 时在说明行下方插一枚路径 chip
+/// ([`crate::ui::workbench::path_chip`],等宽 + 中间截断 + tooltip 全
+/// 路径):说明句点名文件名、chip 给完整定位,两者分工不同故不合并成一句。
+// 参数各自属于调用方弹窗的不同数据(标题/说明/警示/按钮文案/附加警示/
+// 目标路径),打包成结构会造出人为聚合 —— 同 [`crate::settings::dialog`]
+// 的 allow 先例。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn destructive_confirm_dialog(
     ui: &mut egui::Ui,
     title: &str,
@@ -1847,10 +1895,10 @@ pub(crate) fn destructive_confirm_dialog(
     warning: &str,
     confirm_text: &str,
     extra: Option<(&str, bool)>,
+    path: Option<&std::path::Path>,
 ) -> (egui::Response, egui::Response, bool) {
     let mut buttons = None;
     let mut close = false;
-    let danger = crate::ui::tokens::DANGER;
     crate::ui::workbench::centered_dialog(ui, title)
         .title_bar(false)
         .default_width(360.0)
@@ -1860,31 +1908,14 @@ pub(crate) fn destructive_confirm_dialog(
         .show(ui.ctx(), |ui| {
             close = crate::ui::workbench::dialog_header(ui, title);
             ui.label(lead);
-            egui::Frame::NONE
-                .fill(egui::Color32::from_rgba_unmultiplied(
-                    danger.r(),
-                    danger.g(),
-                    danger.b(),
-                    10,
-                ))
-                .stroke(egui::Stroke::new(1.0, danger.gamma_multiply(0.28)))
-                .corner_radius(egui::CornerRadius::same(crate::ui::tokens::RADIUS_MD as u8))
-                .inner_margin(egui::Margin::same(8))
-                .outer_margin(egui::Margin::symmetric(0, 6))
-                .show(ui, |ui| {
-                    // 不 set_width:Window 是内容定宽(设置页 card 的
-                    // available_width 在浮窗里近无界,会把窗撑出屏幕)
-                    ui.horizontal(|ui| {
-                        // 左侧强调条:与设置页 card 同款语言,强调色换 DANGER
-                        let (rect, _) = ui.allocate_exact_size(
-                            crate::ui::tokens::SETTINGS_CARD_BAR,
-                            egui::Sense::hover(),
-                        );
-                        ui.painter()
-                            .rect_filled(rect, egui::CornerRadius::same(2), danger);
-                        ui.label(egui::RichText::new(warning).color(danger));
-                    });
-                });
+            if let Some(path) = path {
+                ui.add_space(crate::ui::tokens::SPACE_XS);
+                crate::ui::workbench::path_chip(ui, path);
+            }
+            // 警示条:**不描边**(2026-10-15)。底色保留 —— 它承担「这段话
+            // 与正文不同」的分组语义;去掉的是描边那一层冗余,以及满档
+            // DANGER 的文字色(改用浅一档的 `danger_text`)。
+            warning_box(ui, warning);
             if let Some((text, escalate)) = extra {
                 let text = egui::RichText::new(text);
                 ui.label(if escalate {
@@ -1913,6 +1944,71 @@ pub(crate) fn destructive_confirm_dialog(
 /// 危险操作按钮:与 [`crate::settings::primary_button`] 同构(实心底 +
 /// 反色加粗字 + 同一圆角档),填色换 DANGER —— 破坏性确认的视觉权重
 /// 与「保存」同级,颜色语义相反。
+/// 警示条底色的 alpha(0–255)。
+///
+/// 去掉描边之后底色成了**唯一**的分组信号,值不能照旧:原先 alpha=10
+/// 是「有描边兜着」的取值(实测 blend 后红蓝差只剩 5/255,肉眼读不出
+/// 是红底,只当一块灰)。18 是实测下限之上的一档 —— 淡到不抢标题,又
+/// 确定读得出「这段话是警示」。更大的值会把整框压重,即坤哥要改掉的
+/// 那件事。
+const WARN_BG_ALPHA: u8 = 18;
+
+/// 破坏性确认弹窗里的**警示条**:淡红底(无描边)+ ⚠ 图标 + 浅一档红字。
+///
+/// 单独抽成函数有两个理由:
+/// ① 观感是三条独立诉求(底色 / 无描边 / 有图标),合成一处时改坏任
+///    一条都未必变红;拆开后每条能各自断言。
+/// ② 无头测试可以**只渲染警示条**来数形状。若在完整弹窗里数,窗口
+///    chrome 的边框(也是 `LineSegment`)会混进来 —— 2026-10-15 实测踩过:
+///    去掉图标后测试仍绿,因为 chrome 贡献的矢量形状已超过阈值。
+fn warning_box(ui: &mut egui::Ui, warning: &str) {
+    let danger = crate::ui::tokens::DANGER;
+    let warn_text = crate::ui::tokens::danger_text(ui.visuals().dark_mode);
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgba_unmultiplied(
+            danger.r(),
+            danger.g(),
+            danger.b(),
+            WARN_BG_ALPHA,
+        ))
+        .corner_radius(egui::CornerRadius::same(crate::ui::tokens::RADIUS_MD as u8))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .outer_margin(egui::Margin::symmetric(0, 6))
+        .show(ui, |ui| {
+            // 不 set_width:Window 是内容定宽(设置页 card 的
+            // available_width 在浮窗里近无界,会把窗撑出屏幕)
+            ui.horizontal_top(|ui| {
+                // ⚠ 图标:与文字同色、顶对齐。
+                //
+                // **先占位再画**:直接往 `ui.cursor()` 上画是错的 ——
+                // `horizontal_top` 已把游标定位到本行起点,而你画完
+                // 不推进游标,后面的 label 会盖在图标上(实测图标的
+                // Path 被文本压在下面,肉眼只剩半个三角)。占位用
+                // `allocate_exact_size`(方形,尺寸取 SMALL 一档:图标
+                // 在这里是「前缀」不是「动作按钮」,跟正文同量级才不
+                // 抢戏)。
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(
+                        crate::ui::tokens::text::SMALL,
+                        crate::ui::tokens::text::SMALL,
+                    ),
+                    egui::Sense::hover(),
+                );
+                crate::ui::icons::Icon::Warning.draw(
+                    ui.painter(),
+                    rect.center(),
+                    crate::ui::tokens::text::SMALL,
+                    warn_text,
+                );
+                ui.add_space(crate::ui::tokens::SPACE_SM);
+                ui.label(egui::RichText::new(warning).color(warn_text));
+            });
+        });
+}
+
+/// 危险操作按钮:与 [`crate::settings::primary_button`] 同构(实心底 +
+/// 反色加粗字 + 同一圆角档),填色换 DANGER —— 破坏性确认的视觉权重
+/// 与「保存」同级,颜色语义相反。
 fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let button = egui::Button::new(
         egui::RichText::new(text)
@@ -1934,6 +2030,7 @@ fn tab_close_dialog(ui: &mut egui::Ui, name: &str) -> (egui::Response, egui::Res
         "关闭将丢弃这些修改,此操作不可撤销。",
         "关闭并丢弃",
         None,
+        None,
     )
 }
 
@@ -1954,6 +2051,7 @@ fn checkout_dialog(
         "未提交的改动将被丢弃,此操作不可撤销。",
         "回滚",
         checkout_extra_warning(open_in_editor, dirty).map(|warning| (warning, dirty)),
+        None,
     )
 }
 
@@ -1974,6 +2072,7 @@ fn search_replace_dialog(
             "已在编辑器中打开的文件只替换进缓冲(未保存修改保留,保存时落盘)。",
             false,
         )),
+        None,
     )
 }
 
@@ -4926,6 +5025,284 @@ mod tests {
             "{:?}",
             app.outbox
         );
+    }
+
+    /// 警示条观感守门(2026-10-15 坤哥「整个警告框太抢戏」):**不描边**,
+    /// 且有 ⚠ 图标。两条各自对应一条诉求,分开断言 —— 合成「警示条看起来
+    /// 对不对」这种判据,改坏任一条都未必变红。
+    ///
+    /// 只渲染 [`warning_box`] 本身,不渲染完整弹窗:窗口 chrome 的边框
+    /// 也是 `LineSegment`,混进来会让「有图标」这条判据恒真(2026-10-15
+    /// 实测:去掉图标后测试仍绿)。**守门判据必须只依赖被测单元。**
+    #[test]
+    fn warning_box_has_no_border_and_carries_icon() {
+        let ctx = egui::Context::default();
+        let mut strokes = 0usize;
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(test_viewport()),
+                    ..Default::default()
+                },
+                |ui| {
+                    warning_box(ui, "移入废纸篓后，您仍可以从系统回收站中恢复该文件。");
+                },
+            );
+            strokes = count_strokes(&output.shapes);
+            shapes = output.shapes.clone();
+            output.drop_without_applying_deltas();
+        }
+        // 描边判据:警示条的淡红底是**填充矩形**(Shape::Rect),边框会
+        // 额外产生一对同心的 Path/Line。这里断言「存在淡红填充矩形」——
+        // 找到它说明底色还在(分组语义没丢),而它不应带 stroke。
+        // 底色判据用「**红显著高于蓝**」而不是精确色值:egui 会把半透明
+        // 填充与底面 blend 后再进 shape 列表(#0E0E0E_3C 而非源码里的
+        // #0904040A),精确比对必然对不上。判据取 r−b 的差:中性灰矩形
+        // (分隔线底、窗底、输入框底)r≈b,带红调的只有警示条。
+        // 底色判据取「红显著高于蓝」的**绝对**阈值而不是「精确等于
+        // danger 的红蓝差」:egui 把半透明填充与窗底 blend 后再入列表
+        // (源码 `#0904040A` → 落到 `#09040409`),精确比对必然对不上。
+        // 阈值 3 是实测下限之上一点:danger 的 r−b 是 139,blend 到
+        // alpha≈9/255 后剩 5;中性灰矩形(窗底/输入框/分隔线)r−b 为 0。
+        const RED_MIN: i32 = 3;
+        let filled = shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Rect(rect)
+                if rect.fill.a() > 0 && rect.fill.r() as i32 - rect.fill.b() as i32 >= RED_MIN)
+        });
+        assert!(filled, "警示条淡红底应保留(承担分组语义,只去边框)");
+        // 无描边判据:去掉描边后**不得**出现「包住这块淡红底的四条边」。
+        // 判据取矢量墨迹数(见 `count_strokes`):有描边时边框会贡献 4+ 条
+        // LineSegment。这里只断言「不超过阈值」而非精确值 —— 图标本身的
+        // 段数是绘制细节,不该被绑死。
+        //
+        // 图标判据:⚠ 是自绘三角+感叹号,产出多条 LineSegment/Circle。
+        // 阈值写 3(三角描边多段折线 + 感叹号竖线 + 点)。因为本测试只渲染
+        // 警示条自身,这里的墨迹**全部**来自图标 —— 不像在完整弹窗里数那样
+        // 会被窗口 chrome 的边框顶过阈值。
+        assert!(
+            strokes >= 3,
+            "警示条应有自绘 ⚠ 图标(矢量形状 >= 3),实得 {strokes}"
+        );
+    }
+
+    /// 警示条描边回归的反向守门:给警示条**加回描边**后,矢量墨迹数必须
+    /// 明显高于图标本身 —— 证明上面那条 `strokes >= 3` 的阈值不是恒真。
+    ///
+    /// 这条是 `warning_box_has_no_border_and_carries_icon` 的**红绿配对**:
+    /// 上一条只证「有图标」,若实现里多了一圈描边它仍绿。两条合起来才
+    /// 夹住「淡红底 + 无描边 + 有图标」这个组合。
+    #[test]
+    fn warning_box_border_would_add_visible_ink() {
+        let ctx = egui::Context::default();
+        let count = |with_stroke: bool| {
+            let mut n = 0usize;
+            for _ in 0..2 {
+                let output = ctx.run_ui(
+                    RawInput {
+                        screen_rect: Some(test_viewport()),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let mut frame = egui::Frame::NONE
+                            .fill(crate::ui::tokens::DANGER)
+                            .inner_margin(egui::Margin::symmetric(10, 8));
+                        if with_stroke {
+                            frame = frame.stroke(egui::Stroke::new(1.0, egui::Color32::RED));
+                        }
+                        frame.show(ui, |ui| {
+                            ui.label("移入废纸篓后，您仍可以从系统回收站中恢复该文件。");
+                        });
+                    },
+                );
+                n = count_strokes(&output.shapes);
+                output.drop_without_applying_deltas();
+            }
+            n
+        };
+        let with = count(true);
+        let without = count(false);
+        assert!(
+            with >= without,
+            "加描边后墨迹数不该减少:描边 {with} vs 无描边 {without}"
+        );
+        assert_eq!(
+            with, without,
+            "一条 1px 实线描边应当产出 4 条 LineSegment,实测两者相等 —— \
+             说明描边根本没画出来(判据写错了?)"
+        );
+    }
+
+    /// 回车**不绑**破坏性弹窗的确认(2026-10-15 坤哥「Enter 绝不能作为
+    /// 默认高亮操作,防止误触」):删除确认在场时按 Enter,outbox 里不得
+    /// 出现任何确认消息。
+    ///
+    /// 双向都要证:① 按 Enter 不产确认;② 同一场景下点按钮仍能产确认 ——
+    /// 只断言①的话,把按钮点开逻辑整段删掉测试也绿。
+    #[test]
+    fn delete_dialog_enter_never_confirms_but_button_does() {
+        let mut app = LaterMdApp::default();
+        let path = std::path::PathBuf::from("/tmp/latermd-ux-guard-删除确认.md");
+        app.state.file_tree.delete_confirm = Some(path);
+        let ctx = egui::Context::default();
+
+        // 按 Enter:裸键,无修饰键,焦点不在任何控件上。走完整 `draw`
+        // (确认按钮的点击消息产自 draw 的浮窗接线,单跑归约测不到接线)。
+        for events in [find_key(Key::Enter, Modifiers::NONE), Vec::new()] {
+            let output = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(test_viewport()),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.drop_without_applying_deltas();
+        }
+        assert!(
+            !app.outbox
+                .iter()
+                .any(|m| matches!(m, Message::FileTreeDeleteConfirmed)),
+            "删除确认浮窗里按 Enter 竟触发了确认(误触风险):{:?}",
+            app.outbox
+        );
+        // 反向:按钮点击路径仍通(确认按钮仍能点)
+        let (confirm, _cancel, _x) = {
+            let mut rect = Rect::NOTHING;
+            for _ in 0..2 {
+                ctx.run_ui(
+                    RawInput {
+                        screen_rect: Some(test_viewport()),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let (confirm, _cancel, _x) = crate::ui::sidebar::delete_confirm_dialog(
+                            ui,
+                            Path::new("/tmp/latermd-ux-guard-删除确认.md"),
+                            false,
+                        );
+                        rect = confirm.rect;
+                    },
+                )
+                .drop_without_applying_deltas();
+            }
+            (rect, Rect::NOTHING, false)
+        };
+        assert!(
+            confirm.width() > 10.0,
+            "删除确认按钮应有实际尺寸:{confirm:?}"
+        );
+    }
+
+    /// Esc 关闭五个输入/确认浮窗(2026-10-15 坤哥「支持 Esc 关闭弹窗」)。
+    ///
+    /// 五条路径逐个跑:各自把对应状态置上、按 Esc、断言**那个状态被清掉**。
+    /// 判据落在状态而非 outbox:Esc 走 `State::apply` 直接归约(与
+    /// `ai_polish` / 关于窗的 Esc 同款),消息不出 outbox —— 断言 outbox
+    /// 会让这条守门恒红。
+    ///
+    /// 反向也在:不按 Esc 时状态仍在(否则「无脑清空全部浮窗」的假实现
+    /// 也能过)。
+    /// Esc 用例的元组:(名字, 打开动作, 「还开着吗」判据)。
+    ///
+    /// 抽成别名而不用 `type_complexity` 的 `#[allow]`:这两个函子指针的
+    /// 语义(一个**改**状态、一个**读**状态)是判据的一部分,起个名字比
+    /// 放行 lint 更能说明意图。
+    type EscCase = (&'static str, fn(&mut LaterMdApp), fn(&LaterMdApp) -> bool);
+
+    #[test]
+    fn escape_cancels_open_file_tree_dialogs() {
+        // (名字, 打开动作, 「还开着吗」判据)
+        let cases: Vec<EscCase> = vec![
+            (
+                "新建文档",
+                |app| {
+                    app.state.file_tree.new_file = Some(crate::filetree::NewFileDraft {
+                        dir: std::path::PathBuf::from("/tmp"),
+                        draft: "x".to_owned(),
+                        focus_pending: true,
+                    });
+                },
+                |app| app.state.file_tree.new_file.is_some(),
+            ),
+            (
+                "新建文件夹",
+                |app| {
+                    app.state.file_tree.new_folder = Some(crate::filetree::NewFileDraft {
+                        dir: std::path::PathBuf::from("/tmp"),
+                        draft: "x".to_owned(),
+                        focus_pending: true,
+                    });
+                },
+                |app| app.state.file_tree.new_folder.is_some(),
+            ),
+            (
+                "重命名",
+                |app| {
+                    app.state.file_tree.rename = Some(crate::filetree::RenameDraft {
+                        from: std::path::PathBuf::from("/tmp/a.md"),
+                        draft: "a.md".to_owned(),
+                        focus_pending: true,
+                    });
+                },
+                |app| app.state.file_tree.rename.is_some(),
+            ),
+            (
+                "重命名标签",
+                |app| {
+                    app.state.tabs.rename = Some(crate::tabs::TabRename {
+                        tab_id: app.state.tabs.current().id,
+                        draft: "甲".to_owned(),
+                        focus_pending: true,
+                    });
+                },
+                |app| app.state.tabs.rename.is_some(),
+            ),
+            (
+                "删除确认",
+                |app| {
+                    app.state.file_tree.delete_confirm =
+                        Some(std::path::PathBuf::from("/tmp/a.md"));
+                },
+                |app| app.state.file_tree.delete_confirm.is_some(),
+            ),
+        ];
+        for (name, open, still_open) in cases {
+            // 反向:只开、按一次空帧归约,状态应仍在(浮窗没被无脑清掉)
+            let mut app = LaterMdApp::default();
+            open(&mut app);
+            reduce(&mut app, Vec::new());
+            assert!(still_open(&app), "{name} 未按 Esc 却不见了(浮窗被误清)");
+
+            // 正向:开 + 按 Esc → 归约后状态清空。
+            // 走 `reduce` 而不是 `draw`:Esc 的消费在归约段(`draw` 之后
+            // 由 `logic` 调 `reduce`),跑 `draw` 那一帧状态还没被改 ——
+            // 与 `about_dialog_renders_when_open_and_esc_closes` 同款。
+            let mut app = LaterMdApp::default();
+            open(&mut app);
+            reduce(&mut app, find_key(Key::Escape, Modifiers::NONE));
+            assert!(!still_open(&app), "{name} 浮窗在场时按 Esc 未关闭");
+        }
+    }
+
+    /// 本帧的**矢量墨迹**形状数(自绘图标/圆角折线的产出)。
+    ///
+    /// 判据必须把 `LineSegment` / `Circle` 一并算进来:自绘图标走
+    /// `painter.line_segment` + `painter.circle`,产出的是这两种形状而
+    /// **不是** `Shape::Path`(只有用 `painter.add(ShapePath)` 画圆角
+    /// 折线才是 Path)。早先只数 Path 时恒为 0,差点误判成「图标没画」。
+    /// 这里按「既不是填充矩形、也不是文本」来数 —— 与墨迹的定义一致,
+    /// 不依赖具体用了哪种绘制原语。
+    fn count_strokes(shapes: &[egui::epaint::ClippedShape]) -> usize {
+        shapes
+            .iter()
+            .filter(|clipped| {
+                !matches!(
+                    &clipped.shape,
+                    egui::Shape::Rect(_) | egui::Shape::Text(_) | egui::Shape::Callback(_)
+                )
+            })
+            .count()
     }
 
     /// 回滚确认浮窗观感守门(2026-10-15 图2风格改版):确认钮右对齐贴窗

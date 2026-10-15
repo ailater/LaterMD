@@ -74,6 +74,10 @@ pub struct TabRename {
     pub tab_id: u64,
     /// 输入草稿;开框时预填该标签当前显示基础名(不带 dirty 星)。
     pub draft: String,
+    /// 输入框还没做过「聚焦 + 选中主体」,语义与
+    /// [`crate::filetree::RenameDraft::focus_pending`] 同款(标签改名
+    /// 无扩展名,选区即全选)。
+    pub focus_pending: bool,
 }
 
 /// 单个标签的全部文档状态。
@@ -562,6 +566,7 @@ mod tests {
         tabs.rename = Some(TabRename {
             tab_id: target,
             draft: "新名字".to_owned(),
+            focus_pending: true,
         });
         tabs.remove(1);
         assert_eq!(tabs.rename, None, "浮窗随目标移除撤下");
@@ -571,6 +576,7 @@ mod tests {
         tabs.rename = Some(TabRename {
             tab_id: tabs.tabs[0].id,
             draft: "甲的新名".to_owned(),
+            focus_pending: true,
         });
         let survivor = tabs.tabs[0].id;
         tabs.open_tab(None, "丙");

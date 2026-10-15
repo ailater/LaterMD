@@ -1143,14 +1143,16 @@ fn files_panel(
 /// 分隔符时禁用:这两种名 `filetree::create_markdown` 必拒,让按钮先灰
 /// 掉比让用户点了吃一条错误提示友好。归约侧仍防御性拒绝直发的消息。
 ///
-/// 返回(创建, 取消, ×)响应供无头测试定位(与 `tabs::rename_dialog`
-/// 同款,× 与「取消」同语义)。
+/// 返回(创建, 取消, ×, Enter提交)响应供无头测试定位(与
+/// `tabs::rename_dialog` 同款,× 与「取消」同语义)。第四个出口的
+/// 理由见 [`rename_dialog`]:回车不经过按钮,egui 不会把它算成点击。
 pub(crate) fn new_file_dialog(
     ui: &mut egui::Ui,
     new_file: &mut crate::filetree::NewFileDraft,
-) -> (egui::Response, egui::Response, bool) {
+) -> (egui::Response, egui::Response, bool, bool) {
     let mut buttons = None;
     let mut close = false;
+    let mut submitted = false;
     crate::ui::workbench::centered_dialog(ui, "新建文档")
         .collapsible(false)
         .resizable(false)
@@ -1159,16 +1161,28 @@ pub(crate) fn new_file_dialog(
         .show(ui.ctx(), |ui| {
             close = crate::ui::workbench::dialog_header(ui, "新建文档");
             ui.label("文件名");
-            ui.text_edit_singleline(&mut new_file.draft)
-                .on_hover_text("可省略 .md 后缀;已存在同名文件时自动让开");
+            let edit = crate::ui::workbench::dialog_text_edit(
+                ui,
+                &mut new_file.draft,
+                "例如 笔记",
+                "可省略 .md 后缀;已存在同名文件时自动让开",
+            );
+            crate::ui::workbench::focus_and_select_stem(
+                ui,
+                &edit,
+                ui.make_persistent_id("filetree-new-file-name"),
+                &new_file.draft,
+                &mut new_file.focus_pending,
+            );
             ui.add_space(tokens::SPACE_XS);
-            ui.weak(format!("位置:{}", new_file.dir.display()));
+            ui.weak("位置:");
+            crate::ui::workbench::path_chip(ui, &new_file.dir);
             crate::ui::workbench::dialog_footer_divider(ui);
+            let ready = crate::filetree::valid_file_name(new_file.draft.trim());
+            submitted =
+                ready && edit.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                let name = new_file.draft.trim();
-                let ready = crate::filetree::valid_file_name(name);
-                let confirm = ui
-                    .add_enabled(ready, egui::Button::new("创建"))
+                let confirm = crate::settings::primary_button(ui, "创建", ready)
                     .on_disabled_hover_text("文件名不能为空,也不能包含路径分隔符");
                 ui.add_space(tokens::SPACE_MD);
                 let cancel = ui.button("取消");
@@ -1176,7 +1190,7 @@ pub(crate) fn new_file_dialog(
             });
         });
     let (confirm, cancel) = buttons.expect("浮窗必然绘制创建/取消按钮");
-    (confirm, cancel, close)
+    (confirm, cancel, close, submitted)
 }
 
 /// 「新建文件夹」浮窗(context-menu-plan §3 M2):形态与
@@ -1184,13 +1198,14 @@ pub(crate) fn new_file_dialog(
 /// 落盘在归约(`State::confirm_new_folder`)。文件夹名不补后缀,
 /// 也没有「可省略 .md」的提示。
 ///
-/// 返回(创建, 取消, ×)响应供无头测试定位。
+/// 返回(创建, 取消, ×, Enter提交)响应供无头测试定位。
 pub(crate) fn new_folder_dialog(
     ui: &mut egui::Ui,
     draft: &mut crate::filetree::NewFileDraft,
-) -> (egui::Response, egui::Response, bool) {
+) -> (egui::Response, egui::Response, bool, bool) {
     let mut buttons = None;
     let mut close = false;
+    let mut submitted = false;
     crate::ui::workbench::centered_dialog(ui, "新建文件夹")
         .collapsible(false)
         .resizable(false)
@@ -1199,14 +1214,28 @@ pub(crate) fn new_folder_dialog(
         .show(ui.ctx(), |ui| {
             close = crate::ui::workbench::dialog_header(ui, "新建文件夹");
             ui.label("文件夹名");
-            ui.text_edit_singleline(&mut draft.draft);
+            let edit = crate::ui::workbench::dialog_text_edit(
+                ui,
+                &mut draft.draft,
+                "例如 图片",
+                "名字不能为空,也不能包含路径分隔符",
+            );
+            crate::ui::workbench::focus_and_select_stem(
+                ui,
+                &edit,
+                ui.make_persistent_id("filetree-new-folder-name"),
+                &draft.draft,
+                &mut draft.focus_pending,
+            );
             ui.add_space(tokens::SPACE_XS);
-            ui.weak(format!("位置:{}", draft.dir.display()));
+            ui.weak("位置:");
+            crate::ui::workbench::path_chip(ui, &draft.dir);
             crate::ui::workbench::dialog_footer_divider(ui);
+            let ready = crate::filetree::valid_file_name(draft.draft.trim());
+            submitted =
+                ready && edit.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                let ready = crate::filetree::valid_file_name(draft.draft.trim());
-                let confirm = ui
-                    .add_enabled(ready, egui::Button::new("创建"))
+                let confirm = crate::settings::primary_button(ui, "创建", ready)
                     .on_disabled_hover_text("名字不能为空,也不能包含路径分隔符");
                 ui.add_space(tokens::SPACE_MD);
                 let cancel = ui.button("取消");
@@ -1214,20 +1243,30 @@ pub(crate) fn new_folder_dialog(
             });
         });
     let (confirm, cancel) = buttons.expect("浮窗必然绘制创建/取消按钮");
-    (confirm, cancel, close)
+    (confirm, cancel, close, submitted)
 }
 
 /// 「重命名」浮窗(context-menu-plan §3 M2,真实文件改名):预填现名
 /// (调用方已填),确认发 `FileTreeRenameConfirmed`;改名 + 打开中标签
 /// 换绑在归约(`State::confirm_rename`)。
 ///
-/// 返回(确定, 取消, ×)响应供无头测试定位。
+/// 2026-10-15 UX 三件套:
+/// * **开框即打字** —— 输入框自动聚焦并选中主体(不含 `.md`,见
+///   [`crate::ui::workbench::focus_and_select_stem`]),不用先点一下;
+/// * **Enter 提交** —— 仅在输入框**持有焦点**且草稿合法时才认,焦点在
+///   别处按回车不提交(否则弹窗开着时随手一按回车就改名了);
+/// * 路径走等宽 chip 而非灰字流(见 [`crate::ui::workbench::path_chip`])。
+///
+/// 返回(确定, 取消, ×, Enter提交)响应供无头测试定位。Enter 提交是
+/// **独立于 `confirm.clicked()` 的第四个出口**:回车不经过按钮,egui
+/// 不会把它变成一次点击,只能由调用方读这个标志再发同一条消息。
 pub(crate) fn rename_dialog(
     ui: &mut egui::Ui,
     draft: &mut crate::filetree::RenameDraft,
-) -> (egui::Response, egui::Response, bool) {
+) -> (egui::Response, egui::Response, bool, bool) {
     let mut buttons = None;
     let mut close = false;
+    let mut submitted = false;
     crate::ui::workbench::centered_dialog(ui, "重命名")
         .collapsible(false)
         .resizable(false)
@@ -1235,23 +1274,41 @@ pub(crate) fn rename_dialog(
         .frame(crate::ui::workbench::dialog_frame(ui))
         .show(ui.ctx(), |ui| {
             close = crate::ui::workbench::dialog_header(ui, "重命名");
-            ui.label("新名字");
-            ui.text_edit_singleline(&mut draft.draft)
-                .on_hover_text("只改这一项的名字;打开中的文档会跟着换到新路径");
+            ui.label("新名称");
+            let edit_id = ui.make_persistent_id("filetree-rename-name");
+            let edit = crate::ui::workbench::dialog_text_edit(
+                ui,
+                &mut draft.draft,
+                "输入新的名字",
+                "只改这一项的名字;打开中的文档会跟着换到新路径",
+            );
+            crate::ui::workbench::focus_and_select_stem(
+                ui,
+                &edit,
+                edit_id,
+                &draft.draft,
+                &mut draft.focus_pending,
+            );
             ui.add_space(tokens::SPACE_XS);
-            ui.weak(format!("原路径:{}", draft.from.display()));
+            ui.weak("原路径:");
+            crate::ui::workbench::path_chip(ui, &draft.from);
             crate::ui::workbench::dialog_footer_divider(ui);
+            // 现名相同视为未改,禁用确定(避免一次无意义 rename)
+            let current = draft
+                .from
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let ready = crate::filetree::valid_file_name(draft.draft.trim())
+                && draft.draft.trim() != current;
+            // 回车提交的两个前提都要:焦点在输入框(否则弹窗开着时随手
+            // 一按回车就改名)+ 草稿合法(否则等于绕过置灰的确定钮)。
+            submitted =
+                ready && edit.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                // 现名相同视为未改,禁用确定(避免一次无意义 rename)
-                let current = draft
-                    .from
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let ready = crate::filetree::valid_file_name(draft.draft.trim())
-                    && draft.draft.trim() != current;
-                let confirm = ui
-                    .add_enabled(ready, egui::Button::new("确定"))
+                // ready 时用 accent 实心(「一改就亮」的即时反馈):普通
+                // 按钮只有置灰这一档,「改了变蓝」得靠按钮样式才有。
+                let confirm = crate::settings::primary_button(ui, "确定", ready)
                     .on_disabled_hover_text("名字不能为空、不能含路径分隔符,也不能与现名相同");
                 ui.add_space(tokens::SPACE_MD);
                 let cancel = ui.button("取消");
@@ -1259,7 +1316,7 @@ pub(crate) fn rename_dialog(
             });
         });
     let (confirm, cancel) = buttons.expect("浮窗必然绘制确定/取消按钮");
-    (confirm, cancel, close)
+    (confirm, cancel, close, submitted)
 }
 
 /// 「删除」确认浮窗(context-menu-plan §3 M2):复用
@@ -1272,18 +1329,34 @@ pub(crate) fn delete_confirm_dialog(
     path: &Path,
     is_dir: bool,
 ) -> (egui::Response, egui::Response, bool) {
+    // 文案(2026-10-15 坤哥):主标题从「删除」改成「确认删除」—— 标题
+    // 说的是**这一步在做什么**,不是按钮上那个动词;提示句只点名**文件
+    // 名**而非整条路径(路径另有一行等宽 chip 展示,重复一遍反而长);
+    // 警告句把「可从那里恢复」的模糊表述换成明确的「系统回收站」。
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
     let (lead, warning) = if is_dir {
         (
-            format!("把文件夹 {} 移入废纸篓?", path.display()),
-            "文件夹内的全部内容(含子文件夹)一起移入,可从系统废纸篓恢复。",
+            format!("确定要将文件夹 {name} 移入废纸篓吗?"),
+            "文件夹内的全部内容(含子文件夹)会一起移入,仍可从系统回收站中恢复。",
         )
     } else {
         (
-            format!("把 {} 移入废纸篓?", path.display()),
-            "文件将移入系统废纸篓,可从那里恢复。",
+            format!("确定要将文件 {name} 移入废纸篓吗?"),
+            "移入废纸篓后,您仍可以从系统回收站中恢复该文件。",
         )
     };
-    crate::ui::layout::destructive_confirm_dialog(ui, "删除", &lead, warning, "删除", None)
+    crate::ui::layout::destructive_confirm_dialog(
+        ui,
+        "确认删除",
+        &lead,
+        warning,
+        "删除",
+        None,
+        Some(path),
+    )
 }
 
 /// Files 页顶部根目录行:目录名(最近列表下拉 / 无历史时纯文本)+ 三枚
