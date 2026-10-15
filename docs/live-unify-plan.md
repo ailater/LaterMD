@@ -39,6 +39,8 @@
 - **P5 已落地(净删 3277 行)**:`PreviewState` 只剩 `text`/`synced_rev`/`outline`(`new()` 不再做五层改写),`ui::preview` 整模块删除。迁移存留 5 条测试:相对图片改写 4 条 → `ui::rich_widgets`(`image_rewrites` + `OffsetMap::apply`,即 Live 第 5 层的实际写法),`is_openable_href` 判定矩阵 → `ui::ai_card`。**决策 #80(面板收起期间跳转悬置)随 `scroll_target` 一并作废**,P6 必须清档(decisions-pending 那条 + roadmap 提及)。
 - **P6 开工注意**:①代码侧到此全部完成,剩文档与 CHANGELOG;②本模块 doc 死链已在 P5 清(5 处),P6 改文档时若再删符号须同步 `cargo doc`;③`docs/decisions-pending.md` 待处理条目:#80(作废)、#78/#79(重写为 Live 通道)、#115(交付面删右栏)、#121/#122/#129(Alt 系七条变六条),另需把 #147(D1)/#148(D2)两位 newcomer 与现有体系串起来;④R2(id 含块序号的缓存抖动)仍未解决,登记进 decisions-pending 作为后续性能项。
 
+- **【补充 2026-10-15】右栏对照预览已按坤哥指令回归为「源码+对照」三态视图**(两个 PR,均非 vendor):[#250](https://github.com/ailater/LaterMd/pull/250) 让 `live::ui` 可被两列各自调用(`ScrollArea` id 参数化 + `TabState::live_right` 独立块状态与独立 id 命名空间),[#252](https://github.com/ailater/LaterMd/pull/252) 落三态(`RenderMode::Split` + `cycle()`、标题栏三段开关、右栏只读面板、现代版分隔线)。**右栏渲染的是 Live 富渲染本身**,不是另一套渲染器 —— P4 删掉的仍是「第二条渲染链路」这个事实本身,本次回归没有重新引入它。P6 的文档清单因此要改写:不再写「对照预览已退役」,改为「对照预览 = 三态视图的分栏档(只读 Live 渲染)」;decisions-pending 里与右栏相关的条目(#78/#79/#80/#115/#121/#122/#129)按三态重述,并新增三态视图的决策条目(互斥三态 / 右栏只读 / 跟随一次 / 分隔线回归)。
+
 
 ## 阻塞
 
