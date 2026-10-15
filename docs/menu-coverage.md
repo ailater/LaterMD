@@ -75,7 +75,6 @@
 | 替换 ReplaceInDoc | 菜单「编辑」· 快速打开 | Win/Linux Ctrl+H;mac ⌥⌘F(#114,⌘H 被 winit 默认菜单持有) |
 | 跳转到行 GotoLine | 菜单「编辑」(#60 M1 既有)· 快速打开 | Ctrl/Cmd+G |
 | 插入目录 InsertToc | **菜单「编辑」(#66 M2 补)** · 快速打开 | Ctrl/Cmd+Alt+C(编辑组归位与插入/替换口径见 decisions-pending #127) |
-| 切换预览栏 ToggleRightPreview | **菜单「视图」(M1 补)** · 标题栏右面板钮 · 快速打开 | Ctrl/Cmd+Alt+R |
 | 禅定模式 ToggleZen | **菜单「视图」(M1 补)** · 标题栏禅定钮 · 右上退出浮层 · 快速打开 | F11 |
 
 「快速打开」= Ctrl/Cmd+P 浮层按 label 模糊匹配执行 `Command::ALL` 全集,
@@ -86,12 +85,17 @@
 M1 之前缺菜单入口的 20 条:格式十五条 + ImageInsert + EmojiPicker +
 ToggleLivePreview + ToggleRightPreview + ToggleZen。补齐去向:
 
+> **2026-10-15 三态视图后记**:`ToggleRightPreview` 已随右栏独立开关一并
+> 删除(live-unify P4),三态回归后视图切换只留 `ToggleLivePreview` 一条
+> (id `toggle_live_preview`,label「切换视图」,Ctrl/Cmd+/,按
+> `RenderMode::cycle()` 在三档间推进)。本表该行已删;「视图」菜单条目
+> 相应由三条变两条。
+
 - **格式十七条 → 新增「格式」菜单**:行内 / 标题 / 块 / 列表四段与格式
   工具条 `FormatGroup` 同一口径,末尾「插入」段收图片与 Emoji 两个
   对话框类动作(点了不改文档,与十五条直接改文档的格式动作隔开)。
-- **视图三条(ToggleLivePreview / ToggleRightPreview / ToggleZen)→
-  「视图」菜单**:布局外观开关一段,禅定(整套面板组合,非普通开关)
-  独立一段。
+- **视图两条(ToggleLivePreview / ToggleZen)→ 「视图」菜单**:布局外观
+  开关一段,禅定(整套面板组合,非普通开关)独立一段。
 
 近期新增命令重点核对结果:GotoLine / 替换 / 查找 / 标签三条 / AI 三条 /
 导出两条在 M1 之前已各有菜单入口,本表如实登记,无缺项;插入目录
@@ -145,19 +149,19 @@ ToggleMinimap(#67 M2)进「视图」第一段(专注之后、主题之前),同�
   bindings` 的标题集已含 H)**。「帮助」菜单条目助记 A(About 词首,
   菜单内唯一;条目层是菜单内命名空间,与设置菜单的 A(外观)跨菜单
   重复允许)。
-- **Alt 系出厂键位逐一清点**(全部含 Alt 的绑定,共七条):
+- **Alt 系出厂键位逐一清点**(全部含 Alt 的绑定,共六条 —— 原七条的
+  `Ctrl/Cmd+Alt+R` = ToggleRightPreview 已随该命令删除):
   1. `Alt+T` = ToggleTheme(#45 K1;mac 显示 ⌥T);
-  2. `Ctrl/Cmd+Alt+R` = ToggleRightPreview;
-  3. `⌥⌘F` = ReplaceInDoc(仅 mac 出厂,#114);
-  4. `Ctrl/Cmd+Alt+C` = InsertToc(#66 M2,C = Contents;菜单标题助记集
+  2. `⌥⌘F` = ReplaceInDoc(仅 mac 出厂,#114);
+  3. `Ctrl/Cmd+Alt+C` = InsertToc(#66 M2,C = Contents;菜单标题助记集
      F/E/O/V/X/A/S 不含 C,#127);
-  5. `Ctrl/Cmd+Alt+W` = TypewriterToggle(#64 M1;与 Ctrl/Cmd+W 关标签
+  4. `Ctrl/Cmd+Alt+W` = TypewriterToggle(#64 M1;与 Ctrl/Cmd+W 关标签
      只差一个 Alt,靠修饰键个数降序共存,#121);
-  6. `Ctrl/Cmd+Alt+D` = FocusModeToggle(#64 M2;与 Ctrl/Cmd+D 复制选中
+  5. `Ctrl/Cmd+Alt+D` = FocusModeToggle(#64 M2;与 Ctrl/Cmd+D 复制选中
      同款共存,避开助记集 F/E/O/V/X/A/S,#122);
-  7. `Ctrl/Cmd+Alt+M` = ToggleMinimap(#67 M2,M = Minimap 词首;Ctrl/
-     Cmd+Alt 层 C/W/D/R 之外 M 空闲,避开助记集 F/E/O/V/X/A/S,#129)。
-  七条互不冲突,且 `matches_logically` 对「显式无 Ctrl/Cmd」的 Alt+T
+  6. `Ctrl/Cmd+Alt+M` = ToggleMinimap(#67 M2,M = Minimap 词首;Ctrl/
+     Cmd+Alt 层 C/W/D 之外 M 空闲,避开助记集 F/E/O/V/X/A/S,#129)。
+  六条互不冲突,且 `matches_logically` 对「显式无 Ctrl/Cmd」的 Alt+T
   要求事件确实没按 Ctrl/Cmd(`alt_t_fires_only_toggle_theme` 钉住),
   与 Ctrl/Cmd+Alt+R / Ctrl/Cmd+Alt+C 不相抢。
 

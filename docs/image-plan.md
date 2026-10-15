@@ -129,8 +129,11 @@ Message::ImageUploadRequested { profile_id, path }
 egui 的 `ImageSource::Uri` **不做相对路径解析**（没有文档目录概念）。
 文档里存相对路径是对的（可移植），但喂给预览前必须拼成绝对。
 
-**推荐解法（零 vendor 改动）**：`ui/preview.rs` 渲染前把源码里的相对图片路径
-替换成 `file://` 绝对 URI（图片数量级十几个，字符串替换成本可忽略）。
+**推荐解法（零 vendor 改动）**：富渲染前把源码里的相对图片路径替换成 `file://` 绝对 URI
+（图片数量级十几个，字符串替换成本可忽略）。**2026-10-15 订正**：原写「`ui/preview.rs` 渲染前」；
+`ui::preview` 已随 live-unify P4/P5 删除，改写现在由
+`live::rich_block_with_base(index, block_text, base_dir)` 的第 5 层完成（`ui::rich_widgets`），
+写作档正文与分栏档右栏共用同一份实现，结果纳入 `rich_cache`（缓存键含 `base_dir` 维度）。
 **不推荐**：为此改 vendor（要按 AGENTS §6 三类拆分，成本高，且这是"上游可合"类但上游未必收）。
 在 `vendor/README.md` 登记为「待上游化：给 Token::Image 加 base_dir」。
 

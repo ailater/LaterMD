@@ -147,8 +147,8 @@ pub heading_space_above: f32,
 | `TabNext` | Cmd/Ctrl+Tab | 与浏览器一致 ✅ |
 | `TabClose` | Cmd/Ctrl+W | 与浏览器一致 ✅ |
 | `ToggleSidebar` | Cmd/Ctrl+\\ | 与 VS Code 一致 ✅ |
-| `ToggleLivePreview` | Cmd/Ctrl+/ | VS Code「切换注释」同键 ✅ |
-| `ToggleRightPreview` | Cmd/Ctrl+Alt+R | 自定，无冲突 |
+| `ToggleLivePreview` | Cmd/Ctrl+/ | VS Code「切换注释」同键 ✅。**2026-10-15**：三态循环入口（源码 → 写作 → 分栏 → 源码） |
+| ~~`ToggleRightPreview`~~ | ~~Cmd/Ctrl+Alt+R~~ | **2026-10-15 已删除**（命令随右栏独立开关退役；右栏改由 `ToggleLivePreview` 循环到分栏档打开）。旧 `keymap.json` 残留该键无副作用 |
 | `ToggleZen` | F11 | 与浏览器全屏一致 ✅ |
 | `FormatLink` | Cmd/Ctrl+Shift+K | 注：VS Code 是裸 Ctrl+K |
 
