@@ -593,10 +593,12 @@ fn window_button(
         TitleButton::Settings => {
             // 右键四页直达随 settings 行一并迁来(不丢能力,decisions-pending
             // #31)。`context_menu` 消费 Response、返回弹层打开状态,借 clone
-            // 注册菜单,原 response 继续供悬浮/点击判定用。
+            // 注册菜单,原 response 继续供悬浮/点击判定用。条目用 menu_item
+            // (自绘,墨迹重心补偿):CJK 标签在 egui Button 的 hover 灰影里
+            // 偏上 ~2.5px(menu_item 模块注释有取证)。
             response.clone().context_menu(|ui| {
                 for tab in SettingsTab::ALL {
-                    if ui.button(tab.label()).clicked() {
+                    if crate::ui::menu_item::button(ui, tab.label()).clicked() {
                         outbox.push(Message::SettingsOpened(tab));
                     }
                 }

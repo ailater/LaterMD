@@ -13,6 +13,8 @@ pub mod gutter;
 pub mod icons;
 pub mod image_dialog;
 pub mod layout;
+/// 菜单项按钮(自绘,墨迹重心补偿)。
+pub mod menu_item;
 pub mod menubar;
 pub mod mermaid;
 pub mod minimap;

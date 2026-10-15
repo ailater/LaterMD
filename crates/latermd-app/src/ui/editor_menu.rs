@@ -115,7 +115,10 @@ pub(crate) fn build(
     if let (true, Some(selection)) = (has_selection, selection) {
         ui.separator();
         for action in SelectionAiAction::ALL {
-            if ui.button(action.label()).clicked() {
+            // 纯 CJK 标签行走 menu_item(墨迹重心补偿);上方编辑组行带
+            // 快捷键尾注(混排拉丁),维持 egui Button —— 两类行的墨迹
+            // 偏心方向相反,见 menu_item 模块注释的适用边界。
+            if crate::ui::menu_item::button(ui, action.label()).clicked() {
                 outbox.push(Message::SelectionAiActionRequested {
                     action,
                     selection: Some(selection),
