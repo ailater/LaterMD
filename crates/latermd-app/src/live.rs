@@ -108,6 +108,11 @@ pub struct LiveState {
     /// 是否启用打开文档时的浏览态交互。默认关闭以保持无头测试夹具和
     /// 直接构造 LiveState 的既有语义；真实切入 Live 时由 State 打开。
     pub(crate) browse_enabled: bool,
+    /// **锁定浏览**(P3/D2):禅定帧内的浏览是只读阅读,点击/双击/跳转一律
+    /// 不进编辑、不抢焦点。与 `browse_only` 的区别是后者是「还没开始写」
+    /// 的软状态(jump_to 可翻成写作),本字段是阅读场景的硬锁。每帧由
+    /// `draw_zen` 置位,不进 `State` 持久化。
+    pub(crate) browse_locked: bool,
     /// 下一帧要落到(块, 块内字符偏移)的光标:跨块 caret 路由的交接点。
     pub pending_caret: Option<(usize, usize)>,
     /// pending_caret 落地时的块内选区(主, 副)。`None` = 塌缩成
@@ -343,6 +348,7 @@ impl LiveState {
         self.active = None;
         self.browse_only = true;
         self.browse_enabled = true;
+        self.browse_locked = false;
         self.pending_caret = None;
         self.pending_range = None;
         self.synced_rev = None;
@@ -479,6 +485,21 @@ fn emoji_probe_id(editor_id: egui::Id) -> egui::Id {
     egui::Id::new("latermd-live-emoji-rects").with(editor_id)
 }
 
+/// 滚动探针的 data 键(P3,与预览 scroll_probe_id 同款,按编辑器 id 分标签)。
+fn scroll_probe_id(editor_id: egui::Id) -> egui::Id {
+    egui::Id::new("latermd-live-scroll").with(editor_id)
+}
+
+/// 滚动探针载荷(仅测试读):帧末滚动偏移 + 视口矩形 + 内容高度。
+/// 生产只写不读,字段读取都活在 `cfg(test)`,非测试构建豁免 dead_code。
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct LiveScrollProbe {
+    offset: f32,
+    viewport: egui::Rect,
+    content_height: f32,
+}
+
 /// 绘制 Live Preview:非活动块富渲染(点击即进入编辑),活动块源码编辑。
 ///
 /// `selection` 是格式工具条的选区镜像出参(与源码模式 `ui::editor` 同一
@@ -549,16 +570,29 @@ pub fn ui(
     // 块内偏移(块区间是字节;`char_to_byte`/`block_containing` 均对过期
     // 目标钳制)。空文档没有可落点,jump_to 已 take 即算消费,不悬置到
     // 将来的文档上。
+    //
+    // D2(live-unify-plan P3):**锁定浏览**(禅定强制浏览)的跳转**只滚动**
+    // —— 不切活动块、不写光标、不抢焦点;目标块画完后由富渲染臂的落地
+    // 分支把块的渲染矩形滚进视口。写作浏览态(未锁定时)维持既有语义:
+    // 跳转即落点与进编辑(#60 goto / #42 大纲的老契约不动)。
     if let Some(char_idx) = cursor.jump_to.take() {
         let byte = editor.char_to_byte(char_idx);
         if let Some(block) = live.block_containing(byte) {
-            let local = editor.byte_to_char(byte) - editor.byte_to_char(live.blocks[block].start);
-            live.active = Some(block);
-            live.browse_only = false;
-            live.pending_caret = Some((block, local));
-            live.pending_range = None;
-            live.caret_follow = true;
-            live.drag_anchor = None;
+            if live.browse_locked {
+                live.pending_caret = Some((block, 0));
+                live.pending_range = None;
+                live.caret_follow = true;
+            } else {
+                let local =
+                    editor.byte_to_char(byte) - editor.byte_to_char(live.blocks[block].start);
+                live.active = Some(block);
+                // 非锁定场景保留原语义:跳转即进编辑(#60 goto / #42 大纲)。
+                live.browse_only = false;
+                live.pending_caret = Some((block, local));
+                live.pending_range = None;
+                live.caret_follow = true;
+                live.drag_anchor = None;
+            }
         }
     }
 
@@ -594,6 +628,8 @@ pub fn ui(
                     if live.browse_only {
                         // 空文档的浏览态没有可渲染块，只显示非编辑提示。双击
                         // 提示后下一帧才创建 TextEdit，避免打开新文档就抢焦点。
+                        // 双击同样过 browse_enabled 闸(P3):禅定强制浏览时
+                        // 双击提示不得进写作 —— 与富块的双击入口同一判定。
                         let response = ui.add(
                             egui::Label::new(
                                 egui::RichText::new("双击此处开始写作")
@@ -601,7 +637,7 @@ pub fn ui(
                             )
                             .sense(egui::Sense::click()),
                         );
-                        if response.double_clicked() {
+                        if response.double_clicked() && live.browse_enabled {
                             live.browse_only = false;
                         }
                     } else {
@@ -1100,6 +1136,20 @@ pub fn ui(
                             egui::pos2(ui.min_rect().left(), top),
                             egui::pos2(ui.min_rect().right(), bottom.max(top + 1.0)),
                         );
+                        // D2 落地(P3):浏览态的跳转在本块画完后只做「滚到
+                        // 目标块」—— 块是富渲染,没有可落的光标,不切活动、
+                        // 不抢焦点,pending 即刻消费。块循环每帧遍历全部块
+                        // (视口剔除只作用于绘制),目标块在屏外的帧同样拿得
+                        // 到 rect,滚动当帧生效。
+                        if live.browse_locked {
+                            if let Some((block, _)) = live.pending_caret {
+                                if block == index {
+                                    live.pending_caret = None;
+                                    live.caret_follow = false;
+                                    ui.scroll_to_rect(rect, None);
+                                }
+                            }
+                        }
                         // 专注模式(#64 M2):非活动块整块蒙一层背景色遮罩(#81
                         // 内联标记半隐藏同款纯绘制 —— 后画覆盖,不注册交互、
                         // 不参与命中测试),淡化块的点击仍走 `clicked_for_edit`
@@ -1166,6 +1216,20 @@ pub fn ui(
     panel
         .ctx()
         .data_mut(|d| d.insert_temp(emoji_probe_id(editor_id), emoji_rects));
+
+    // 滚动探针(P3,照 preview::ScrollProbe 的 data 手法):帧末滚动偏移 +
+    // 视口矩形 + 内容高度,生产只写不读 —— 测试断言「浏览态跳转真的滚动
+    // 了视口」用。
+    panel.ctx().data_mut(|d| {
+        d.insert_temp(
+            scroll_probe_id(editor_id),
+            LiveScrollProbe {
+                offset: scrolled.state.offset.y,
+                viewport: scrolled.inner_rect,
+                content_height: scrolled.content_size.y,
+            },
+        )
+    });
 
     let focus_target_changed = activate.is_some() || route.is_some();
     if let Some((index, local)) = activate.take() {
@@ -5441,6 +5505,92 @@ mod tests {
             on_link.cursor,
             egui::CursorIcon::PointingHand,
             "普通链接的手型不受牵连"
+        );
+    }
+
+    // —— 浏览态跳转「只滚不编辑」(live-unify-plan P3/D2)——
+
+    /// D2:锁定浏览(禅定)下 `cursor.jump_to` **只滚动** —— 不产活动块、
+    /// 不写光标字节、不抢焦点,但视口真的滚到了目标块。非锁定(写作浏览
+    /// 态)维持老语义:跳转即落点与进编辑(#60/#42 的契约不动)。
+    #[test]
+    fn locked_browse_jump_only_scrolls_while_unlocked_still_enters_edit() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+        let mut text = String::new();
+        for i in 0..80 {
+            text.push_str(&format!("段{i:02} 的一行正文。\n\n"));
+        }
+        let target_byte = text.find("段60").expect("文档含目标段");
+
+        let run = |locked: bool, jump: Option<usize>| -> (LiveState, Option<usize>, f32) {
+            let mut editor = EditorBuffer::new(&text);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor {
+                jump_to: jump,
+                ..OutlineCursor::default()
+            };
+            let mut live = LiveState::default();
+            live.sync(&editor, None);
+            live.browse_only = true;
+            live.browse_enabled = !locked;
+            live.browse_locked = locked;
+            let mut selection = None;
+            let mut outbox = Vec::new();
+            let id = egui::Id::new(if locked { "live-locked" } else { "live-open" });
+            for _ in 0..2 {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |panel| {
+                        super::ui(
+                            panel,
+                            &mut editor,
+                            &mut preview,
+                            &AiState::default(),
+                            &mut cursor,
+                            &mut selection,
+                            &mut live,
+                            id,
+                            false,
+                            false,
+                            None,
+                            false,
+                            &crate::keymap::Keymap::builtin(),
+                            &mut outbox,
+                        );
+                    },
+                );
+                output.drop_without_applying_deltas();
+            }
+            let probe = ctx
+                .data(|d| d.get_temp::<LiveScrollProbe>(super::scroll_probe_id(id)))
+                .expect("帧末写了滚动探针");
+            // 视口/high 一起核对:滚到了目标块,且内容确实高于视口
+            // (否则「offset > 0」可能是别的原因)。
+            assert!(probe.viewport.height() > 0.0, "{probe:?}");
+            assert!(
+                probe.content_height > probe.viewport.height(),
+                "内容高于视口:{probe:?}"
+            );
+            (live, cursor.byte, probe.offset)
+        };
+
+        let target_char = text[..target_byte].chars().count();
+        // ① 锁定浏览:不产活动块、不写光标字节,但滚动发生了
+        let (live, cur_byte, offset) = run(true, Some(target_char));
+        assert!(live.active.is_none(), "锁定浏览不进编辑:{live:?}");
+        assert!(live.browse_only, "仍是浏览态");
+        assert_eq!(cur_byte, None, "不写光标字节");
+        assert!(offset > 0.0, "视口滚到了目标块附近:{offset}");
+        // ② 非锁定:照旧切块进编辑(活动块 = 目标块)
+        let (live_open, _, _) = run(false, Some(target_char));
+        assert_eq!(
+            live_open.active,
+            Some(live_open.block_containing(target_byte).unwrap()),
+            "未锁定时跳转仍落块进编辑:{live_open:?}"
         );
     }
 
