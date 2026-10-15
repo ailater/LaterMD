@@ -1151,9 +1151,7 @@ pub(crate) fn new_file_dialog(
 ) -> (egui::Response, egui::Response, bool) {
     let mut buttons = None;
     let mut close = false;
-    egui::Window::new("新建文档")
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ui.ctx().viewport_rect().center())
+    crate::ui::workbench::centered_dialog(ui, "新建文档")
         .collapsible(false)
         .resizable(false)
         .title_bar(false)
@@ -1193,9 +1191,7 @@ pub(crate) fn new_folder_dialog(
 ) -> (egui::Response, egui::Response, bool) {
     let mut buttons = None;
     let mut close = false;
-    egui::Window::new("新建文件夹")
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ui.ctx().viewport_rect().center())
+    crate::ui::workbench::centered_dialog(ui, "新建文件夹")
         .collapsible(false)
         .resizable(false)
         .title_bar(false)
@@ -1232,9 +1228,7 @@ pub(crate) fn rename_dialog(
 ) -> (egui::Response, egui::Response, bool) {
     let mut buttons = None;
     let mut close = false;
-    egui::Window::new("重命名")
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ui.ctx().viewport_rect().center())
+    crate::ui::workbench::centered_dialog(ui, "重命名")
         .collapsible(false)
         .resizable(false)
         .title_bar(false)

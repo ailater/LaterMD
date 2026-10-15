@@ -405,15 +405,11 @@ pub fn dialog(
     } else {
         egui::Frame::window(ui.style()).fill(shell.content)
     };
-    egui::Window::new("设置")
-        // 显式 id(find/goto 浮层同款):egui 0.36 按标题文本派生 Area id,
-        // 标题一改拖动位置记忆就丢;显式 id 让窗口状态与文案解耦,测试也
-        // 能按名取 Area 矩形
+    // 显式 id(find/goto 浮层同款):egui 0.36 按标题文本派生 Area id,
+    // 标题一改拖动位置记忆就丢;显式 id 让窗口状态与文案解耦,测试也
+    // 能按名取 Area 矩形。初始位置(pivot + default_pos)走 centered_dialog。
+    crate::ui::workbench::centered_dialog(ui, "设置")
         .id(egui::Id::new("settings-dialog"))
-        // 首次打开锚定屏幕中心(pivot=窗口中心对齐锚点,与窗口尺寸无关);
-        // 拖动后的位置由 Area 按窗口 id 记忆,不再回中心
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ui.ctx().viewport_rect().center())
         .default_size(crate::ui::tokens::SETTINGS_DEFAULT_SIZE)
         .min_size(if mac {
             egui::vec2(640.0, 420.0)

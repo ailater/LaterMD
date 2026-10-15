@@ -1741,10 +1741,7 @@ fn commit_dialog(ui: &mut egui::Ui, subject: &str) -> (egui::Response, egui::Res
     let ctx = ui.ctx().clone();
     let mut buttons = None;
     let mut close = false;
-    egui::Window::new("AI: commit message")
-        // 固定初始位置:浮窗出现位置可预期(不与菜单栏重叠),拖动后由
-        // Area 记忆保持;显式初始位也让无头测试的帧间位置稳定。
-        .default_pos([80.0, 120.0])
+    let _ = crate::ui::workbench::centered_dialog(ui, "AI: commit message")
         .collapsible(false)
         .resizable(false)
         .title_bar(false)
@@ -1784,10 +1781,9 @@ fn selection_ai_polish_dialog(
     let ctx = ui.ctx().clone();
     let mut buttons = None;
     let mut close = false;
-    egui::Window::new("AI 润色")
-        // 固定初始位与尺寸:浮窗出现位置可预期(commit_dialog 同款),
-        // resizable 允许用户拉大看长草稿。
-        .default_pos([80.0, 120.0])
+    crate::ui::workbench::centered_dialog(ui, "AI 润色")
+        // 默认尺寸定住(居中由 centered_dialog 负责):流式逐块增长时窗
+        // 从中心向四周长,resizable 允许用户拉大看长草稿。
         .default_size([380.0, 240.0])
         .collapsible(false)
         .resizable(true)
@@ -1855,7 +1851,7 @@ pub(crate) fn destructive_confirm_dialog(
     let mut buttons = None;
     let mut close = false;
     let danger = crate::ui::tokens::DANGER;
-    egui::Window::new(title)
+    crate::ui::workbench::centered_dialog(ui, title)
         .title_bar(false)
         .default_width(360.0)
         .collapsible(false)
@@ -4507,18 +4503,25 @@ mod tests {
         let ctx = egui::Context::default();
         let rects = Cell::new((Rect::NOTHING, Rect::NOTHING));
 
-        // 帧 1:单独渲染浮窗拿按钮位置(Area 按 id 记忆,draw 内位置一致)
-        ctx.run_ui(
-            RawInput {
-                screen_rect: Some(test_viewport()),
-                ..Default::default()
-            },
-            |ui| {
-                let (copy, close, _x) = commit_dialog(ui, "docs: 新增README.md");
-                rects.set((copy.rect, close.rect));
-            },
-        )
-        .drop_without_applying_deltas();
+        // 帧 1-2:预热浮窗后拿按钮位置(下同 confirm_dialog_footer_… 那条
+        // 守门的「首帧是 sizing pass」坑)。居中 pivot 让这一点更要紧:
+        // 首帧内容排在 `default_area_size`(400×300)的临时盒子里,盒位由
+        // 尺寸反算,故首帧按钮比稳态偏 130×117px —— 量它等于量一个用户
+        // 看不见(fade-in 内)的中间态。窗从第二帧起按 Area 记忆的稳态
+        // 位置绘制,后面所有帧一致。
+        for _ in 0..2 {
+            ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(test_viewport()),
+                    ..Default::default()
+                },
+                |ui| {
+                    let (copy, close, _x) = commit_dialog(ui, "docs: 新增README.md");
+                    rects.set((copy.rect, close.rect));
+                },
+            )
+            .drop_without_applying_deltas();
+        }
 
         let (copy_center, close_center) = {
             let (copy, close) = rects.get();
@@ -4854,12 +4857,16 @@ mod tests {
         let ctx = egui::Context::default();
         let rects = Cell::new((Rect::NOTHING, Rect::NOTHING));
 
-        // 帧 1:渲染浮窗拿按钮位置(Area 按 id 记忆,draw 内位置一致)
-        ctx.run_ui(RawInput::default(), |ui| {
-            let (confirm, cancel, _x) = checkout_dialog(ui, "a.md", false, false);
-            rects.set((confirm.rect, cancel.rect));
-        })
-        .drop_without_applying_deltas();
+        // 帧 1-2:预热后拿按钮位置(首帧是 sizing pass,居中 pivot 下按钮
+        // 排在临时盒子里,与稳态差上百像素 —— 详见
+        // commit_dialog_copies_and_close_clears_suggestion 的注释)
+        for _ in 0..2 {
+            ctx.run_ui(RawInput::default(), |ui| {
+                let (confirm, cancel, _x) = checkout_dialog(ui, "a.md", false, false);
+                rects.set((confirm.rect, cancel.rect));
+            })
+            .drop_without_applying_deltas();
+        }
 
         let (confirm_center, cancel_center) = {
             let (confirm, cancel) = rects.get();
@@ -4930,6 +4937,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut geo = None;
         let mut heights = Vec::new();
+        let mut confirm_tops: Vec<f32> = Vec::new();
         for _ in 0..4 {
             ctx.run_ui(
                 RawInput {
@@ -4948,6 +4956,7 @@ mod tests {
             .drop_without_applying_deltas();
             let (_, _, rect) = geo.expect("至少跑了一帧");
             heights.push(rect.height());
+            confirm_tops.push(geo.expect("至少跑了一帧").0.top());
         }
         let (confirm, cancel, window) = geo.expect("至少跑了一帧");
         assert!(confirm.right() > cancel.right(), "确认钮在取消钮右侧");
@@ -4967,6 +4976,24 @@ mod tests {
         assert_eq!(heights[1], heights[2], "窗口高度跨帧恒定:{heights:?}");
         assert_eq!(heights[2], heights[3], "窗口高度跨帧恒定:{heights:?}");
         assert!(heights[3] < 360.0, "窗口未被撑高:{heights:?}");
+        // 按钮**位置**跨帧恒定(2026-10-15 居中改版后新增的一条):居中
+        // pivot 让窗位由尺寸反算,若 sizing pass 的收敛没跑完,按钮会随
+        // 窗一起漂 —— 按旧位置采点的测试会点了空气(commit_dialog 那条
+        // 真踩到:首帧按钮偏 130×117px)。这里钉住第二帧起不再动。
+        //
+        // 容差 1.0 = egui `round_ui` 的半像素对齐噪声(实测 465→464),
+        // 不是收敛未完成;收敛完成的强判据是末两帧**精确相等**,单列在
+        // 下一条 —— 只放宽到 1.0 会把「差 1px 一直没停」也放过。
+        assert!(
+            confirm_tops[1..]
+                .iter()
+                .all(|top| (*top - confirm_tops[1]).abs() <= 1.0),
+            "确认钮位置跨帧恒定:{confirm_tops:?}"
+        );
+        assert_eq!(
+            confirm_tops[2], confirm_tops[3],
+            "末两帧完全静止:{confirm_tops:?}"
+        );
     }
 
     /// 标题行 × 关闭钮:与「取消」同语义,完整 draw 下点击发
