@@ -541,38 +541,42 @@ fn chip(
 ///
 /// `file_label` 是目标标签的落盘身份(文件名或「尚未保存」),原样展示在
 /// 浮窗里 —— 既明示本操作**不改盘上文件**的作用范围,也让别名盖住 chip
-/// 后用户仍有地方看见真实文件名。返回(确定, 取消)响应供测试定位
-/// (与 `image_dialog::dialog` 同款手法)。
+/// 后用户仍有地方看见真实文件名。返回(确定, 取消, ×)响应供测试定位
+/// (与 `image_dialog::dialog` 同款手法,× 与「取消」同语义)。
 pub(crate) fn rename_dialog(
     ui: &mut egui::Ui,
     rename: &mut TabRename,
     file_label: &str,
-) -> (egui::Response, egui::Response) {
+) -> (egui::Response, egui::Response, bool) {
     let mut buttons = None;
+    let mut close = false;
     egui::Window::new("重命名标签")
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ui.ctx().viewport_rect().center())
         .collapsible(false)
         .resizable(false)
+        .title_bar(false)
         .frame(crate::ui::workbench::dialog_frame(ui))
         .show(ui.ctx(), |ui| {
+            close = crate::ui::workbench::dialog_header(ui, "重命名标签");
             ui.label("标签显示名");
             ui.text_edit_singleline(&mut rename.draft)
                 .on_hover_text("只改此标签的显示名;文件名与保存路径不变");
             ui.add_space(crate::ui::tokens::SPACE_XS);
             ui.weak(format!("文件:{file_label}(重命名不改动它)"));
-            ui.add_space(crate::ui::tokens::SPACE_SM);
-            ui.separator();
-            ui.horizontal(|ui| {
+            crate::ui::workbench::dialog_footer_divider(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 let ready = !rename.draft.trim().is_empty();
                 let confirm = ui
                     .add_enabled(ready, egui::Button::new("确定"))
                     .on_disabled_hover_text("名称不能为空;不改请点「取消」");
+                ui.add_space(crate::ui::tokens::SPACE_MD);
                 let cancel = ui.button("取消");
                 buttons = Some((confirm, cancel));
             });
         });
-    buttons.expect("浮窗必然绘制确定/取消按钮")
+    let (confirm, cancel) = buttons.expect("浮窗必然绘制确定/取消按钮");
+    (confirm, cancel, close)
 }
 
 #[cfg(test)]
@@ -996,7 +1000,7 @@ mod tests {
             let mut seen = None;
             for _ in 0..3 {
                 let output = ctx.run_ui(RawInput::default(), |ui| {
-                    let (confirm, cancel) = rename_dialog(ui, &mut rename, "a.md");
+                    let (confirm, cancel, _x) = rename_dialog(ui, &mut rename, "a.md");
                     seen = Some((confirm.enabled(), cancel.enabled()));
                 });
                 output.drop_without_applying_deltas();
@@ -1012,7 +1016,7 @@ mod tests {
         let mut confirm_enabled = false;
         for _ in 0..3 {
             let output = ctx.run_ui(RawInput::default(), |ui| {
-                let (confirm, _) = rename_dialog(ui, &mut rename, "a.md");
+                let (confirm, _, _x) = rename_dialog(ui, &mut rename, "a.md");
                 confirm_enabled = confirm.enabled();
             });
             output.drop_without_applying_deltas();

@@ -38,8 +38,8 @@ pub struct ImageDialogState {
     pub bed: Option<String>,
 }
 
-/// 画对话框,返回**(插入, 浏览, 上传, 取消)**四个按钮的响应,测试定位
-/// 用(与 `ui::layout::commit_dialog` 同款手法)。
+/// 画对话框,返回**(插入, 浏览, 上传, 取消, ×)**五个响应,测试定位
+/// 用(与 `ui::layout::commit_dialog` 同款手法,× 与「取消」同语义)。
 ///
 /// 地址为空时禁用「插入」:`![](url)` 里 url 是唯一的实质内容,空着插进去
 /// 只会在预览里留一个破图占位。alt 允许为空 —— 装饰性图片的 alt 本来就
@@ -54,10 +54,12 @@ pub fn dialog(
     egui::Response,
     egui::Response,
     egui::Response,
+    bool,
 ) {
     let mut browse = None;
     let mut upload = None;
     let mut buttons = None;
+    let mut close = false;
     egui::Window::new("插入图片")
         // 首次打开锚定屏幕中心;拖动后由 Area 按窗口 id 记忆保持。显式
         // 锚点让无头测试的帧间位置稳定(viewport_rect 在测试里同样确定)。
@@ -65,8 +67,10 @@ pub fn dialog(
         .default_pos(ui.ctx().viewport_rect().center())
         .collapsible(false)
         .resizable(false)
+        .title_bar(false)
         .frame(crate::ui::workbench::dialog_frame(ui))
         .show(ui.ctx(), |ui| {
+            close = crate::ui::workbench::dialog_header(ui, "插入图片");
             ui.label("替代文字(alt)");
             ui.text_edit_singleline(&mut draft.alt)
                 .on_hover_text("图片加载失败时显示的文字;装饰性图片可留空");
@@ -117,9 +121,11 @@ pub fn dialog(
                     ),
                 );
             });
-            ui.horizontal(|ui| {
+            crate::ui::workbench::dialog_footer_divider(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 let ready = !draft.url.trim().is_empty();
                 let insert = ui.add_enabled(ready, egui::Button::new("插入"));
+                ui.add_space(crate::ui::tokens::SPACE_MD);
                 let cancel = ui.button("取消");
                 buttons = Some((insert, cancel));
             });
@@ -130,6 +136,7 @@ pub fn dialog(
         browse.expect("浮窗必然绘制浏览按钮"),
         upload.expect("浮窗必然绘制上传按钮"),
         cancel,
+        close,
     )
 }
 
@@ -162,7 +169,7 @@ mod tests {
                 let mut seen = None;
                 for _ in 0..3 {
                     let output = ctx.run_ui(RawInput::default(), |ui| {
-                        let (insert, browse, upload, cancel) = dialog(ui, &mut draft, beds);
+                        let (insert, browse, upload, cancel, _x) = dialog(ui, &mut draft, beds);
                         seen = Some((
                             insert.enabled(),
                             browse.enabled(),
@@ -204,7 +211,7 @@ mod tests {
         let mut upload_enabled = true;
         for _ in 0..3 {
             let output = ctx.run_ui(RawInput::default(), |ui| {
-                let (_, _, upload, _) = dialog(ui, &mut draft, &[]);
+                let (_, _, upload, _, _x) = dialog(ui, &mut draft, &[]);
                 upload_enabled = upload.enabled();
             });
             output.drop_without_applying_deltas();
