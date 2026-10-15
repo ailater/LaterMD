@@ -301,12 +301,11 @@ pub fn dialog(ui: &mut egui::Ui, about: &AboutState, outbox: &mut Vec<Message>) 
         });
 
     let mut open = true;
-    // 窗底、边界和内距统一走工作台浮窗卡片样式。
-    egui::Window::new("关于 LaterMD")
+    // 窗底、边界和内距统一走工作台浮窗卡片样式;初始位置走
+    // centered_dialog(显式 id 让拖动位置记忆与文案解耦)。
+    crate::ui::workbench::centered_dialog(ui, "关于 LaterMD")
         // 显式 id(设置窗同款):窗口拖动位置记忆与文案解耦
         .id(egui::Id::new("about-dialog"))
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(screen.center())
         .min_width(ABOUT_MIN_W)
         .collapsible(false)
         .resizable(false)

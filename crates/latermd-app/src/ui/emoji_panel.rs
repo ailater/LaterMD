@@ -507,10 +507,7 @@ pub fn panel(
             .unwrap_or_default()
     });
     let mut cells = Vec::new();
-    egui::Window::new("插入 Emoji")
-        // 与 image_dialog 同款:首帧锚定屏幕中心,拖动后由 Area 记忆保持
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ui.ctx().viewport_rect().center())
+    crate::ui::workbench::centered_dialog(ui, "插入 Emoji")
         .collapsible(false)
         .resizable(false)
         .frame(crate::ui::workbench::dialog_frame(ui))

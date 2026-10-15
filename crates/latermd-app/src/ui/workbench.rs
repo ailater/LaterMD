@@ -266,6 +266,26 @@ pub(crate) fn dialog_frame(ui: &egui::Ui) -> egui::Frame {
         })
 }
 
+/// 弹窗统一的**初始位置**:视口正中。
+///
+/// 全项目弹窗都从这里起手([`dialog_frame`] 配套),别再各写各的:
+/// 漏 `pivot` 会让 egui 按**左上角**对齐锚点(窗向右下偏出屏幕),完全不
+/// 设位置则落到 `automatic_area_position` 的层叠算法上(同一屏开过几个
+/// 弹窗后,新弹窗会叠在前一个上面),而硬编码 `[80,120]` 会在宽屏上偏到
+/// 左上角 —— 这三种都实测踩过。
+///
+/// 用 `default_pos` 而非 `fixed_pos`:居中是**首次打开**的落点,用户拖走
+/// 后由 Area 按窗口 id 记忆(与 macOS/VS Code 一致),关掉再开才回到中间。
+/// 真要每帧钉死在某处(find/goto 浮卡那样)才用 `fixed_pos`,但那会连带
+/// `movable(false)`,拖不动。
+pub(crate) fn centered_dialog<'a>(ui: &egui::Ui, title: &'a str) -> egui::Window<'a> {
+    // pivot 决定锚点落在窗的哪一角:居中锚点 + 视口中心 = 窗口居中,
+    // 与窗口实际尺寸无关(默认 LEFT_TOP 会让窗往右下甩)。
+    egui::Window::new(title)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ui.ctx().viewport_rect().center())
+}
+
 /// 对话框标题行(现代 Web 弹窗式):加粗标题居左,× 关闭钮居右,下方
 /// 一条细分隔线把标题区与正文分开。返回 × 是否被点 —— 与 footer 的
 /// 「取消」同语义,由调用方并入取消通路(浮窗本身不发消息)。
@@ -773,6 +793,122 @@ pub fn navigation(ui: &mut egui::Ui, active: SidebarTab, outbox: &mut Vec<Messag
 mod tests {
     use super::*;
     use egui::{Event, Modifiers, PointerButton, Pos2};
+
+    /// 弹窗初始位置守门:首次打开必须**几何居中**于视口。
+    ///
+    /// 判据是窗口矩形中心与视口中心的距离,而不是「pivot 设了没有」——
+    /// 后者会被实现细节(谁调 helper)牵着走,前者是用户实际看到的东西。
+    /// 覆盖两类历史坑:① 只给 `default_pos` 不给 `pivot`(锚点落在左上角,
+    /// 整窗向右下甩);② 干脆不设位置(落到 `automatic_area_position` 的
+    /// 层叠位)。两个尺寸差异极大的弹窗都测:窄高(AI 润色 380×240)与
+    /// 宽矮(commit),两者偏了才会暴露「按宽度对半」的错误实现。
+    #[test]
+    fn centered_dialog_lands_window_center_on_viewport_center() {
+        for title in ["AI: commit message", "AI 润色", "关闭标签"] {
+            let ctx = egui::Context::default();
+            let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
+            let mut win = None;
+            // 跑两帧:首帧是 sizing pass,Area 尺寸此时才落定
+            for _ in 0..2 {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(viewport),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        centered_dialog(ui, title)
+                            .resizable(false)
+                            .show(ui.ctx(), |ui| {
+                                ui.label("正文");
+                            });
+                        win = ui.ctx().memory(|m| m.area_rect(egui::Id::new(Some(title))));
+                    },
+                )
+                .drop_without_applying_deltas();
+            }
+            let win = win.expect("浮窗 Area 已注册");
+            // 容差 1.0 而非 0:egui 的 `round_ui` 把坐标对齐到半像素网格
+            // (`left_top_pos` 走它),奇数尺寸的窗会差 0.5px,视觉不可见。
+            let drift = (win.center() - viewport.center()).length();
+            assert!(
+                drift <= 1.0,
+                "{title} 未居中:窗中心 {:?} vs 视口中心 {:?}(偏移 {drift:.2})",
+                win.center(),
+                viewport.center()
+            );
+        }
+    }
+
+    /// 反向守门:所有**弹窗**都必须经 `centered_dialog` 起手,漏一处就
+    /// 会退回自动布局/角落硬编码。用源码扫描兜住「新加弹窗忘了居中」——
+    /// 这类退化编译器不管,只有几何断言会,而几何断言逐个弹窗写一遍成本
+    /// 太高。**浮卡例外**:find / goto 浮层是贴编辑器右上角的工具卡
+    /// (`fixed_pos` + `RIGHT_TOP` pivot),不是弹窗,居中反而是错的。
+    #[test]
+    fn every_dialog_window_starts_from_centered_dialog() {
+        /// 例外:① 编辑器浮卡(工具卡贴边,居中即错),按浮窗标题白名单
+        /// 放行;② helper 自身的 `Window::new(title)`(非字面量标题)。
+        const OVERLAY_CARDS: [&str; 2] = ["文档内查找", "跳转到行"];
+        const SELF: &str = "<非字面量标题>";
+
+        /// 递归收集 `src/` 下所有 `.rs`(子目录必须下潜:第一版只扫顶层,
+        /// `src/ui/` 整个漏掉,改坏 `ui/tabs.rs` 的弹窗测试照样绿 ——
+        /// 「守门没守住」比没守门更坏,靠红绿验证才发现)。
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        assert!(!files.is_empty(), "src 下没扫到 .rs 文件(路径失效?)");
+
+        let mut offenders = Vec::new();
+        for path in files {
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (i, line) in src.lines().enumerate() {
+                let trimmed = line.trim();
+                if !trimmed.starts_with("egui::Window::new(") {
+                    continue;
+                }
+                // 解析窗口标题字面量(形如 egui::Window::new("设置"));
+                // 解析不出字面量 = 形参标题,只可能是 helper 自己
+                let title = trimmed
+                    .split_once('"')
+                    .and_then(|(_, rest)| rest.split_once('"'))
+                    .map(|(title, _)| title)
+                    .unwrap_or(SELF);
+                if OVERLAY_CARDS.contains(&title) || title == SELF {
+                    continue;
+                }
+                offenders.push(format!(
+                    "{}:{}:{}",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    i + 1,
+                    title
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "这些弹窗没用 centered_dialog(会飘到角落/自动层叠位):{}",
+            offenders.join(", ")
+        );
+    }
 
     fn click(pos: Pos2) -> Vec<Event> {
         vec![

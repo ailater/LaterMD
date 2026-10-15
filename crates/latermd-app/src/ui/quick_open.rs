@@ -230,11 +230,7 @@ pub fn panel(
             .memory_mut(|memory| memory.request_focus(input_id()));
     }
 
-    let window = egui::Window::new("快速打开")
-        // 与 image_dialog / emoji_panel 同款:首帧锚定屏幕中心,显式锚点
-        // 让无头测试的帧间位置稳定
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ui.ctx().viewport_rect().center())
+    let window = crate::ui::workbench::centered_dialog(ui, "快速打开")
         .collapsible(false)
         .frame(crate::ui::workbench::dialog_frame(ui))
         // COMMON 尺寸铁律:宽度定死、高度封顶自适应,列表限高滚动不撑窗
