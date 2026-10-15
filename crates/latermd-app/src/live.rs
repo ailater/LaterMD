@@ -507,6 +507,12 @@ struct LiveScrollProbe {
 /// 持久 state,每帧抄出(文档坐标字符区间);无活动块 = 无选区,置 `None`。
 ///
 /// 返回活动块 TextEdit 的响应(没有活动块时返回一块占位区域,便于测试定位)。
+///
+/// **同一文档可以被两个实例同时渲染**(写作列 + 只读对照列),前提是二者
+/// 各自持有 `LiveState` 与 `editor_id` —— 前者避免共享可写状态,后者让
+/// vendored 的 per-label 缓存与逐帧命中表落在互不干扰的 id 命名空间里。
+/// 本函数内部已按 `editor_id` 派生全部派生 id(滚动、`MarkdownLabel`、
+/// 活动块 TextEdit),调用方无需再手工加盐。
 #[allow(clippy::too_many_arguments)]
 pub fn ui(
     panel: &mut egui::Ui,
@@ -617,7 +623,9 @@ pub fn ui(
 
     let scrolled =
         egui::ScrollArea::vertical()
-            .id_salt("live-preview")
+            // id 必须带 `editor_id`:同一文档可能被两个实例渲染(主写作列 +
+            // 只读对照列),写死常量会让两列的滚动状态缠在一起。
+            .id_salt(editor_id.with("live-scroll"))
             .auto_shrink([false, false])
             .show(panel, |ui| {
                 // 块间节奏完全由 [`block_gap`] 前距决定(与右栏预览同口径,
@@ -3231,6 +3239,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn live_scroll_frame(
         ctx: &egui::Context,
+        id: egui::Id,
         time: f64,
         events: Vec<egui::Event>,
         editor: &mut EditorBuffer,
@@ -3241,7 +3250,7 @@ mod tests {
         show_focus: bool,
     ) -> Option<egui::Rect> {
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let mut id = egui::Id::NULL;
+        let mut response_id = egui::Id::NULL;
         let mut outbox = Vec::new();
         let mut selection_mirror = None;
         let output = ctx.run_ui(
@@ -3252,7 +3261,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                id = super::ui(
+                response_id = super::ui(
                     ui,
                     editor,
                     preview,
@@ -3260,7 +3269,7 @@ mod tests {
                     cursor,
                     &mut selection_mirror,
                     live,
-                    egui::Id::new(SCROLL_EDITOR_ID),
+                    id,
                     show_typewriter,
                     show_focus,
                     None,
@@ -3272,7 +3281,7 @@ mod tests {
             },
         );
         output.drop_without_applying_deltas();
-        ctx.read_response(id).map(|response| response.rect)
+        ctx.read_response(response_id).map(|response| response.rect)
     }
 
     /// 光标行的屏幕 y:块内字符偏移 → 行号 × 行高。行高用「矩形高 / 行
@@ -3317,6 +3326,7 @@ mod tests {
         live.caret_follow = false;
         let top0 = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.0,
             Vec::new(),
             &mut editor,
@@ -3347,6 +3357,7 @@ mod tests {
         // 点击→按键间隔 ≥100ms,早跨过这一帧;测试按真实输入节奏驱动。
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.05,
             Vec::new(),
             &mut editor,
@@ -3359,6 +3370,7 @@ mod tests {
         for i in 0..45 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 0.1 + f64::from(i) * 0.1,
                 vec![down.clone()],
                 &mut editor,
@@ -3373,6 +3385,7 @@ mod tests {
         for i in 0..3 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 6.0 + f64::from(i) * 0.1,
                 Vec::new(),
                 &mut editor,
@@ -3385,6 +3398,7 @@ mod tests {
         }
         let rect = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             6.4,
             Vec::new(),
             &mut editor,
@@ -3429,6 +3443,7 @@ mod tests {
         live.caret_follow = false;
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.0,
             Vec::new(),
             &mut editor,
@@ -3450,6 +3465,7 @@ mod tests {
         for i in 0..10 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 0.1 + f64::from(i) * 0.1,
                 vec![egui::Event::PointerMoved(pointer), wheel(-120.0)],
                 &mut editor,
@@ -3464,6 +3480,7 @@ mod tests {
         for i in 0..3 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 1.5 + f64::from(i) * 0.1,
                 vec![egui::Event::PointerMoved(pointer)],
                 &mut editor,
@@ -3476,6 +3493,7 @@ mod tests {
         }
         let settled = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             1.9,
             Vec::new(),
             &mut editor,
@@ -3493,6 +3511,7 @@ mod tests {
         for i in 0..6 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 3.0 + f64::from(i) * 0.1,
                 Vec::new(),
                 &mut editor,
@@ -3505,6 +3524,7 @@ mod tests {
         }
         let after = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             3.7,
             Vec::new(),
             &mut editor,
@@ -3543,6 +3563,7 @@ mod tests {
         live.caret_follow = false;
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.0,
             Vec::new(),
             &mut editor,
@@ -3556,6 +3577,7 @@ mod tests {
         // ↑ 在块首 → 路由到段落块末尾
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.1,
             vec![arrow(egui::Key::ArrowUp)],
             &mut editor,
@@ -3575,6 +3597,7 @@ mod tests {
         // 落地帧:光标写进块 0 持久 state + 同帧请求滚动 + 焦点转移
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.2,
             Vec::new(),
             &mut editor,
@@ -3600,6 +3623,7 @@ mod tests {
         for time in [0.21, 0.22] {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 time,
                 Vec::new(),
                 &mut editor,
@@ -3612,6 +3636,7 @@ mod tests {
         }
         let top_next = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.23,
             Vec::new(),
             &mut editor,
@@ -3632,6 +3657,7 @@ mod tests {
         for time in [1.0, 1.5, 2.0] {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 time,
                 Vec::new(),
                 &mut editor,
@@ -3644,6 +3670,7 @@ mod tests {
         }
         let rect = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             2.1,
             Vec::new(),
             &mut editor,
@@ -3686,6 +3713,7 @@ mod tests {
         let mut live = LiveState::default();
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.0,
             Vec::new(),
             &mut editor,
@@ -3711,6 +3739,7 @@ mod tests {
         cursor.jump_to = Some(editor.byte_to_char(heading_byte));
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.1,
             Vec::new(),
             &mut editor,
@@ -3738,6 +3767,7 @@ mod tests {
         for time in [0.11, 0.12] {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 time,
                 Vec::new(),
                 &mut editor,
@@ -3750,6 +3780,7 @@ mod tests {
         }
         let top_next = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.13,
             Vec::new(),
             &mut editor,
@@ -3773,6 +3804,7 @@ mod tests {
         for time in [1.0, 1.5, 2.0] {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 time,
                 Vec::new(),
                 &mut editor,
@@ -3785,6 +3817,7 @@ mod tests {
         }
         let rect = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             2.1,
             Vec::new(),
             &mut editor,
@@ -3842,6 +3875,7 @@ mod tests {
         live.caret_follow = false;
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.0,
             Vec::new(),
             &mut editor,
@@ -3854,6 +3888,7 @@ mod tests {
         // 空转一帧再进导航键(set_focus_lock_filter,既有口径)
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.05,
             Vec::new(),
             &mut editor,
@@ -3867,6 +3902,7 @@ mod tests {
         for i in 0..45 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 0.1 + f64::from(i) * 0.1,
                 vec![down.clone()],
                 &mut editor,
@@ -3880,6 +3916,7 @@ mod tests {
         for t in [6.2, 6.3] {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 t,
                 Vec::new(),
                 &mut editor,
@@ -3892,6 +3929,7 @@ mod tests {
         }
         let rect = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             6.4,
             Vec::new(),
             &mut editor,
@@ -3938,6 +3976,7 @@ mod tests {
         live.caret_follow = false;
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.0,
             Vec::new(),
             &mut editor,
@@ -3950,6 +3989,7 @@ mod tests {
         // 焦点锁过滤帧
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.05,
             Vec::new(),
             &mut editor,
@@ -3973,6 +4013,7 @@ mod tests {
         for _ in 0..30 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 t,
                 vec![enter.clone()],
                 &mut editor,
@@ -3986,6 +4027,7 @@ mod tests {
             for _ in 0..2 {
                 let _ = live_scroll_frame(
                     &ctx,
+                    egui::Id::new(SCROLL_EDITOR_ID),
                     t,
                     Vec::new(),
                     &mut editor,
@@ -4002,6 +4044,7 @@ mod tests {
         for _ in 0..3 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 t,
                 Vec::new(),
                 &mut editor,
@@ -4015,6 +4058,7 @@ mod tests {
         }
         let rect = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             t,
             Vec::new(),
             &mut editor,
@@ -4061,6 +4105,7 @@ mod tests {
         live.caret_follow = false;
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.0,
             Vec::new(),
             &mut editor,
@@ -4072,6 +4117,7 @@ mod tests {
         );
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             0.05,
             Vec::new(),
             &mut editor,
@@ -4085,6 +4131,7 @@ mod tests {
         for i in 0..45 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 0.1 + f64::from(i) * 0.1,
                 vec![down.clone()],
                 &mut editor,
@@ -4098,6 +4145,7 @@ mod tests {
         for t in [6.2, 6.3, 6.4] {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 t,
                 Vec::new(),
                 &mut editor,
@@ -4125,6 +4173,7 @@ mod tests {
         for i in 0..8 {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 6.5 + f64::from(i) * 0.1,
                 vec![egui::Event::PointerMoved(pointer), wheel(-120.0)],
                 &mut editor,
@@ -4137,6 +4186,7 @@ mod tests {
         }
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             7.4,
             Vec::new(),
             &mut editor,
@@ -4148,6 +4198,7 @@ mod tests {
         );
         let settled = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             7.5,
             Vec::new(),
             &mut editor,
@@ -4167,6 +4218,7 @@ mod tests {
         for i in 0..5 {
             let after = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 8.0 + f64::from(i) * 0.1,
                 Vec::new(),
                 &mut editor,
@@ -4187,6 +4239,7 @@ mod tests {
         // 下一次导航帧:恢复 Follow,光标行回目标带
         let _ = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             9.0,
             vec![down],
             &mut editor,
@@ -4199,6 +4252,7 @@ mod tests {
         for t in [9.1, 9.2, 9.3, 9.4] {
             let _ = live_scroll_frame(
                 &ctx,
+                egui::Id::new(SCROLL_EDITOR_ID),
                 t,
                 Vec::new(),
                 &mut editor,
@@ -4211,6 +4265,7 @@ mod tests {
         }
         let rect = live_scroll_frame(
             &ctx,
+            egui::Id::new(SCROLL_EDITOR_ID),
             9.5,
             Vec::new(),
             &mut editor,
@@ -5807,5 +5862,192 @@ mod tests {
             "ai:// 点击应经 Live handler 产出流式续写消息"
         );
         assert!(browse_kept, "点击归链接,浏览态不连带切入编辑");
+    }
+
+    // —— 同一文档渲两份(三态视图 PR1 的可重入化)——
+
+    /// 两个实例(主写作列 + 只读对照列)同帧渲染同一份文档:**各自的逐帧
+    /// 命中表不被对方清掉**。
+    ///
+    /// vendored 的 `MarkdownLabel` 把块表与命中 galley 按 label id 单槽
+    /// 存放,并在每次 `render` 开头清空。两列的 label id 由各自的
+    /// `editor_id` 派生(见 [`super::ui`] 的 id 约定),因此先画的那一列
+    /// 在帧末仍能读到自己的记录 —— 否则 `click_caret_local` 会退化到
+    /// 「落块尾」的兜底。
+    #[test]
+    fn two_instances_keep_their_own_hit_tables() {
+        let ctx = egui::Context::default();
+        let doc = "第一段正文，用于命中定位。\n\n第二段正文。\n";
+        let mut editor = EditorBuffer::new(doc);
+        let mut preview = PreviewState::new(&editor);
+        let mut main_live = LiveState::default();
+        let mut right_live = LiveState::default();
+        for live in [&mut main_live, &mut right_live] {
+            live.browse_only = true;
+            live.browse_enabled = false;
+            live.browse_locked = true;
+        }
+        let main_id = egui::Id::new("main-column");
+        // 对照列:同一派生规则、不同命名空间(tab_id 之外的 salt)
+        let right_id = egui::Id::new("compare-column").with(1_u64);
+
+        // 两列先后渲染(只读对照列在后,与生产顺序一致)
+        let run = |editor: &mut EditorBuffer,
+                   preview: &mut PreviewState,
+                   live: &mut LiveState,
+                   id: egui::Id|
+         -> (Vec<egui::Rect>, Vec<String>) {
+            let mut outbox = Vec::new();
+            let mut selection = None;
+            let mut cursor = OutlineCursor::default();
+            let mut hit_after = Vec::new();
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let _ = super::ui(
+                    ui,
+                    editor,
+                    preview,
+                    &AiState::default(),
+                    &mut cursor,
+                    &mut selection,
+                    live,
+                    id,
+                    false,
+                    false,
+                    None,
+                    false,
+                    &crate::keymap::Keymap::builtin(),
+                    &mut outbox,
+                );
+                // 帧内读取:本列刚画完,块表应仍在;后画的另一列不得清掉它
+                hit_after = egui_markdown::block_span_rects(ui, id.with(("live-render", 0)))
+                    .map(|entries| entries.into_iter().map(|entry| entry.rect).collect())
+                    .unwrap_or_default();
+            });
+            let texts: Vec<String> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+            output.drop_without_applying_deltas();
+            (hit_after, texts)
+        };
+        let (main_blocks, main_texts) = run(&mut editor, &mut preview, &mut main_live, main_id);
+        assert!(!main_blocks.is_empty(), "主列渲出块几何:{main_texts:?}");
+        let (right_blocks, right_texts) = run(&mut editor, &mut preview, &mut right_live, right_id);
+        assert!(!right_blocks.is_empty(), "对照列渲出块几何:{right_texts:?}");
+        // 再渲一次主列:它的块表必须仍然可读(证明两列 id 不串台)
+        let (main_again, _) = run(&mut editor, &mut preview, &mut main_live, main_id);
+        assert!(
+            !main_again.is_empty(),
+            "后画的对照列没清掉主列的命中表:{main_texts:?}"
+        );
+        // 关键断言:两列的 id 不相撞
+        assert_ne!(
+            main_id.with(("live-render", 0)),
+            right_id.with(("live-render", 0)),
+            "两列的块 label id 必须不同"
+        );
+        assert!(
+            !main_texts.is_empty() && !right_texts.is_empty(),
+            "两列都真的画出了内容"
+        );
+    }
+
+    /// 两列的滚动状态互相独立(`ScrollArea` id 带 `editor_id`):只给其中一列
+    /// 下跳转目标,另一列必须停在原处。写死 id 时两列共用一份 ScrollArea
+    /// 记忆,表现为「翻对照列,主编辑区跟着跳」。
+    ///
+    /// 取证路径与 P3/D2 的 `locked_browse_jump_*` 同一条(经 `cursor.jump_to`
+    /// → 锁定浏览落地分支 → 块级滚动),只读帧末探针。
+    #[test]
+    fn two_instances_have_independent_scroll_state() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+        let mut text = String::new();
+        for i in 0..80 {
+            text.push_str(&format!(
+                "段{i:02} 的一行正文。
+
+"
+            ));
+        }
+        let target_byte = text.find("段60").expect("文档含目标段");
+        let target_char = text[..target_byte].chars().count();
+        let main_id = egui::Id::new("compare-main");
+        let right_id = egui::Id::new("compare-column").with(1_u64);
+
+        let run = |editor: &mut EditorBuffer,
+                   preview: &mut PreviewState,
+                   live: &mut LiveState,
+                   id: egui::Id,
+                   jump: Option<usize>|
+         -> f32 {
+            live.sync(editor, None);
+            live.browse_only = true;
+            live.browse_enabled = false;
+            live.browse_locked = true;
+            let mut cursor = OutlineCursor {
+                jump_to: jump,
+                ..OutlineCursor::default()
+            };
+            let mut selection = None;
+            let mut outbox = Vec::new();
+            for _ in 0..2 {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |panel| {
+                        let _ = super::ui(
+                            panel,
+                            editor,
+                            preview,
+                            &AiState::default(),
+                            &mut cursor,
+                            &mut selection,
+                            live,
+                            id,
+                            false,
+                            false,
+                            None,
+                            false,
+                            &crate::keymap::Keymap::builtin(),
+                            &mut outbox,
+                        );
+                    },
+                );
+                output.drop_without_applying_deltas();
+            }
+            ctx.data(|d| {
+                d.get_temp::<LiveScrollProbe>(super::scroll_probe_id(id))
+                    .map(|probe| probe.offset)
+                    .unwrap_or(-1.0)
+            })
+        };
+
+        let mut editor = EditorBuffer::new(&text);
+        let mut preview = PreviewState::new(&editor);
+        let mut main_live = LiveState::default();
+        let mut right_live = LiveState::default();
+        let main_offset = run(
+            &mut editor,
+            &mut preview,
+            &mut main_live,
+            main_id,
+            Some(target_char),
+        );
+        let right_offset = run(&mut editor, &mut preview, &mut right_live, right_id, None);
+        assert!(
+            main_offset > 0.0,
+            "主列收到跳转目标 ⇒ 偏移 > 0(实测 {main_offset})"
+        );
+        assert_eq!(
+            right_offset, 0.0,
+            "对照列从未收到目标 ⇒ 停在原处(共用记忆时会被主列带走)"
+        );
     }
 }

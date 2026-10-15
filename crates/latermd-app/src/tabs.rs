@@ -116,6 +116,14 @@ pub struct TabState {
     pub pending_selection: Option<(usize, usize)>,
     /// Live Preview 的块表与活动块(仅在 Live 模式下使用)。
     pub live: LiveState,
+    /// 只读对照列的块表(三态视图的「源码+对照」右栏)。
+    ///
+    /// **必须是独立的一份**:它与 [`Self::live`] 渲染同一份缓冲,却各有自己的
+    /// id 命名空间(对照列传入独立的 editor id)。共用会让
+    /// vendored 的 per-label 布局缓存与逐帧命中表互相清除,且只读列的写入会
+    /// 移动主编辑区的可编辑块。浏览标志由使用方每帧置位,与禅定的临时浏览
+    /// 同款手法。
+    pub live_right: LiveState,
 }
 
 impl TabState {
@@ -125,6 +133,10 @@ impl TabState {
         let mut live = LiveState::default();
         live.browse_only = true;
         live.browse_enabled = true;
+        // 只读对照列同一套初值:浏览优先,等使用方按模式接管。
+        let mut live_right = LiveState::default();
+        live_right.browse_only = true;
+        live_right.browse_enabled = true;
         Self {
             id,
             alias: None,
@@ -140,6 +152,7 @@ impl TabState {
             selection: None,
             pending_selection: None,
             live,
+            live_right,
             editor,
         }
     }
@@ -159,6 +172,7 @@ impl TabState {
         self.document.notice = None;
         self.preview.rebuild(&self.editor);
         self.live.reset();
+        self.live_right.reset();
         let kept_draft = self.autosave.draft_path.take();
         self.autosave = TabAutosave {
             draft_path: kept_draft,
