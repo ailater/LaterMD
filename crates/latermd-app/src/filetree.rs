@@ -80,6 +80,11 @@ pub struct RenameDraft {
     pub from: PathBuf,
     /// 新名字草稿。
     pub draft: String,
+    /// 输入框还没做过「聚焦 + 选中主体」(2026-10-15 UX:开框即可打字,
+    /// 且只选主体不选扩展名)。UI 首帧消费后置 false —— 判据放状态里
+    /// 而非 egui 的焦点记忆,因为焦点是我们自己请求的,拿它当「已处理」
+    /// 会每帧重设选区、吃掉用户输入。
+    pub focus_pending: bool,
 }
 
 /// 新建文件浮窗的输入状态(#see `Message::FileTreeNewFileRequested` 的
@@ -93,6 +98,23 @@ pub struct NewFileDraft {
     pub dir: PathBuf,
     /// 文件名草稿(可带可不带 `.md`,`create_markdown` 会补)。
     pub draft: String,
+    /// 同 [`RenameDraft::focus_pending`]:空输入框只需聚焦不需选区。
+    pub focus_pending: bool,
+}
+
+/// 文件名的**主体**字符数(不含扩展名):`CHANGELOG.md` → 9、`a.b.c` → 1、
+/// 无扩展名 → 全长。用于「选中主体、保留后缀」的初始选区
+/// ([`crate::ui::workbench::focus_and_select_stem`])。
+///
+/// 认最后一段点号而非「最后一个点」:`a.b.c` 的主体是 `a.b`,只把最后
+/// 一段当扩展名会把主体缩成 `a.b` 之外的误选区。点号打头的隐藏文件
+/// (`.gitignore`)没有主体,此时全选(返回全长)比选空更合理。
+pub fn stem_char_len(name: &str) -> usize {
+    let stem = match name.rfind('.') {
+        Some(0) | None => name,
+        Some(i) => &name[..i],
+    };
+    stem.chars().count()
 }
 
 impl FileTreeState {

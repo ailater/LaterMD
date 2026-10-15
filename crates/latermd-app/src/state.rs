@@ -3691,7 +3691,11 @@ impl State {
         if let Some(tab) = self.tabs.tabs.get(index) {
             let tab_id = tab.id;
             let draft = tab.label_base();
-            self.tabs.rename = Some(crate::tabs::TabRename { tab_id, draft });
+            self.tabs.rename = Some(crate::tabs::TabRename {
+                tab_id,
+                draft,
+                focus_pending: true,
+            });
         }
     }
 
@@ -3942,7 +3946,11 @@ impl State {
             return;
         };
         let draft = unique_draft(&dir, NEW_FILE_BASE_NAME);
-        self.file_tree.new_file = Some(crate::filetree::NewFileDraft { dir, draft });
+        self.file_tree.new_file = Some(crate::filetree::NewFileDraft {
+            dir,
+            draft,
+            focus_pending: true,
+        });
     }
 
     /// 确认新建:落盘空 Markdown → 失效该目录树缓存(否则本会话看不见)→
@@ -3978,7 +3986,11 @@ impl State {
             return;
         };
         let draft = unique_draft(&dir, "新建文件夹");
-        self.file_tree.new_folder = Some(crate::filetree::NewFileDraft { dir, draft });
+        self.file_tree.new_folder = Some(crate::filetree::NewFileDraft {
+            dir,
+            draft,
+            focus_pending: true,
+        });
     }
 
     /// 确认新建文件夹:落盘目录 → 失效缓存 → 展开到它。失败只落提示行,
@@ -4009,6 +4021,7 @@ impl State {
         self.file_tree.rename = Some(crate::filetree::RenameDraft {
             from: path,
             draft: name,
+            focus_pending: true,
         });
     }
 
@@ -6623,6 +6636,7 @@ mod tests {
         state.file_tree.new_file = Some(crate::filetree::NewFileDraft {
             dir: gone.clone(),
             draft: "x".to_owned(),
+            focus_pending: true,
         });
         std::fs::remove_dir_all(&gone).unwrap();
         state.apply(Message::FileTreeNewFileConfirmed);

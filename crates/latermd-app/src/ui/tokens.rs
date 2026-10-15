@@ -236,8 +236,7 @@ pub mod gap {
 // 守门测试本身就是消费方,cfg(test) 下裸 expect 会 unfulfilled。
 pub mod inset {
     /// 控件内容到自身边框的贴边:盒子最里面的一圈。
-    // 暂无生产消费者;接线后摘除。
-    #[cfg_attr(not(test), expect(dead_code))]
+    /// 消费方:弹窗路径 chip(`workbench::path_chip`)的内距。
     pub const SM: f32 = 4.0;
     /// 内容区到分组/面板边界的贴边。
     pub const MD: f32 = 8.0;
@@ -351,6 +350,21 @@ pub fn rail_fill(dark: bool) -> egui::Color32 {
 pub const WARN: Color32 = Color32::from_rgb(0xEB, 0xB4, 0x3C);
 /// 不可逆警示(与回滚确认文案同档红)。
 pub const DANGER: Color32 = Color32::from_rgb(0xEB, 0x60, 0x60);
+/// 警示条里的**文字**档(2026-10-15 坤哥「别让大段文字全是高亮红」):
+/// 比 [`DANGER`] 浅一档 —— 实心红按钮上白字已经够重,警示条里再来一遍
+/// 饱和红,整个框会「抢戏」到盖过标题。
+///
+/// 口径取 Element Plus 的 `#f56c6c`(danger 的浅色文字档,与实心
+/// `#f56c6c`/`#f56c6c` 按钮同族),但**不写死**:暗色皮肤下这个浅红在
+/// 深底上对比不足,故按明暗两套取 —— 浅色 `#f56c6c`,暗色提亮到能读
+/// 的档(仍在红相内,不偏橙)。判据是对底色的可辨度,不是「比浅色再浅」。
+pub fn danger_text(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(0xF2, 0x8B, 0x8B)
+    } else {
+        Color32::from_rgb(0xF5, 0x6C, 0x6C)
+    }
+}
 /// 成功 / 已配置态。
 pub const OK: Color32 = Color32::from_rgb(0x60, 0xC8, 0x78);
 

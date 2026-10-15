@@ -122,7 +122,65 @@ pub enum Icon {
     /// 错位。与 `Copy`/`Restore` 的区分靠那枚实心块 —— 纯线条错位双框
     /// 已经被复制/还原占用,一空一实才是「写入替换」的语义。
     ReplaceAll,
+    // —— 弹窗警告条(2026-10-15)——
+    /// 警告:圆角三角 + 内嵌感叹号(危险提示条前缀)。
+    ///
+    /// **自绘而非 ⚠️ 字符**:同 emoji 面板的边界(§1.1),字体里有没有这
+    /// 枚字形取决于系统装了哪些字体,缺字会掉成豆腐块。三角的三个角按
+    /// `round_rect` 同款多段折线做圆角 —— 直角 miter 在 16px 下棱角明显。
+    Warning,
 }
+
+/// 全部图标变体(`Icon` 的 `Copy` 值列表):供
+/// [`tests::every_icon_renders`] 的反向守门比对 —— 「枚举里有、测试
+/// 列表里没有」的变体等于没被测。
+///
+/// 只在测试里消费,故 `#[cfg(test)]`:留着不加会让 `cargo build` 的
+/// dead_code 告警(门禁 `-D warnings` 直接红),而它在生产路径上毫无作用。
+#[cfg(test)]
+const ALL_ICONS: &[Icon] = &[
+    Icon::New,
+    Icon::Open,
+    Icon::Save,
+    Icon::SaveAs,
+    Icon::Export,
+    Icon::Print,
+    Icon::Sidebar,
+    Icon::Theme,
+    Icon::Ai,
+    Icon::Files,
+    Icon::Search,
+    Icon::Outline,
+    Icon::Git,
+    Icon::Settings,
+    Icon::Reset,
+    Icon::Undo,
+    Icon::Zen,
+    Icon::Hamburger,
+    Icon::Minimize,
+    Icon::Maximize,
+    Icon::Restore,
+    Icon::Close,
+    Icon::CodeInline,
+    Icon::CodeBlock,
+    Icon::Link,
+    Icon::Quote,
+    Icon::Divider,
+    Icon::Table,
+    Icon::Image,
+    Icon::Paragraph,
+    Icon::BulletList,
+    Icon::OrderedList,
+    Icon::TaskList,
+    Icon::FolderClosed,
+    Icon::FolderOpen,
+    Icon::File,
+    Icon::Emoji,
+    Icon::Copy,
+    Icon::Check,
+    Icon::ReplaceAll,
+    Icon::Warning,
+];
 
 impl Icon {
     /// 在 `center` 处以 `size` 边长画图标,颜色由调用方给(通常取 visuals
@@ -567,8 +625,78 @@ impl Icon {
                 frame((-0.04, -0.44), (0.44, 0.04));
                 fill((-0.44, -0.04), (0.04, 0.44));
             }
+            // —— 警告(2026-10-15):圆角三角 + 感叹号 ——
+            Self::Warning => {
+                // 圆角三角形。做法:三条边各自退进 `round`,角上用该角的
+                // 内切圆弧补 3 段过渡 —— 与 `round_rect` 的「每 90° 8 段」
+                // 同款思路,只是三角的角是 60°,同样段数已足够平滑。
+                //
+                // 圆心在**角平分线**上,距角点 = r / sin(θ/2);θ 由两邻边
+                // 单位向量的叉积绝对值给出(θ 的正弦)。三顶点坐标写死,
+                // 角平分线方向与圆弧起止角随之确定,无需 atan2 绕回处理。
+                const R: f32 = 0.16;
+                const VERTS: [(f32, f32); 3] = [(0.0, -0.46), (-0.46, 0.36), (0.46, 0.36)];
+                // (角点下标, 前邻下标, 后邻下标):三角形顶点顺序即边界
+                // 走向,每个角的「进入边」与「离开边」固定。
+                const CORNERS: [(usize, usize, usize); 3] = [(0, 2, 1), (1, 0, 2), (2, 1, 0)];
+                let sub = |p: (f32, f32), q: (f32, f32)| -> (f32, f32) {
+                    let len = ((q.0 - p.0).powi(2) + (q.1 - p.1).powi(2)).sqrt();
+                    let t = R / len;
+                    (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t)
+                };
+                let mut pts: Vec<(f32, f32)> = Vec::with_capacity(64);
+                for (i, j, k) in CORNERS {
+                    let corner = VERTS[i];
+                    let (prev, next) = (VERTS[j], VERTS[k]);
+                    let (dx1, dy1) = (prev.0 - corner.0, prev.1 - corner.1);
+                    let (dx2, dy2) = (next.0 - corner.0, next.1 - corner.1);
+                    let l1 = (dx1.powi(2) + dy1.powi(2)).sqrt();
+                    let l2 = (dx2.powi(2) + dy2.powi(2)).sqrt();
+                    // 角平分线 = 两邻边单位向量之和(等权即角平分)
+                    let (bx, by) = (dx1 / l1 + dx2 / l2, dy1 / l1 + dy2 / l2);
+                    let lb = (bx.powi(2) + by.powi(2)).sqrt();
+                    let half_sin = (dx1 * dy2 - dy1 * dx2).abs() / (l1 * l2) / 2.0;
+                    let (cx, cy) = (
+                        corner.0 + bx / lb * (R / half_sin),
+                        corner.1 + by / lb * (R / half_sin),
+                    );
+                    // 前一段边(进入本角)→ 角圆弧 → 后一段边,顺序不跳
+                    let (mut sx, mut sy) = sub(prev, corner);
+                    pts.push((sx, sy));
+                    let a0 = (sy - cy).atan2(sx - cx);
+                    let a1 = (next.1 - cy).atan2(next.0 - cx);
+                    for step in 1..=3 {
+                        let ang = a0 + shortest_sweep(a0, a1) * (step as f32 / 4.0);
+                        sx = cx + R * ang.cos();
+                        sy = cy + R * ang.sin();
+                        pts.push((sx, sy));
+                    }
+                    let (ex, ey) = sub(corner, next);
+                    pts.push((ex, ey));
+                }
+                path(&pts);
+                pts.push(pts[0]);
+                path(&pts);
+                // 感叹号:短竖 + 点
+                seg((0.0, -0.16), (0.0, 0.10));
+                dot((0.0, 0.24), 0.055);
+            }
         }
     }
+}
+
+/// 从 `from` 转到 `to` 的**最短**角度差(弧度)。`atan2` 的返回值在
+/// ±π 处断开(179° 与 -179° 只差 2° 却是 358°),直接相减会得到反向
+/// 绕一整圈的弧 —— 圆角折线画出来是一条自交的花边而非圆角。
+fn shortest_sweep(from: f32, to: f32) -> f32 {
+    let mut delta = to - from;
+    while delta > std::f32::consts::PI {
+        delta -= std::f32::consts::TAU;
+    }
+    while delta < -std::f32::consts::PI {
+        delta += std::f32::consts::TAU;
+    }
+    delta
 }
 
 /// 纯图标按钮(左栏顶段动作、标题栏齿轮等):宽度只够一个图标,语义靠
@@ -761,62 +889,61 @@ pub fn icon_tab(ui: &mut egui::Ui, icon: Icon, label: &str, selected: bool) -> e
 mod tests {
     use super::*;
 
-    /// 全部图标都能画出来且不 panic(无头渲染一帧,覆盖每条绘制分支)。
+    /// 全部图标都能画出来且**真的画出了东西**(无头渲染一帧,逐个覆盖
+    /// 每条绘制分支)。
+    ///
+    /// 判据挂在 [`ALL_ICONS`] 这**一份**列表上,不再维护第二份硬编码
+    /// 列表:两份会漂移,而漂移的方向恰好是「漏测」—— 实测新增
+    /// `Icon::Warning` 时就漏过一次(`Hamburger` 更是长期漏测)。
+    /// `ALL_ICONS` 与 `draw` 的 `match` 一起构成双向闸门:忘了在
+    /// `draw` 里加分支编译不过,忘了在 `ALL_ICONS` 里登记下面这条红。
     #[test]
     fn every_icon_renders() {
         let ctx = egui::Context::default();
-        let icons = [
-            Icon::New,
-            Icon::Open,
-            Icon::Save,
-            Icon::SaveAs,
-            Icon::Export,
-            Icon::Sidebar,
-            Icon::Theme,
-            Icon::Ai,
-            Icon::Files,
-            Icon::Search,
-            Icon::Outline,
-            Icon::Git,
-            Icon::Settings,
-            Icon::Reset,
-            Icon::Undo,
-            Icon::Zen,
-            Icon::Minimize,
-            Icon::Maximize,
-            Icon::Restore,
-            Icon::Close,
-            // 格式工具条(新增图标务必加进来:本测试是「每条绘制分支都不
-            // panic」的唯一守卫)
-            Icon::CodeInline,
-            Icon::CodeBlock,
-            Icon::Link,
-            Icon::Quote,
-            Icon::Divider,
-            Icon::Table,
-            Icon::Image,
-            Icon::Paragraph,
-            Icon::BulletList,
-            Icon::OrderedList,
-            Icon::TaskList,
-            // 文件树(#32 I1)
-            Icon::FolderClosed,
-            Icon::FolderOpen,
-            Icon::File,
-            // Emoji 面板入口(#28 E1)
-            Icon::Emoji,
-            // 代码块复制头(#38)
-            Icon::Copy,
-            Icon::Check,
-            // 导出 PDF(#141 症状 B:原先与 ExportHtml 共用 Icon::Export)
-            Icon::Print,
-        ];
-        for icon in icons {
+        // **去重 + 真画出了东西**:原判据只有「不 panic」,绘制分支里
+        // 一行都不画(分支写了但忘了调 painter)也能全绿 —— 那等于图标
+        // 在界面上是空白。断言「本帧至少有一个矢量/填充形状」。
+        let mut blank: Vec<String> = Vec::new();
+        let mut seen = 0usize;
+        for &icon in ALL_ICONS {
             let output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 icon.draw(ui.painter(), egui::pos2(20.0, 20.0), ICON, Color32::WHITE);
             });
+            let ink = output
+                .shapes
+                .iter()
+                .filter(|c| !matches!(&c.shape, egui::Shape::Callback(_)))
+                .count();
+            if ink == 0 {
+                blank.push(format!("{icon:?}"));
+            }
+            seen += 1;
             output.drop_without_applying_deltas();
         }
+        assert_eq!(seen, ALL_ICONS.len(), "漏跑图标");
+        assert!(
+            blank.is_empty(),
+            "这些图标一帧都没画出来(绘制分支写了但没调 painter,界面上是空白):{}",
+            blank.join(", ")
+        );
+    }
+
+    /// [`ALL_ICONS`] 不含重复项。
+    ///
+    /// 重复会让 `every_icon_renders` 把同一个变体测两遍、另一个变体
+    /// 一次没测,而计数类判据(「测了 N 个」)看不出来 —— 单列一条。
+    #[test]
+    fn all_icons_has_no_duplicates() {
+        let mut seen: Vec<Icon> = Vec::new();
+        let mut dup: Vec<String> = Vec::new();
+        for &icon in ALL_ICONS {
+            if seen.contains(&icon) {
+                dup.push(format!("{icon:?}"));
+            } else {
+                seen.push(icon);
+            }
+        }
+        assert!(dup.is_empty(), "ALL_ICONS 里有重复项:{}", dup.join(", "));
     }
 
     /// Close 是 Painter 画的两条交叉线,不走 Unicode 字体字形(查找卡

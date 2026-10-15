@@ -541,15 +541,22 @@ fn chip(
 ///
 /// `file_label` 是目标标签的落盘身份(文件名或「尚未保存」),原样展示在
 /// 浮窗里 —— 既明示本操作**不改盘上文件**的作用范围,也让别名盖住 chip
-/// 后用户仍有地方看见真实文件名。返回(确定, 取消, ×)响应供测试定位
-/// (与 `image_dialog::dialog` 同款手法,× 与「取消」同语义)。
+/// 后用户仍有地方看见真实文件名。
+///
+/// 2026-10-15 UX:开框自动聚焦并全选(标签名无扩展名,选主体即全选)、
+/// Enter 提交、确定钮 ready 时转 accent 实心 —— 三条的理由见
+/// [`crate::ui::sidebar::rename_dialog`],这里是同款。
+///
+/// 返回(确定, 取消, ×, Enter提交)响应供测试定位(与
+/// `image_dialog::dialog` 同款手法,× 与「取消」同语义)。
 pub(crate) fn rename_dialog(
     ui: &mut egui::Ui,
     rename: &mut TabRename,
     file_label: &str,
-) -> (egui::Response, egui::Response, bool) {
+) -> (egui::Response, egui::Response, bool, bool) {
     let mut buttons = None;
     let mut close = false;
+    let mut submitted = false;
     crate::ui::workbench::centered_dialog(ui, "重命名标签")
         .collapsible(false)
         .resizable(false)
@@ -558,15 +565,27 @@ pub(crate) fn rename_dialog(
         .show(ui.ctx(), |ui| {
             close = crate::ui::workbench::dialog_header(ui, "重命名标签");
             ui.label("标签显示名");
-            ui.text_edit_singleline(&mut rename.draft)
-                .on_hover_text("只改此标签的显示名;文件名与保存路径不变");
+            let edit = crate::ui::workbench::dialog_text_edit(
+                ui,
+                &mut rename.draft,
+                "输入标签显示名",
+                "只改此标签的显示名;文件名与保存路径不变",
+            );
+            crate::ui::workbench::focus_and_select_stem(
+                ui,
+                &edit,
+                ui.make_persistent_id("tab-rename-alias"),
+                &rename.draft,
+                &mut rename.focus_pending,
+            );
             ui.add_space(crate::ui::tokens::SPACE_XS);
             ui.weak(format!("文件:{file_label}(重命名不改动它)"));
             crate::ui::workbench::dialog_footer_divider(ui);
+            let ready = !rename.draft.trim().is_empty();
+            submitted =
+                ready && edit.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                let ready = !rename.draft.trim().is_empty();
-                let confirm = ui
-                    .add_enabled(ready, egui::Button::new("确定"))
+                let confirm = crate::settings::primary_button(ui, "确定", ready)
                     .on_disabled_hover_text("名称不能为空;不改请点「取消」");
                 ui.add_space(crate::ui::tokens::SPACE_MD);
                 let cancel = ui.button("取消");
@@ -574,7 +593,7 @@ pub(crate) fn rename_dialog(
             });
         });
     let (confirm, cancel) = buttons.expect("浮窗必然绘制确定/取消按钮");
-    (confirm, cancel, close)
+    (confirm, cancel, close, submitted)
 }
 
 #[cfg(test)]
@@ -994,11 +1013,12 @@ mod tests {
             let mut rename = TabRename {
                 tab_id: 7,
                 draft: draft.to_owned(),
+                focus_pending: true,
             };
             let mut seen = None;
             for _ in 0..3 {
                 let output = ctx.run_ui(RawInput::default(), |ui| {
-                    let (confirm, cancel, _x) = rename_dialog(ui, &mut rename, "a.md");
+                    let (confirm, cancel, _x, _submitted) = rename_dialog(ui, &mut rename, "a.md");
                     seen = Some((confirm.enabled(), cancel.enabled()));
                 });
                 output.drop_without_applying_deltas();
@@ -1010,11 +1030,12 @@ mod tests {
         let mut rename = TabRename {
             tab_id: 7,
             draft: "  笔记  ".to_owned(),
+            focus_pending: true,
         };
         let mut confirm_enabled = false;
         for _ in 0..3 {
             let output = ctx.run_ui(RawInput::default(), |ui| {
-                let (confirm, _, _x) = rename_dialog(ui, &mut rename, "a.md");
+                let (confirm, _, _x, _submitted) = rename_dialog(ui, &mut rename, "a.md");
                 confirm_enabled = confirm.enabled();
             });
             output.drop_without_applying_deltas();
