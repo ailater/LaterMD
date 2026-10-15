@@ -9,6 +9,8 @@ use eframe::egui::{self, Align2, Rect, Sense};
 pub const HEADER_H: f32 = 40.0;
 const TRAFFIC_LIGHTS_W: f32 = 76.0;
 const HEADER_RIGHT_W: f32 = 388.0;
+/// 源码 / 写作 / 源码+对照 三段切换的总宽(三段各 ~50)。
+const MODE_SWITCH_W: f32 = 150.0;
 /// 固定保留在标签滚动区外的拖窗空白。
 pub(super) const HEADER_DRAG_W: f32 = 64.0;
 
@@ -218,8 +220,12 @@ pub fn separator(ui: &egui::Ui) -> egui::Stroke {
     )
 }
 
+/// 可拖动面板的名字清单(`divider_is_hot` 与分隔线绘制共用):左栏导航 +
+/// 只读对照列(三态视图右栏)。
+const RESIZABLE_PANELS: [&str; 2] = ["nav", crate::ui::layout::COMPARE_PANEL_ID];
+
 fn divider_is_hot(ui: &egui::Ui) -> bool {
-    let resizing = ["nav", "preview"].into_iter().any(|name| {
+    let resizing = RESIZABLE_PANELS.into_iter().any(|name| {
         ui.read_response(egui::Id::new(name).with("__resize"))
             .is_some_and(|response| response.dragged() || response.drag_stopped())
     });
@@ -231,7 +237,7 @@ fn divider_is_hot(ui: &egui::Ui) -> bool {
         return false;
     };
     const SLOP: f32 = 7.0;
-    ["nav", "preview"].into_iter().any(|name| {
+    RESIZABLE_PANELS.into_iter().any(|name| {
         let Some(panel) = egui::PanelState::load(ui.ctx(), egui::Id::new(name)) else {
             return false;
         };
@@ -240,6 +246,103 @@ fn divider_is_hot(ui: &egui::Ui) -> bool {
             (pointer.x - rect.left()).abs() <= SLOP || (pointer.x - rect.right()).abs() <= SLOP;
         near_vertical_edge && pointer.y >= rect.top() - SLOP && pointer.y <= rect.bottom() + SLOP
     })
+}
+
+/// 对照列左缘的**常显**分隔线:源码区与只读对照列之间的那条边界。
+///
+/// **为什么必须自绘而不开 egui 的 `show_separator_line(true)`**:
+/// ① 它的空闲色硬绑 `visuals.widgets.noninteractive.bg_stroke` —— 那个槽位
+/// 同时是 Markdown 表格边框与隔行底色的取色源(`theme.rs` §noninteractive
+/// 注释),为一条面板边界去动它 = 顺带改掉全部表格观感,且本函数无法只改
+/// 自己那一份(样式是全局单值)。② 它画在 `parent_ui.painter()` 上,而
+/// `parent_ui` 的 painter 位于**其后添加的 panel 之下** —— 对照列是 ④、
+/// 中央编辑区是 ⑤,后者的 `Frame::fill` 会把线整根盖掉,开了等于没开。
+///
+/// 故走 `layer_painter` 在所有 panel 之上单画一根竖线。取值与「间隔 vs
+/// 边界」的判据见 [`crate::ui::tokens::PREVIEW_DIVIDER_IDLE`]。
+///
+/// **必须在全部 panel 之后调用**(与 `edge_resize_zones` 同一约束):layer
+/// painter 的层序由 `Order` 决定,同一 `Order::Middle` 内按 id 排序,这里
+/// 用独立 id 开一层,天然压过所有 panel 的 painter。
+///
+/// `panel_id` 显式入参:本函数不假设面板叫什么(对照列与旧的「对照预览」
+/// 是两代实现,名字不同)。
+pub(crate) fn panel_divider(ui: &egui::Ui, panel_id: &str, open: bool) {
+    if !open {
+        return;
+    }
+    let id = egui::Id::new(panel_id);
+    // **边界位置的取法是三段递降,每一段都是被实测逼出来的**(2026-10-13
+    // 坤哥反馈「线不跟着我拉的框走」):
+    //
+    // ① 拖动中 → 用 `interact_pointer_pos()`,**不能用** `Response.rect`
+    //    也不能用 `PanelState`。egui 的执行顺序是
+    //    「`resize_panel(old_outer_rect)` 交互 → 若在拖则按 pointer 重算
+    //    `outer_size`」(`panel.rs` 735-800),两者**都不是**本帧的新边界:
+    //    `PanelState` 在拖动期间被 `resize_drag_in_progress` 守卫跳过写入
+    //    (存的是拖动前的宽度,以支持「拖到最小再拖回来」),`Response.rect`
+    //    又是拿旧 `outer_rect` 算的。实测探针:五步拖动两者恒为 980.0。
+    //    而 `Panel::right` 的左缘**在拖动时就是指针 x 本身**,故直接取之。
+    // ② 空闲 → 用 `PanelState` 的左缘(response 交互带在上一帧算完,同样滞后,
+    //    且 `size_range` 的 clamp 会让实际左缘 ≠ 指针 x)。
+    // ③ 都不成(panel 尚未 show 过)→ 不画线。
+    let resize = ui.read_response(id.with("__resize"));
+    let dragging = resize
+        .as_ref()
+        .is_some_and(|r| r.dragged() || r.drag_stopped());
+    let pointer_x = resize
+        .as_ref()
+        .filter(|_| dragging)
+        .and_then(|r| r.interact_pointer_pos())
+        .map(|p| p.x);
+    let Some(panel) = egui::PanelState::load(ui.ctx(), id) else {
+        return;
+    };
+    let edge = pointer_x.unwrap_or(panel.outer_rect.left());
+    let (top, bottom) = (panel.outer_rect.top(), panel.outer_rect.bottom());
+    if bottom - top <= 0.0
+        || !ui.clip_rect().intersects(egui::Rect::from_min_max(
+            egui::pos2(edge, top),
+            egui::pos2(edge, bottom),
+        ))
+    {
+        return;
+    }
+    let colors = crate::theme::shell(ui);
+    // hover 用**两个通道**反馈:①线宽 1px → 3px(主信号)②色深朝 `border`
+    // 本色靠(辅助)。只改颜色时,1px 线的深浅变化在指针扫过时几乎捕捉不到
+    // (2026-10-13 坤哥实测「没看见 hover 加粗」),VS Code 的 sash 正是靠
+    // 加粗给主反馈。hot 走**几何判定**,让测试在裸调路径下也成立。
+    let grab = crate::ui::tokens::PREVIEW_DIVIDER_GRAB;
+    let hot = ui
+        .ctx()
+        .input(|input| input.pointer.hover_pos())
+        .is_some_and(|p| (p.x - edge).abs() <= grab && p.y >= top && p.y <= bottom);
+    let ppp = ui.ctx().pixels_per_point();
+    let stroke = egui::Stroke::new(
+        if hot {
+            crate::ui::tokens::PREVIEW_DIVIDER_HOT_W
+        } else {
+            1.0
+        } / ppp,
+        // 朝**底色**插值而非 `gamma_multiply` —— 后者朝黑缩放,浅色皮肤上
+        // 「变淡」会变成「变深」,空闲态反比 hover 态显眼。
+        colors.border.lerp_to_gamma(
+            colors.content,
+            if hot {
+                crate::ui::tokens::PREVIEW_DIVIDER_HOT
+            } else {
+                crate::ui::tokens::PREVIEW_DIVIDER_IDLE
+            },
+        ),
+    );
+    let x = edge - 0.5 * stroke.width;
+    ui.ctx()
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            id.with("__divider"),
+        ))
+        .vline(x, egui::Rangef::new(top, bottom), stroke);
 }
 
 /// 浮窗统一的 macOS 风格卡片：柔和边界、内容色底和充足内距。
@@ -728,8 +831,8 @@ pub fn header(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
             colors.text,
         );
     }
-    mode_switch(ui, slot(right_start, 100.0), state, outbox);
-    let search_rect = slot(right_start + 112.0, search_width);
+    mode_switch(ui, slot(right_start, MODE_SWITCH_W), state, outbox);
+    let search_rect = slot(right_start + MODE_SWITCH_W + 12.0, search_width);
     if search_width < 100.0 {
         compact_search(ui, search_rect, state, outbox);
     } else {
@@ -769,16 +872,24 @@ pub(super) fn compact_search(
 }
 
 pub(super) fn mode_switch(ui: &mut egui::Ui, rect: Rect, state: &State, outbox: &mut Vec<Message>) {
+    use crate::live::RenderMode;
     let colors = crate::theme::shell(ui);
-    let live = state.render_mode == crate::live::RenderMode::Live;
     ui.painter().rect_filled(rect, 7.0, colors.hover);
-    for (index, label) in ["写作", "源码"].into_iter().enumerate() {
+    // 三段的顺序即 [`RenderMode::cycle`] 的顺序:源码 → 写作 → 源码+对照。
+    for (index, (label, mode)) in [
+        ("写作", RenderMode::Live),
+        ("源码", RenderMode::Source),
+        ("分栏", RenderMode::Split),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let part = Rect::from_min_size(
-            rect.min + egui::vec2(index as f32 * rect.width() / 2.0, 0.0),
-            egui::vec2(rect.width() / 2.0, rect.height()),
+            rect.min + egui::vec2(index as f32 * rect.width() / 3.0, 0.0),
+            egui::vec2(rect.width() / 3.0, rect.height()),
         )
         .shrink(2.0);
-        let selected = (index == 0) == live;
+        let selected = state.render_mode == mode;
         let response = ui.allocate_rect(part, Sense::click());
         if selected {
             ui.painter().rect_filled(part, 5.0, colors.content);
@@ -803,14 +914,16 @@ pub(super) fn mode_switch(ui: &mut egui::Ui, rect: Rect, state: &State, outbox: 
         });
         if response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(if index == 0 {
-                "写作：直接编辑正文，当前段落显示 Markdown"
-            } else {
-                "源码：编辑 Markdown，可按需打开对照预览"
+            .on_hover_text(match mode {
+                RenderMode::Live => "写作：直接编辑正文，当前段落显示 Markdown",
+                RenderMode::Source => "源码：编辑 Markdown",
+                RenderMode::Split => "分栏：源码 + 右侧只读对照（跟随光标滚动）",
             })
             .clicked()
             && !selected
         {
+            // 点任意一段都发同一条消息,归约按 [`RenderMode::cycle`] 推进;
+            // 三段是循环的,「点到目标档」需要连点(与点开关的语义一致)。
             outbox.push(Message::ToggleLivePreview);
         }
     }
@@ -1775,10 +1888,18 @@ mod tests {
         }
     }
 
+    /// 三段开关:点**当前**档不产消息(不反转),点任一**其它**档产一条
+    /// `ToggleLivePreview`(归约按 [`RenderMode::cycle`] 推进)。
     #[test]
-    fn mode_segment_only_switches_when_selecting_the_other_mode() {
+    fn mode_segment_only_switches_when_selecting_another_mode() {
+        use crate::live::RenderMode;
+        let cases = [
+            (RenderMode::Live, 0),
+            (RenderMode::Source, 1),
+            (RenderMode::Split, 2),
+        ];
         for dark in [false, true] {
-            for live in [false, true] {
+            for (mode, selected) in cases {
                 let ctx = egui::Context::default();
                 ctx.set_visuals(if dark {
                     egui::Visuals::dark()
@@ -1786,17 +1907,12 @@ mod tests {
                     egui::Visuals::light()
                 });
                 let mut state = State::default();
-                state.render_mode = if live {
-                    crate::live::RenderMode::Live
-                } else {
-                    crate::live::RenderMode::Source
-                };
+                state.render_mode = mode;
                 let mut outbox = Vec::new();
-                let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(100.0, 28.0));
-                for events in [
-                    vec![],
-                    click(egui::pos2(if !live { 95.0 } else { 45.0 }, 34.0)),
-                ] {
+                // 三段等分:150 宽,段中心 = 20 + 25/75/125
+                let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(150.0, 28.0));
+                let center = |index: usize| egui::pos2(20.0 + 25.0 + 50.0 * index as f32, 34.0);
+                for events in [vec![], click(center(selected))] {
                     ctx.run_ui(
                         egui::RawInput {
                             events,
@@ -1806,16 +1922,21 @@ mod tests {
                     )
                     .drop_without_applying_deltas();
                 }
-                assert!(outbox.is_empty(), "点击当前模式不能反转");
+                assert!(outbox.is_empty(), "点击当前档不能反转");
+                // 点另两档任意一段:恰一条消息
+                let other = if selected == 0 { 1 } else { 0 };
                 ctx.run_ui(
                     egui::RawInput {
-                        events: click(egui::pos2(if !live { 45.0 } else { 95.0 }, 34.0)),
+                        events: click(center(other)),
                         ..Default::default()
                     },
                     |ui| mode_switch(ui, rect, &state, &mut outbox),
                 )
                 .drop_without_applying_deltas();
-                assert!(matches!(outbox.as_slice(), [Message::ToggleLivePreview]));
+                assert!(
+                    matches!(outbox.as_slice(), [Message::ToggleLivePreview]),
+                    "点其它档应发一条 ToggleLivePreview,实得 {outbox:?}"
+                );
             }
         }
     }

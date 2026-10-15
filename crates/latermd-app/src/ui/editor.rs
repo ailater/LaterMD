@@ -64,6 +64,16 @@ pub(crate) fn tab_editor_id(tab_id: u64) -> egui::Id {
     egui::Id::new("source-editor").with(tab_id)
 }
 
+/// 只读对照列(三态视图右栏)的 id 根,与 [`tab_editor_id`] 分处两个命名空间。
+///
+/// `live::ui` 的所有派生 id(滚动区、每个 `MarkdownLabel`、活动块
+/// `TextEdit`)都挂在传入的 id 下 —— 同一份文档渲两遍必须给出不同的根,
+/// 否则两列共用同一份 egui 持久状态与 vendored 的 per-label 缓存(三态
+/// 视图 PR1 的可重入化)。
+pub(crate) fn tab_right_editor_id(tab_id: u64) -> egui::Id {
+    tab_editor_id(tab_id).with("compare-column")
+}
+
 /// IME caret 上报的每标签记忆(#19):上次显式上报的 caret 条矩形,以及
 /// 上次见到的 TextEdit 内容矩形(egui-winit 自动路径上报给窗口系统的就是
 /// 它)。`None` = 尚未上报,或刚经历失焦(X11 下 IME 上下文随焦点翻转被

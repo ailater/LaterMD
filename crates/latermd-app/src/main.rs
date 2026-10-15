@@ -132,10 +132,16 @@ fn main() -> eframe::Result<()> {
             // 外壳布局(左右两栏开着与否 + 左栏停在哪个视图)同上,M1 起持久化;
             // maximized 已在 opts 装载过(boot_layout),这里复用同一份
             let layout = boot_layout.clone();
-            // 面板宽度恢复(左栏 nav):egui 面板宽度存在其内部 persisted
-            // memory(重启即丢),这里在首帧前塞回去。outer_rect 只可靠使用
-            // **尺寸**(egui 注释原话),位置给 ZERO。
-            for (bar_id, width) in [(egui::Id::new("nav"), boot_layout.left_width)] {
+            // 面板宽度恢复(左栏 nav + 只读对照列):egui 面板宽度存在其内部
+            // persisted memory(重启即丢),这里在首帧前塞回去。outer_rect 只
+            // 可靠使用**尺寸**(egui 注释原话),位置给 ZERO。
+            for (bar_id, width) in [
+                (egui::Id::new("nav"), boot_layout.left_width),
+                (
+                    egui::Id::new(crate::ui::layout::COMPARE_PANEL_ID),
+                    boot_layout.live_right_width,
+                ),
+            ] {
                 if let Some(w) = width.filter(|w| w.is_finite() && *w > 0.0) {
                     cc.egui_ctx.data_mut(|d| {
                         d.insert_persisted(

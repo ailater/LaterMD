@@ -1050,7 +1050,7 @@ mod tests {
     /// 命令箱总宽 = 搜索 + 间隙 + 切换;任何一个分量改了必须同步改这条。
     #[test]
     fn command_box_total_width_is_the_sum_of_its_parts() {
-        assert_eq!(crate::ui::tokens::TITLE_CMD_W, 342.0, "实例值钉死");
+        assert_eq!(crate::ui::tokens::TITLE_CMD_W, 416.0, "实例值钉死");
         assert_eq!(
             crate::ui::tokens::TITLE_CMD_W,
             crate::ui::tokens::TITLE_SEARCH_W
@@ -1063,9 +1063,10 @@ mod tests {
     /// (搜索能力经左栏 Search 页 / Ctrl+P 仍在,不丢)。
     #[test]
     fn command_box_is_dropped_on_narrow_windows() {
+        // 900px 仍画在命令箱变宽的预算内(三段切换 76 → 150);500px 不画。
         let wide = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, TITLEBAR_H));
         let narrow = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, TITLEBAR_H));
-        assert!(shows_command_box(wide));
+        assert!(shows_command_box(wide), "900px 仍画命令箱");
         assert!(!shows_command_box(narrow), "500px 窗口不该画命令箱");
         // 阈值处的行为:-1px 不画,0px 画(边界选一边,不含糊)
         let at = Rect::from_min_size(

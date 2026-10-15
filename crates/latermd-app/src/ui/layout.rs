@@ -14,6 +14,11 @@ use eframe::egui;
 /// 去抖的同款空转教训,见本模块空转回归测试)。
 const AUTOSAVE_WRITE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// 只读对照列(三态视图右栏)的面板 id:宽度持久化、分隔线定位、分隔线
+/// hover 判定三处共用同一个名字(故收成常量,不与 `"preview"` 这个已被
+/// P4 退役的旧名复用 —— 旧 layout.json 里还躺着 `right`/`right_width`)。
+pub(crate) const COMPARE_PANEL_ID: &str = "compare-column";
+
 impl LaterMdApp {
     /// `logic` 帧的全部归约逻辑。单独成函数是因为 [`eframe::Frame`] 的字段
     /// 是 `pub(crate)`,测试里造不出来;归约本身不碰 frame。`pub(crate)`
@@ -420,9 +425,13 @@ impl LaterMdApp {
         // (都与这两个 bool 不相交)。
         //
         // 宽度下限走 `SIDEBAR_MIN_W`(180,M2 三段式起够用):160 是二分栏
-        // 时代的数字(docs/ui-shell-redesign.md §11 R4)。
-        let sidebar_max = (ui.available_width() - crate::ui::workbench::EDITOR_MIN_W)
-            .clamp(tokens::SIDEBAR_MIN_W, 400.0);
+        // 时代的数字(docs/ui-shell-redesign.md §11 R4)。分栏态再给右栏留
+        // 出 `PREVIEW_MIN_W`,否则窄窗下侧栏会把中央挤到预算以下。
+        let split = self.state.render_mode == crate::live::RenderMode::Split;
+        let reserve_right = if split { tokens::PREVIEW_MIN_W } else { 0.0 };
+        let sidebar_max =
+            (ui.available_width() - crate::ui::workbench::EDITOR_MIN_W - reserve_right)
+                .clamp(tokens::SIDEBAR_MIN_W, 400.0);
         crate::ui::workbench::restore_panel_width(ui, "nav", self.state.layout.left_width);
         let layout = &mut self.state.layout;
         let left = &mut layout.left;
@@ -483,6 +492,105 @@ impl LaterMdApp {
         // 判定走 diff_target)。编辑器分支内消费。
         let git_diff_workspace =
             self.state.git.diff_workspace_open && self.state.git.diff_target.is_some();
+
+        // ④ 右栏:只读对照列(三态视图)。渲染的就是 Live 富渲染本身
+        // (`crate::live::ui`),不是另一套渲染器 —— 右栏能力已在
+        // live-unify P1–P3 全部并入写作渲染,这里只是把它放在第二列只读呈现。
+        //
+        // 与旧「对照预览」面板的三点不同:①状态由 `render_mode == Split`
+        // 表达(三态互斥,不再有独立的开合 bool 与「离开 Live 该不该回来」
+        // 的快照补工);②用 `TabState::live_right` 这一份独立块状态与独立
+        // id 命名空间(见 PR1);③审阅 Git diff 时让位,与旧口径一致。
+        if split && !git_diff_workspace {
+            let preview_max = (ui.available_width() - crate::ui::workbench::EDITOR_MIN_W)
+                .clamp(tokens::PREVIEW_MIN_W, 880.0);
+            crate::ui::workbench::restore_panel_width(
+                ui,
+                COMPARE_PANEL_ID,
+                self.state.layout.live_right_width,
+            );
+            egui::Panel::right(COMPARE_PANEL_ID)
+                .resizable(true)
+                .show_separator_line(false)
+                .default_size(if workbench {
+                    ((ui.available_width() - 32.0) * 0.5).max(tokens::PREVIEW_MIN_W)
+                } else {
+                    tokens::PREVIEW_DEFAULT_W
+                })
+                .size_range(tokens::PREVIEW_MIN_W..=preview_max)
+                .frame(
+                    egui::Frame::default()
+                        .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
+                        .fill(crate::theme::shell(ui).content)
+                        // 左缘的常显分隔线走自绘(见 ⑥),故此处不描边:
+                        // `Frame::stroke` 是四边描边,会把顶/右/底也描上。
+                        .stroke(egui::Stroke::NONE),
+                )
+                .show(ui, |ui| {
+                    let LaterMdApp { state, outbox, .. } = self;
+                    let tab = state.tabs.current_mut();
+                    // 只读:浏览 + 硬锁(点击/双击/跳转都不进编辑、不抢焦点)。
+                    // 每帧置位,与禅定的临时浏览同款手法 —— 不写回 State。
+                    tab.live_right.browse_only = true;
+                    tab.live_right.browse_enabled = false;
+                    tab.live_right.browse_locked = true;
+                    tab.live_right.active = None;
+                    // 跟随一次:源码侧光标移动才下滚动目标(落在目标的帧消费
+                    // 后即清),此后右栏保留自己的滚动位置供自由翻阅。
+                    let cursor_byte = tab.cursor.byte;
+                    if tab.live_right.followed_byte != cursor_byte {
+                        tab.live_right.followed_byte = cursor_byte;
+                        if let Some(byte) = cursor_byte {
+                            tab.live_right.sync(&tab.editor, Some(byte));
+                            if let Some(block) = tab.live_right.block_containing(byte) {
+                                tab.live_right.pending_caret = Some((block, 0));
+                                tab.live_right.caret_follow = true;
+                            }
+                        }
+                    }
+                    let base_dir = tab
+                        .document
+                        .path
+                        .as_deref()
+                        .and_then(std::path::Path::parent);
+                    let heal = state.ai.is_streaming() && state.ai_active_tab == Some(tab.id);
+                    // 固定矩形子 Ui:`live::ui` 的 ScrollArea(auto_shrink false)
+                    // 会把父 Ui 的 max_rect 往下撑,Panel 内必须隔离(禅定正文
+                    // 同款,P3 实测出来的坑)。
+                    let body_rect = ui.available_rect_before_wrap();
+                    let mut body = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(body_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    // 只读列不回写共享的 cursor / selection:用局部占位接住,
+                    // 否则会和源码侧抢这两个每帧镜像的槽。
+                    let mut cursor_placeholder = crate::state::OutlineCursor::default();
+                    let mut selection_placeholder = None;
+                    crate::live::ui(
+                        &mut body,
+                        &mut tab.editor,
+                        &mut tab.preview,
+                        &state.ai,
+                        &mut cursor_placeholder,
+                        &mut selection_placeholder,
+                        &mut tab.live_right,
+                        crate::ui::editor::tab_right_editor_id(tab.id),
+                        false,
+                        false,
+                        base_dir,
+                        heal,
+                        &state.keymap,
+                        outbox,
+                    );
+                });
+        }
+        crate::ui::workbench::remember_panel_width(
+            ui,
+            COMPARE_PANEL_ID,
+            split,
+            &mut self.state.layout.live_right_width,
+        );
 
         // ⑤ 编辑器:源文本这份唯一真源住在中央,标签条/提示行/格式工具条在其上。
         // `CentralPanel` 最后加(顺序铁律 AGENTS §8 / adr-005 §3.2)。
@@ -618,16 +726,18 @@ impl LaterMdApp {
                 // 「页面级高亮」(VS Code 的 find match 橙色底):当前条
                 // 由 pending_selection 的选区承担,其余命中画浅底。克隆是
                 // 借用边界所需 —— 下面 editor::ui 拿的是 &mut TabState。
-                let find_marks: Vec<std::ops::Range<usize>> = if state.find.open
-                    && state.render_mode == crate::live::RenderMode::Source
-                    && !state.find.hits.is_empty()
-                {
-                    state.find.hits.clone()
-                } else {
-                    Vec::new()
-                };
+                //
+                // 分栏档的中央同样是源码 TextEdit,故两档都给(写作档的富
+                // 渲染没有「页面级浅底」这层绘制)。
+                let source_column = state.render_mode != crate::live::RenderMode::Live;
+                let find_marks: Vec<std::ops::Range<usize>> =
+                    if state.find.open && source_column && !state.find.hits.is_empty() {
+                        state.find.hits.clone()
+                    } else {
+                        Vec::new()
+                    };
                 let keep_find_focus = state.find.open
-                    && state.render_mode == crate::live::RenderMode::Source
+                    && source_column
                     && pending_selection.is_some()
                     && cursor.jump_to.is_none()
                     && focus_owner.is_some()
@@ -692,7 +802,9 @@ impl LaterMdApp {
 
         // ⑤ 查找卡是源码区专属浮层:不参与 CentralPanel 普通布局,因此
         // 不会把源码整体向下推;右上锚点留出滚动条/边框间隙。
-        if state.find.open && state.render_mode == crate::live::RenderMode::Source {
+        // 分栏档的中央也是源码区,查找卡同样可用(写作档的富渲染没有
+        // 「当前条选区 + 其余命中浅底」这两层绘制,故只在源码列给)。
+        if state.find.open && state.render_mode != crate::live::RenderMode::Live {
             if let Some(rect) = source_rect {
                 draw_find_overlay(ui.ctx(), rect, &mut state.find, outbox);
                 // 打开时的「给焦点」意图由归约置位,这里消费一次:
@@ -720,6 +832,19 @@ impl LaterMdApp {
         // 不参与 panel 嵌套,画在 panel 之后取语义上的「最上层」。三栏与
         // 禅定两条布局路径共用,理由见 [`Self::draw_overlay_dialogs`]。
         self.draw_overlay_dialogs(ui);
+
+        // ⑥ 对照列左缘的常显分隔线。**必须在全部 panel 之后**:它走
+        // `layer_painter` 在所有 panel 的 painter 之上单画一根线,而同一
+        // `Order::Middle` 内层序按 id 排,独立 id 天然压过 panel。若挪到
+        // ④ 之后立刻调,中央编辑区(⑤)的 `Frame::fill` 会盖掉整根线。
+        //
+        // 这条线与 egui 自带的 hover/drag 高亮线**并存且不冲突**:后者画在
+        // `parent_ui.painter()` 上(本函数下就是这层之下),且只在交互时出现。
+        // Git diff 审阅帧没有对照列:跳过分隔线,否则 PanelState 里残留的
+        // 上一次矩形会把线画进 diff 区。
+        if !git_diff_workspace {
+            crate::ui::workbench::panel_divider(ui, COMPARE_PANEL_ID, split);
+        }
 
         // ⑥ 自绘窗口骨架之二:屏幕四边/四角的透明缩放命令区。**必须在
         // 全部 panel 之后分配**(机制见 ui::titlebar::edge_resize_zones 的
@@ -7579,6 +7704,348 @@ mod tests {
         })
     }
 
+    // —— 只读对照列与它左缘的分隔线(三态视图)——
+
+    /// 亮度落差(灰阶,1 ≈ 1/255)。取绝对差而非相对百分比:`intensity()` 是
+    /// 0..1 感知亮度,暗色皮肤底色本身就在 0.1 附近,除它会把几级灰差放大成
+    /// 几十个百分点,阈值无法跨深浅皮肤复用。
+    fn luma_gap(a: egui::Color32, b: egui::Color32) -> f32 {
+        (a.intensity() - b.intensity()).abs() * 100.0
+    }
+
+    /// 当前皮肤 `border ↔ content` 的亮度全距(灰阶)。
+    ///
+    /// 取法走探针:`run_ui` 只返回 `FullOutput`,闭包内的 `theme::shell`
+    /// 拿不出来,而在 `run_ui` **之外**再 `data_mut` 就已错过当帧的色板投影。
+    fn shell_full_gap(ctx: &egui::Context) -> f32 {
+        let probe = egui::Id::new("__shell_full_probe");
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let gap = {
+                let s = crate::theme::shell(ui);
+                luma_gap(s.border, s.content)
+            };
+            ui.data_mut(|d| d.insert_temp(probe, gap));
+        });
+        out.textures_delta.clear();
+        ctx.data(|d| d.get_temp::<f32>(probe))
+            .expect("探针应在闭包里写入")
+    }
+
+    /// 走完整 draw 后交回「贯穿全高的分隔线」的 (x, 色, 线宽) 与面板底色。
+    ///
+    /// 与首版那组裸调分隔线的测试的根本区别:这里跑的是**真实
+    /// `Panel::right`**,故分隔线能读到真实的 `__resize` response 与
+    /// `PanelState` —— 首版手工 `insert_persisted` 造 PanelState,测的是一条
+    /// 生产中不存在的路径,于是「线不跟手」这个真 bug 从它下面溜了过去。
+    ///
+    /// **带 `width_px`** 是因为 hover 反馈的主通道是**线宽**(1px → 3px),
+    /// 只交回颜色的话那条测试压根看不见加粗 —— 2026-10-13 坤哥实测
+    /// 「没看见 hover 加粗」而当时颜色通道明明是生效的。
+    struct DividerProbe {
+        x: f32,
+        color: egui::Color32,
+        content: egui::Color32,
+        width_px: f32,
+    }
+
+    fn divider_geometry(
+        app: &mut LaterMdApp,
+        ctx: &egui::Context,
+        screen: Rect,
+        events: Vec<egui::Event>,
+    ) -> Option<DividerProbe> {
+        let id = egui::Id::new(COMPARE_PANEL_ID);
+        // 拖动中 `PanelState` 停在拖动前的位置(egui 刻意不写),故锚点必须改
+        // 取指针 x —— 否则线一移出旧锚点 ±1.5px 就再也找不到它。
+        //
+        // 注意:`PanelState::load` 与 `read_response` 内部都取 Context **写锁**,
+        // 故它们**不能**被包在 `ctx.data(...)`(读锁)里 —— parking_lot RwLock
+        // 不可重入,那样会自死锁。
+        let panel_left = egui::PanelState::load(ctx, id).map(|p| p.outer_rect.left());
+        let resize = ctx.read_response(id.with("__resize"));
+        let dragging = resize
+            .as_ref()
+            .is_some_and(|r| r.dragged() || r.drag_stopped());
+        let pointer_x = resize
+            .as_ref()
+            .filter(|_| dragging)
+            .and_then(|r| r.interact_pointer_pos())
+            .map(|p| p.x);
+        let anchor = pointer_x.or(panel_left);
+        let mut output = ctx.run_ui(
+            RawInput {
+                events,
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                // 取色必须在 `data_mut` **之外**:`data_mut` 已持 Context 写锁,
+                // 闭包内再调 `theme::shell`(内部 `ctx.data` 取读锁)会自死锁。
+                let probe = egui::Id::new("__divider_probe_content");
+                let shell = crate::theme::shell(ui);
+                ui.data_mut(|d| d.insert_temp(probe, shell.content));
+                app.draw(ui);
+            },
+        );
+        let content = ctx
+            .data(|d| d.get_temp::<egui::Color32>(egui::Id::new("__divider_probe_content")))
+            .expect("探针应在闭包里写入");
+        let mut spans: Vec<(f32, f32, egui::Color32, f32)> = Vec::new();
+        fn spans_of(shape: &egui::Shape, out: &mut Vec<(f32, f32, egui::Color32, f32)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| spans_of(s, out)),
+                egui::Shape::LineSegment { points, stroke }
+                    if (points[0].x - points[1].x).abs() < 0.01 && stroke.width > 0.0 =>
+                {
+                    out.push((
+                        points[0].x,
+                        (points[1].y - points[0].y).abs(),
+                        stroke.color,
+                        stroke.width,
+                    ))
+                }
+                _ => {}
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .for_each(|s| spans_of(&s.shape, &mut spans));
+        output.textures_delta.clear();
+        // 靠 x 挑线靠不住:实测 hover/drag 帧里画面上有**两根**贯穿全高的
+        // 竖线 —— 本模块的线在 `anchor - 0.5`,而 egui 自己在 resize 边界
+        // 又画一根 `hovered.fg_stroke`。改用**颜色判据**:本模块的线是
+        // `border → content` 的 lerp,其与底色的亮度落差必然落在
+        // `(0, full]` 开区间内,纯黑线天然被排除。
+        let full = ctx.data(|d| d.get_temp::<f32>(egui::Id::new("__shell_full_probe")));
+        let (anchor, full) = (anchor?, full?);
+        spans
+            .into_iter()
+            .filter(|(_, len, _, _)| *len > screen.height() * 0.7)
+            .filter(|(x, _, color, _)| (*x - anchor).abs() <= 1.5 && color.a() > 0)
+            .find(|(_, _, color, _)| {
+                let gap = luma_gap(*color, content);
+                gap > 0.05 && gap <= full
+            })
+            .map(|(x, _, color, width)| DividerProbe {
+                x,
+                color,
+                content,
+                width_px: width * ctx.pixels_per_point(),
+            })
+    }
+
+    /// 建一个「分栏档 + 无左栏」的应用实例,并空跑到布局稳定。
+    fn compare_only_app(screen: Rect, dark: bool) -> (egui::Context, LaterMdApp) {
+        // **刻意不调 `crate::fonts::install`**:本组只量分隔线,一个字符都不
+        // 渲染。装字体不只是多余 —— CI runner 上没有 CJK 字体,`install`
+        // 返回 `None`,那个 `.expect` 会让测试在 CI 上齐红(2026-10-13 实测
+        // run 38360023782:本地全绿、CI Gate 失败)。
+        let ctx = egui::Context::default();
+        ctx.set_visuals(if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
+        let mut app = LaterMdApp {
+            frameless: true,
+            ..Default::default()
+        };
+        app.state.layout.left = false;
+        app.state.render_mode = crate::live::RenderMode::Split;
+        // 空跑两帧:让 panel 建立 PanelState、让 shell 色板投影到位。
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+        }
+        (ctx, app)
+    }
+
+    /// 空闲态就要看得见一条界 —— 这是分隔线的全部要点。
+    ///
+    /// 判据用「相对 `border ↔ content` 全距的百分比」而非绝对灰阶:每套皮肤
+    /// 的全距本就不同,绝对阈值只能对其中一套成立。
+    #[test]
+    fn compare_divider_is_visible_while_idle() {
+        for dark in [false, true] {
+            for (w, h) in [(1400.0_f32, 900.0_f32), (900.0, 700.0)] {
+                let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+                let (ctx, mut app) = compare_only_app(screen, dark);
+                let _ = shell_full_gap(&ctx);
+                let probe = divider_geometry(&mut app, &ctx, screen, vec![])
+                    .unwrap_or_else(|| panic!("dark={dark} {w}x{h}: 对照列左缘应有分隔线"));
+                let full = shell_full_gap(&ctx);
+                let ratio = luma_gap(probe.color, probe.content) / full * 100.0;
+                assert!(
+                    (25.0..=60.0).contains(&ratio),
+                    "dark={dark} {w}x{h}: 空闲线深度 {ratio:.0}%(x={:.1},全距 {full:.2} 灰阶)\
+                     应落在 25..=60%",
+                    probe.x
+                );
+                // 空闲必须是 1 物理像素:hover 加粗要有对比基准。
+                assert!(
+                    (probe.width_px - 1.0).abs() < 0.01,
+                    "dark={dark} {w}x{h}: 空闲线宽应为 1 物理像素,实得 {:.2}",
+                    probe.width_px
+                );
+            }
+        }
+    }
+
+    /// 指针进命中带内线要**明显比空闲更深**且**加粗**,方向不得反;出带完
+    /// 全回落。硬编码 5.5px / 9px,**不引用 `PREVIEW_DIVIDER_GRAB`** —— 拿
+    /// token 当期望值会让断言自我满足。
+    #[test]
+    fn compare_divider_deepens_on_hover_within_the_grab_zone() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        for dark in [false, true] {
+            let (ctx, mut app) = compare_only_app(screen, dark);
+            let _ = shell_full_gap(&ctx);
+            let idle_probe = divider_geometry(&mut app, &ctx, screen, vec![]).expect("应有分隔线");
+            let (edge, idle, content) = (idle_probe.x, idle_probe.color, idle_probe.content);
+            let y = screen.height() / 2.0;
+            let at = |app: &mut LaterMdApp, ctx: &egui::Context, x: f32| {
+                divider_geometry(
+                    app,
+                    ctx,
+                    screen,
+                    vec![egui::Event::PointerMoved(egui::pos2(x, y))],
+                )
+                .expect("hover 帧应有线")
+            };
+            for d in [0.0_f32, 3.0, 5.5] {
+                let (in_pos, in_neg) = (at(&mut app, &ctx, edge + d), at(&mut app, &ctx, edge - d));
+                // ① 加粗是主通道,先断它。硬编码 ≥2.5(不引用 HOT_W)。
+                assert!(
+                    in_pos.width_px >= 2.5,
+                    "dark={dark}: 距边 {d}px 在带内应已加粗(≥2.5 物理像素),实得 {:.2}",
+                    in_pos.width_px
+                );
+                assert!(
+                    (in_pos.x - in_neg.x).abs() <= 0.01 && (in_pos.x - edge).abs() <= 1.5,
+                    "dark={dark}: 距边 {d}px 两侧的线心应重合于边界({edge:.1}),实得 +{:.2} / {:.2}",
+                    in_pos.x,
+                    in_neg.x
+                );
+                // ② 色深是辅助通道,方向不得反。
+                assert!(
+                    luma_gap(in_pos.color, content) > luma_gap(idle, content),
+                    "dark={dark}: 距边 {d}px 在带内应已提亮(朝底色 lerp,不是朝黑缩放)"
+                );
+                assert_eq!(
+                    in_pos.color, in_neg.color,
+                    "dark={dark}: 命中带以边界为中心,两侧应对称"
+                );
+            }
+            for d in [9.0_f32, 40.0] {
+                let far = at(&mut app, &ctx, edge + d);
+                assert_eq!(
+                    far.color, idle,
+                    "dark={dark}: 距边 {d}px 已超出命中带,应回落到空闲色"
+                );
+                assert!(
+                    (far.width_px - idle_probe.width_px).abs() < 0.01,
+                    "dark={dark}: 距边 {d}px 应把线宽收回空闲的 {:.2},实得 {:.2}",
+                    idle_probe.width_px,
+                    far.width_px
+                );
+            }
+        }
+    }
+
+    /// 离开分栏档时不得留下悬空的线(与旧「对照预览收起」同一条判据)。
+    #[test]
+    fn compare_divider_disappears_when_not_split() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let (ctx, mut app) = compare_only_app(screen, false);
+        // 先跑一帧把 shell 全距探针写上(分隔线取证的颜色判据要用它)
+        let _ = shell_full_gap(&ctx);
+        assert!(
+            divider_geometry(&mut app, &ctx, screen, vec![]).is_some(),
+            "前置:分栏档有线"
+        );
+        // 走真实归约路径:分栏 → 源码(循环档序是 源码 → 写作 → 分栏 → 源码)
+        app.state.apply(Message::ToggleLivePreview);
+        assert_eq!(app.state.render_mode, crate::live::RenderMode::Source);
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                app.reduce(ui.ctx());
+                app.draw(ui);
+            },
+        );
+        out.textures_delta.clear();
+        assert!(
+            divider_geometry(&mut app, &ctx, screen, vec![]).is_none(),
+            "离开分栏后不该有线悬在编辑区右缘"
+        );
+    }
+
+    /// 分栏档下右栏是**只读**的:点它不进编辑(不改主 LiveState 的活动块),
+    /// 也不产出编辑类消息;中央仍是源码 TextEdit。
+    #[test]
+    fn compare_column_is_read_only_and_keeps_source_column_editable() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let (_, mut app) = compare_only_app(screen, false);
+        let tab_id = app.state.tabs.current().id;
+        // 点对照列中部(右栏约占右侧 420px)
+        let pos = egui::pos2(screen.width() - 200.0, screen.height() / 2.0);
+        for events in [
+            vec![egui::Event::PointerMoved(pos)],
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+        ] {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    events,
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    app.reduce(ui.ctx());
+                    app.draw(ui);
+                },
+            );
+            out.textures_delta.clear();
+        }
+        let tab = app.state.tabs.current();
+        assert_eq!(tab.id, tab_id, "点对照列不换标签");
+        assert!(
+            tab.live_right.browse_only && tab.live_right.browse_locked,
+            "对照列保持只读(浏览 + 硬锁):{:?}",
+            tab.live_right
+        );
+        assert_eq!(tab.live_right.active, None, "对照列没有可编辑的活动块");
+        assert!(
+            !app.outbox.iter().any(|message| matches!(
+                message,
+                Message::TaskCheckboxToggled { .. } | Message::FormatRequested(..)
+            )),
+            "只读列不产出编辑类消息:{:?}",
+            app.outbox
+        );
+    }
+
     /// 禅定是**另一套 panel 组合**:三栏路径的 menubar / nav / editor /
     /// statusbar / right-preview 全部不再被添加(§7 验收点)。
     ///
@@ -7953,11 +8420,15 @@ mod tests {
                             .unwrap(),
                     );
                     output.drop_without_applying_deltas();
-                    // 每次只切一次模式,切换后从下一帧起观察淡入
+                    // 每次只切一档,切换后从下一帧起观察淡入。三态循环:
+                    // 写作 → 分栏 → 源码,故回到源码要连切两次。
                     if step == 0
                         && mode_live != (app.state.render_mode == crate::live::RenderMode::Live)
                     {
                         app.state.apply(Message::ToggleLivePreview);
+                        if app.state.render_mode == crate::live::RenderMode::Split {
+                            app.state.apply(Message::ToggleLivePreview);
+                        }
                     }
                 }
                 delays

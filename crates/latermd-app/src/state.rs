@@ -951,7 +951,8 @@ pub enum Message {
     KeymapReset(Command),
     /// 全部键位恢复出厂。
     KeymapResetAll,
-    /// 源码模式 ↔ Live Preview 互换(P3):只翻标志,不碰缓冲与光标。
+    /// 三态视图循环切档(三态视图):`源码 → 写作 → 源码+对照 → 源码`,
+    /// 只翻标志,不碰缓冲与光标。`Ctrl/Cmd+/` 与标题栏三段开关共用此入口。
     ToggleLivePreview,
     /// 打开设置对话框并切到指定分页(工具栏齿轮 / 菜单「设置…」入口)。
     SettingsOpened(crate::settings::SettingsTab),
@@ -1391,7 +1392,7 @@ impl State {
                 self.zen_nav = ZenNavState::default();
                 self.persist_theme();
             }
-            Message::ToggleLivePreview => self.toggle_live_preview(),
+            Message::ToggleLivePreview => self.cycle_render_mode(),
             Message::KeymapAssign { cmd, shortcut } => self.assign_shortcut(cmd, shortcut),
             Message::KeymapCleared(cmd) => {
                 self.keymap.set(cmd, None);
@@ -2976,65 +2977,78 @@ impl State {
         let mode = layout.render_mode.unwrap_or(RenderMode::Live);
         self.layout = layout;
         self.render_mode = RenderMode::Source;
-        if mode == RenderMode::Live {
-            self.toggle_live_preview();
+        // 旧存档只有 source / live 两档;split 是新值,同一条装载路径。
+        if mode != RenderMode::Source {
+            // Live 一档(Split 要先经过 Live 才能到,与点开关的循环同序)
+            self.cycle_render_mode();
+            if mode == RenderMode::Split {
+                self.cycle_render_mode();
+            }
         }
     }
 
-    /// 切模式:只翻标志。切到 Live 时顺带按当前光标定位活动块(首次进入
-    /// 就有可编辑的块,而不是「点一下才出现」)。
-    fn toggle_live_preview(&mut self) {
+    /// 循环切档:`Source → Live → Split → Source`(三态视图;`Ctrl/Cmd+/` 与
+    /// 标题栏三段开关共用这一个入口)。
+    ///
+    /// 只翻标志 + 按档位做必要的块表/插入点交接,不做「离开某模式时右栏该
+    /// 不该回来」那类快照补工 —— 三态互斥,右栏的开关就是 `render_mode` 本身。
+    fn cycle_render_mode(&mut self) {
         // 先退出禅定再切换,避免禅定布局被写模式借用。
         if self.layout.zen {
             self.toggle_zen();
         }
         let entering_live = self.render_mode == RenderMode::Source;
-        self.render_mode = self.render_mode.opposite();
+        self.render_mode = self.render_mode.cycle();
         self.layout.render_mode = Some(self.render_mode);
-        if self.render_mode == RenderMode::Live {
-            let tab = self.tabs.current_mut();
-            // 打开/切换文档没有源码插入点时保持浏览态；显式从源码切入
-            // 且已有插入点时，把它交给对应 Live 块。
-            tab.live.browse_enabled = true;
-            tab.live.active = None;
-            tab.live.pending_caret = None;
-            tab.live.pending_range = None;
-            let byte = tab.cursor.byte;
-            // 显式从源码切入 Live 时保留源码插入点；新打开/切换文档时
-            // cursor.byte 通常为空，仍保持浏览态，等待用户双击。
-            if entering_live {
-                if let Some(byte) = byte {
-                    tab.live.browse_only = false;
-                    tab.live.sync(&tab.editor, Some(byte));
-                    if let Some(index) = tab.live.block_containing(byte) {
-                        let local = tab.editor.byte_to_char(byte)
-                            - tab.editor.byte_to_char(tab.live.blocks[index].start);
-                        tab.live.active = Some(index);
-                        tab.live.pending_caret = Some((index, local));
-                        tab.live.caret_follow = false;
+        match self.render_mode {
+            RenderMode::Live => {
+                let tab = self.tabs.current_mut();
+                // 打开/切换文档没有源码插入点时保持浏览态；显式从源码切入
+                // 且已有插入点时，把它交给对应 Live 块。
+                tab.live.browse_enabled = true;
+                tab.live.active = None;
+                tab.live.pending_caret = None;
+                tab.live.pending_range = None;
+                let byte = tab.cursor.byte;
+                // 显式从源码切入 Live 时保留源码插入点；新打开/切换文档时
+                // cursor.byte 通常为空，仍保持浏览态，等待用户双击。
+                if entering_live {
+                    if let Some(byte) = byte {
+                        tab.live.browse_only = false;
+                        tab.live.sync(&tab.editor, Some(byte));
+                        if let Some(index) = tab.live.block_containing(byte) {
+                            let local = tab.editor.byte_to_char(byte)
+                                - tab.editor.byte_to_char(tab.live.blocks[index].start);
+                            tab.live.active = Some(index);
+                            tab.live.pending_caret = Some((index, local));
+                            tab.live.caret_follow = false;
+                        } else {
+                            tab.live.browse_only = true;
+                        }
                     } else {
                         tab.live.browse_only = true;
                     }
                 } else {
                     tab.live.browse_only = true;
                 }
-            } else {
-                tab.live.browse_only = true;
+                // 小文档立即建立块表；大文档把解析留给 Live 首帧，避免
+                // 状态归约与模式动画同帧阻塞 UI。显式保留插入点时已在上面
+                // 同步；浏览态也建立块表以便首帧直接显示富渲染。
+                if tab.live.blocks.is_empty() && tab.editor.text().len() <= 64 * 1024 {
+                    tab.live.sync(&tab.editor, None);
+                }
             }
-            // 小文档立即建立块表；大文档把解析留给 Live 首帧，避免
-            // 状态归约与模式动画同帧阻塞 UI。显式保留插入点时已在上面
-            // 同步；浏览态也建立块表以便首帧直接显示富渲染。
-            if tab.live.blocks.is_empty() && tab.editor.text().len() <= 64 * 1024 {
-                tab.live.sync(&tab.editor, None);
-            }
-        } else {
-            // 离开 Live 前把最后一个活动插入点交给源码 TextEdit。源码和
-            // Live 使用不同的稳定 widget id，若不显式写回，切换后 egui
-            // 会显示文本却丢掉原来的插入位置和焦点。
-            let tab = self.tabs.current_mut();
-            if let Some(byte) = tab.cursor.byte {
-                let char_idx = tab.editor.byte_to_char(byte);
-                tab.pending_selection = Some((char_idx, char_idx));
+            // Split 的中央仍是源码 TextEdit(与 Source 同一个 widget id),
+            // 光标/选区无需交接;右栏是只读渲染,状态每帧由 UI 侧置位。
+            RenderMode::Split | RenderMode::Source => {
+                // 离开 Live 前把最后一个活动插入点交给源码 TextEdit。源码和
+                // Live 使用不同的稳定 widget id，若不显式写回，切换后 egui
+                // 会显示文本却丢掉原来的插入位置和焦点。
+                let tab = self.tabs.current_mut();
+                if let Some(byte) = tab.cursor.byte {
+                    let char_idx = tab.editor.byte_to_char(byte);
+                    tab.pending_selection = Some((char_idx, char_idx));
+                }
             }
         }
     }
@@ -4353,6 +4367,10 @@ mod tests {
             Some(base.with(("live-block", 2))),
             "活动块 id 与 live.rs 的 TextEdit id 同构"
         );
+
+        // 分栏档:中央是源码 TextEdit,还焦目标同 Source(右栏只读,不参与)
+        state.render_mode = RenderMode::Split;
+        assert_eq!(state.editor_focus_id(), Some(base));
     }
 
     #[test]
@@ -6287,6 +6305,10 @@ mod tests {
             "切入 Live 默认浏览态"
         );
 
+        // 三态循环:源码 → 写作 → 源码+对照 → 源码(两态时代的「再切回
+        // 源码」现在要两步)
+        state.apply(Message::ToggleLivePreview);
+        assert_eq!(state.render_mode, RenderMode::Split);
         state.apply(Message::ToggleLivePreview);
         assert_eq!(state.render_mode, RenderMode::Source);
     }
@@ -6312,7 +6334,10 @@ mod tests {
             "Live 活动块收到源码插入点"
         );
 
-        // Live → 源码:反向把同一插入点交给源码 TextEdit。
+        // Live → 分栏 → 源码:插入点在下一次回到源码时交给源码 TextEdit
+        // (分栏档的中央本就是源码 TextEdit,不消费 pending_selection)。
+        state.apply(Message::ToggleLivePreview);
+        assert_eq!(state.render_mode, RenderMode::Split);
         state.apply(Message::ToggleLivePreview);
         let tab = state.tabs.current();
         assert_eq!(state.render_mode, RenderMode::Source);
@@ -6333,10 +6358,9 @@ mod tests {
         let revision = state.tabs.current().editor.revision();
         let tab_id = state.tabs.current().id;
         assert_eq!(state.render_mode, RenderMode::Live);
+        // 三态循环:写作 → 分栏 → 源码(三态时代的完整一圈)
         state.apply(Message::ToggleLivePreview);
-        assert_eq!(state.render_mode, RenderMode::Source);
-        state.apply(Message::ToggleLivePreview);
-        assert_eq!(state.render_mode, RenderMode::Live);
+        assert_eq!(state.render_mode, RenderMode::Split);
         state.apply(Message::ToggleLivePreview);
         assert_eq!(state.render_mode, RenderMode::Source);
         assert_eq!(state.tabs.current().id, tab_id);
@@ -6357,8 +6381,9 @@ mod tests {
             let mut state = State::default();
             state.restore_layout(LayoutSettings::load_from(&dir).unwrap());
             assert_eq!(state.render_mode, RenderMode::Live);
-            for mode in [RenderMode::Live, RenderMode::Source] {
-                if state.render_mode != mode {
+            // 三档都要往返:save → 重启 → 同档(含新增的 split 档)
+            for mode in [RenderMode::Live, RenderMode::Split, RenderMode::Source] {
+                while state.render_mode != mode {
                     state.apply(Message::ToggleLivePreview);
                 }
                 state.layout.save_to(Some(&dir)).unwrap();
@@ -6380,6 +6405,8 @@ mod tests {
         state.apply(Message::ZenToggled);
         state.apply(Message::ZenToggled);
         state.apply(Message::ZenToggled);
+        // 写作 → 分栏 → 源码(三态循环回到源码档)
+        state.apply(Message::ToggleLivePreview);
         state.apply(Message::ToggleLivePreview);
         assert!(!state.layout.zen && state.render_mode == RenderMode::Source);
     }
@@ -6396,6 +6423,8 @@ mod tests {
         restarted.restore_layout(LayoutSettings::load_from(&dir).unwrap());
         assert_eq!(restarted.render_mode, RenderMode::Live);
         assert!(!restarted.layout.left && !restarted.layout.zen);
+        // 写作 → 分栏 → 源码(三态循环)
+        restarted.apply(Message::ToggleLivePreview);
         restarted.apply(Message::ToggleLivePreview);
         assert_eq!(restarted.render_mode, RenderMode::Source);
         let _ = std::fs::remove_dir_all(dir);
