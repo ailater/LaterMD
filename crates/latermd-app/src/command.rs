@@ -113,9 +113,10 @@ pub enum Command {
     /// 从关闭栈弹出最近一条**已落盘**路径重开;未落盘新标签关闭不入栈,
     /// 跨会话不恢复(取舍见 preview-typography-and-keymap-plan §3.3)。
     TabRestore,
-    /// 源码模式 ↔ Live Preview 互换(P3):共用一个 rope buffer,切模式不丢
-    /// 光标也不丢 undo 栈。默认键 Cmd/Ctrl+/(与主流编辑器的「切换注释」
-    /// 同键位,工作台里没有注释语义)。
+    /// 三态视图循环切档(三态视图):`源码 → 写作 → 源码+对照 → 源码`,
+    /// 三档共用一个 rope buffer,切档不丢光标也不丢 undo 栈。默认键
+    /// Cmd/Ctrl+/(与主流编辑器的「切换注释」同键位,工作台里没有注释语义)。
+    /// 命令 id 沿用两态时代的 `toggle_live_preview`(keymap.json 零迁移)。
     ToggleLivePreview,
     // —— 格式(docs/ui-shell-redesign.md §6.3,左侧即工具条顺序)——
     /// 加粗。Ctrl/Cmd+B — 这里兑现了 command.rs 原先「Ctrl+B 留给将来的
@@ -393,7 +394,8 @@ impl Command {
             Self::TabNext => "下一个标签",
             Self::TabClose => "关闭标签",
             Self::TabRestore => "恢复关闭的标签",
-            Self::ToggleLivePreview => "写作模式",
+            // 标签列宽固定(SETTINGS_LABEL_W),写长了会撑破快捷键页的两列对齐
+            Self::ToggleLivePreview => "切换视图",
             Self::FormatBold => FormatAction::Bold.label(),
             Self::FormatItalic => FormatAction::Italic.label(),
             Self::FormatStrike => FormatAction::Strike.label(),

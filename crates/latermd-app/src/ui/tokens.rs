@@ -42,14 +42,15 @@ pub const BRAND_LOGO: f32 = 18.0;
 /// 标题栏右端窗口按钮枚数(与 [`crate::ui::titlebar::TITLE_BUTTONS`] 同
 /// 源;`WINDOW_BTN.x` 乘它得整排宽。两者不同步时有断言钉住,见
 /// `titlebar::tests::button_rects_tile_from_the_right_edge`)。
-pub const TITLE_BUTTON_N: usize = 7;
+pub const TITLE_BUTTON_N: usize = 6;
 /// 标题栏右侧窗口按钮命中区(Win 风整块,mac/Linux 同款统一)。
 pub const WINDOW_BTN: egui::Vec2 = egui::Vec2::new(32.0, 24.0);
 /// 标题栏右端「命令箱」的横向几何(docs/ui-shell-redesign-v2.md §5.6):
 /// 搜索胶囊 + 源码/Live 切换,居中最右一组窗口按钮之左。
 pub const TITLE_SEARCH_W: f32 = 260.0;
-/// 源码/Live 两段切换的总宽(两段各 38)。
-pub const TITLE_VIEW_W: f32 = 76.0;
+/// 源码/Live/分栏 三段切换的总宽(三段各 ~50,与 `ui::workbench` 的三段
+/// 开关同宽 —— 两条入口路径是同一个控件的不同宿主)。
+pub const TITLE_VIEW_W: f32 = 150.0;
 /// 搜索胶囊与切换控件之间的间隙。
 pub const TITLE_CMD_GAP: f32 = 6.0;
 /// 命令箱总宽:= [`TITLE_SEARCH_W`] + [`TITLE_CMD_GAP`] + [`TITLE_VIEW_W`]
@@ -69,7 +70,8 @@ pub const TITLE_BUTTONS_W: f32 = TITLE_BUTTON_N as f32 * WINDOW_BTN.x;
 /// 再整段不画)。264 的来历见 docs/ui-shell-redesign-v2.md §5.6。
 pub const TITLE_TEXT_MIN_W: f32 = 264.0;
 /// 窗口不再画命令箱的宽度阈值(docs/ui-shell-redesign-v2.md §5.6):
-/// 命令箱 346 + 到七枚按钮 8 + 7×32 + 标题 await 264 = 842。
+/// 命令箱 416 + 到六枚按钮 8 + 6×32 + 标题最小 264 = 880。
+/// (命令箱 416 = 搜索 260 + 间隙 6 + 三段切换 150,随三态视图上调。)
 pub const TITLE_CMD_MAX_W: f32 =
     TITLE_CMD_W + TITLE_CMD_TO_BTN + TITLE_BUTTONS_W + TITLE_TEXT_MIN_W;
 /// 左缘图标栏(rail)宽度(2026-10-08,docs/ui-shell-redesign-v2.md
@@ -98,10 +100,54 @@ pub const RAIL_ICON: f32 = 18.0;
 /// 左栏(导航)宽度下限(docs/ui-shell-redesign.md §11,R4):三栏旧下限
 /// 160 是二分栏时代的数字,塞进四行视图导航后不够。
 pub const SIDEBAR_MIN_W: f32 = 180.0;
-/// 右栏(只读预览)初始宽度。
-/// 右栏宽度下限:再窄代码块与表格就只剩横向滚动了。
-/// 预览左缘分隔线的**空闲强度**:线色朝面板底色(`content`)插值的比例。
+/// 只读对照列(三态视图右栏)的初始宽度。
+pub const PREVIEW_DEFAULT_W: f32 = 420.0;
+/// 只读对照列宽度下限:再窄代码块与表格就只剩横向滚动了。侧栏预算演算
+/// 也用它做分栏态的预留。
+pub const PREVIEW_MIN_W: f32 = 260.0;
+/// 对照列左缘分隔线的**空闲强度**:线色朝面板底色(`content`)插值的比例。
 ///
+/// **为什么是 lerp 而不是 `gamma_multiply`**(2026-10-13 守门测试实测):
+/// `gamma_multiply` 是朝**黑**缩放,在浅色皮肤上「乘小一点」把线压得
+/// 更暗 —— 于是空闲态(0.32)比 hover 态(0.72)还显眼,方向整个反过来,
+/// 用户的直觉完全被误导。实测同一条线在浅色下空闲落差 8.7 灰阶、
+/// hover 只有 1.3 灰阶(比空闲还淡)。朝底色插值则在深浅两套皮肤上都是
+/// 「越远离底色越明显」,单一方向。
+///
+/// 0.55 即「往底色退一半」:能看出有一条界,又不把面板切成两半。
+///
+/// 2026-10-13 复核:实测四套皮肤的空闲落差为 `border↔content` 全距的
+/// 43%..45%(One Light 6.4 灰阶 / One Dark 3.5 灰阶),方向与量级都对。
+pub const PREVIEW_DIVIDER_IDLE: f32 = 0.55;
+/// 同一条线的 hover / 拖动态:朝底色插值 0.05(几乎就是 `border` 本色)。
+///
+/// **0.15 → 0.05**:原先 0.15 在深色皮肤上只比空闲深 3.48 灰阶
+/// (`#31353D` → `#3A3E45`),坤哥实测「没看见 hover 加粗」。推到 0.05
+/// 后深色落差 4.1 灰阶、浅色 7.9 灰阶。
+///
+/// 但**颜色单独一个通道仍不够** —— 1px 宽的线在纯色底上做深浅变化,
+/// 人眼在快速移动指针时几乎捕捉不到。VS Code 的做法是**线宽也变**
+/// (1px → 3px),那才是「抓到了」的主信号。见 [`PREVIEW_DIVIDER_HOT_W`]。
+pub const PREVIEW_DIVIDER_HOT: f32 = 0.05;
+/// hover / 拖动时的线宽(物理像素)。空闲恒为 1。
+///
+/// **这是 hover 反馈的主通道**,颜色是辅助通道。理由:1px 线的深浅变化
+/// 需要「盯住看」才分辨得出,而指针扫过时每帧只停留几十毫秒 —— 坤哥
+/// 2026-10-13 实测反馈「没看见 hover 加粗」时,颜色通道已经在了,缺的是
+/// 宽度。VS Code 的 sash 正是 1px → 3px。
+///
+/// 取 3.0 而非 2.0:2px 在 1x 屏上量化后与 1px/3px 混叠,3px 才是
+/// 一眼可辨的「变粗了」。
+pub const PREVIEW_DIVIDER_HOT_W: f32 = 3.0;
+/// 对照列左缘的**拖动命中半径**(逻辑像素,向边两侧各取)。
+///
+/// egui 出厂 3.0(命中带宽 6px)。那 6px 落在面板底色与编辑区之间,
+/// 没有任何视觉线索指向它,实测坤哥完全找不到可拖处(2026-10-13)。
+///
+/// 取 6.0(带宽 12px),且只在对照列面板那一帧局部抬高 —— 全局抬高会
+/// 连带 nav 右缘,那里紧贴编辑区正文,凭空多出 6px 误吞点击的窗口。
+pub const PREVIEW_DIVIDER_GRAB: f32 = 6.0;
+
 pub const STATUSBAR_DROP_AUX_W: f32 = 640.0;
 /// 左栏视图导航的行高(docs/ui-shell-redesign.md §11,M2 三段式)。
 ///

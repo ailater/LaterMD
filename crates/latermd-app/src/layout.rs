@@ -66,6 +66,14 @@ pub struct LayoutSettings {
     /// `insert_persisted` 塞 PanelState(egui 的 store 是私有的)。
     #[serde(default)]
     pub left_width: Option<f32>,
+    /// 只读对照列(三态视图右栏)宽度,同左栏口径:`None` = 从未拖过。
+    ///
+    /// **不叫 `right_width`**:旧 layout.json 里躺着 P4 退役的同名字段
+    /// (旧值可能是任意数),复用它会让升级用户的对照列被一个陈旧数字
+    /// 决定宽度 —— 新名即天然零迁移。开合不在此处:它由 `render_mode ==
+    /// Split` 表达(三态互斥)。
+    #[serde(default)]
+    pub live_right_width: Option<f32>,
 }
 
 /// 出厂布局:三栏全开(旧行为),停文件树。
@@ -79,6 +87,7 @@ impl Default for LayoutSettings {
             pre_zen: None,
             maximized: false,
             left_width: None,
+            live_right_width: None,
         }
     }
 }

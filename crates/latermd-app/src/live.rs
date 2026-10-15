@@ -72,6 +72,11 @@ fn source_hash(text: &str) -> u64 {
 /// 源码模式与 Live Preview 共用同一个 rope buffer、同一套撤销语义,区别仅
 /// 在于是否应用「光标所在块显示源码」这条规则 —— 所以切换不该有任何恢复
 /// 逻辑(roadmap 阶段 5 的原则)。
+///
+/// **三态(2026-10-15)**:`Split` 是「源码 + 只读对照列」—— 中央仍是源码
+/// 模式那一个 TextEdit,右侧多一列由 `live::ui` 渲染的**只读**富渲染。它与
+/// `Live` 互斥(不是正交开关),故不需要「离开某模式时该不该恢复右栏」那类
+/// 快照补工;旧存档的 `"source"` / `"live"` 照旧解析,零迁移。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RenderMode {
@@ -80,14 +85,18 @@ pub enum RenderMode {
     Source,
     /// 光标块源码、其余富渲染。
     Live,
+    /// 源码 + 右侧只读对照列(渲染同一份文档的 Live 富渲染)。
+    Split,
 }
 
 impl RenderMode {
-    /// 互换(命令入口)。
-    pub fn opposite(self) -> Self {
+    /// 循环切档(命令 `Ctrl/Cmd+/` 与标题栏三段开关的同一入口):
+    /// `Source → Live → Split → Source`。
+    pub fn cycle(self) -> Self {
         match self {
             Self::Source => Self::Live,
-            Self::Live => Self::Source,
+            Self::Live => Self::Split,
+            Self::Split => Self::Source,
         }
     }
 }
@@ -140,6 +149,12 @@ pub struct LiveState {
     /// 同生共死:每个置 pending 的入口都一并写,落地帧消费。格式动作
     /// (live 归约)也置假 —— 选区是用户刚框出来的,无需拽视口。
     pub caret_follow: bool,
+    /// 只读对照列专用:上一次已跟随过的源码光标字节。
+    ///
+    /// 「跟随一次」的记忆 —— 源码侧光标**变化**时才下一次滚动目标,此后
+    /// 右栏保留自己的滚动位置供自由翻阅(用户翻对照列不该被主列拽回)。
+    /// `None` = 还没跟随过(或文档刚换入)。
+    pub(crate) followed_byte: Option<usize>,
     /// 富渲染块链接改写的块级缓存(#63;#65 M2 起高亮层并入同一条缓存):
     /// 块序号 → (源码指纹, 改写后块文本, 高亮层映射, 任务层映射)。
     /// 修订号前进时保留未变化块的条目，只让源码指纹变化的块重新改写，
@@ -355,6 +370,7 @@ impl LiveState {
         self.marks = None;
         self.drag_anchor = None;
         self.caret_follow = false;
+        self.followed_byte = None;
         self.rich_cache.clear();
         self.block_hashes.clear();
     }
