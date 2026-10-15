@@ -1257,3 +1257,12 @@
 - **选择**:③拆两层。预览恒开 `with_ai`(行为零变化);Live 侧 P2 起构造 `RichLinkHandler` 并显式 `with_ai`——```ai 围栏出卡、`ai://` 链接紫罗兰样式且点击发 `AiLinkClicked`,emoji/wikilink/hl/task/mermaid 各臂与预览逐字节同一实现。同时 `is_openable_href` 随迁 `ui::ai_card`(P0 遗留口子收口),`LiveMermaidHandler` 退役(生产侧死代码,mermaid 测试改用关闭 AI 的 `RichLinkHandler`,mermaid 分派等价)。
 - **理由**:②违背本重构的第一性目标(能力并入 Live,不是删能力);①与③的渲染结果完全一致,差别只在「变化是否被显式表达」——#51 M3 的否决线针对的是「借 mermaid 顺手夹带」,现在 AI 卡进 Live 本身就是本阶段的显式目标,经计划文档、PR 与本条三处留痕,原裁决的实质(不能无声改变)由开关语义延续;实现上两层拆分让「Live 与预览同一套」成为类型系统事实(同一结构体),而不是两份实现靠测试对齐。
 - **如何改**:要回退 Live 的 AI 卡——`live.rs` 构造处删掉 `.with_ai(..)` 一行,```ai 围栏回落普通代码块、`ai://` 走 vendored 默认(守门测试 `live_ai_block_renders_card`/`live_ai_link_click_sends_message` 当场红);要连预览一起退——`preview.rs` 同样删 `with_ai`,AI 卡功能整体退役(等于推翻 live-unify-plan 前提,须回到计划层讨论)。
+
+## #148 D2 浏览态跳转语义:「锁定浏览」硬锁的新字段而非扩展 browse_only(live-unify-plan P3·2026-10-15 记账)
+
+- **岔路**:禅定改走 Live 浏览态后,大纲/Ctrl+G 的跳转(`cursor.jump_to`)在浏览态下该「只滚动」还是仍按写作语义「落点并进编辑」。触发点:计划文档 D2 原提议「给 LiveState 加一条只滚语义」;而写作浏览态(打开文档未双击)的既有契约是「跳转即进编辑」(#60 goto / #42 大纲的实测用例钉住)。
+- **备选**:①以 `browse_only` 为准 —— 浏览态一律只滚;②新加 `browse_locked` 字段,只有禅定(强制阅读场景)置位;③禅定帧同样允许进编辑(当前行为即此)。
+- **选择**:②新字段 `browse_locked`。禅定帧每帧置 `browse_only=true` + `browse_enabled=false` + `browse_locked=true`(不写回 State 持久化);`jump_to` 在锁定时只置 `pending_caret` 做块级滚动,在写作浏览态维持既有「落点+进编辑」。③被否:禅定是**阅读**场景,点提纲被拽进一排源码 TextEdit 是明确倒退。①被否:会让既有 goto/大纲测试与「打开文档 → 跳转即可写」的实际用法退步。
+- **理由**:`browse_only` 的语义是「还没开始写」的软状态(任何写入意图都能翻转它),`browse_locked` 是「这个视图不提供写入」的硬约束 —— 两者不是同一维度的取值,塞进一个枚举会让 `sync`/`reset`/`activate` 每处都要重判;分开后顺手解决了禅定的兄弟问题(帧垃圾回收:cursor.byte / active / pending 一律清空,不与 State 交互)。
+- **关联修正(同一轮实测)**:禅定 CentralPanel 的 Live `ScrollArea`(`auto_shrink([false,false])`)会把父 Ui 的矩形向下撑约 2px,导致其后 `ui::zen_nav` 读到的根 Ui `max_rect()` 越过窗口底缘 —— 两条既有禅定测试(`zen_hover_nav_*`)因此几何漂移而红。处置:正文改走固定矩形的 `new_child`(高度增长留在子 Ui 内,不向上传播),横向限宽仍靠 `vertical_centered` + `set_max_width`。
+- **如何改**:要让禅定也能进编辑 —— 删 `draw_zen` 的 `tab.live.browse_locked = true;`(连同 R3 守门 `zen_frame_never_mutates_*` 里「不产活动块」那条断言);要让 goto 在禅定里也落点 —— 在 `live::ui` 的 `jump_to` 分支把 `browse_locked` 与 `browse_only` 合并判定。

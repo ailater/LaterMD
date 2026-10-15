@@ -2167,6 +2167,11 @@ impl State {
             // 退出即复位悬停导航(#57):显隐判定随布局分叉失效,残置的可见位
             // 会在重进禅定时凭空闪现一列(动画残值由绘制侧的全隐帧钉回 0)。
             self.zen_nav = ZenNavState::default();
+            // P3(live-unify):禅定帧强制过 browse_enabled=false(点击/双击
+            // 都不进编辑),退出即还原浏览优先的交互语义 —— 与切入 Live 的
+            // 既有口径同源。browse_only 不动:若禅定前正在写作(活动块仍在),
+            // 下一帧 live::ui 的既定翻转(浏览态遇活动块即写作)自愈。
+            self.tabs.current_mut().live.browse_enabled = true;
         } else {
             self.layout.enter_zen();
         }

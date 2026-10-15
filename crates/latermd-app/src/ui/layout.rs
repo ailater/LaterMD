@@ -1114,26 +1114,61 @@ impl LaterMdApp {
                     if let Some(probe) = self.zen_probe.as_deref_mut() {
                         probe(ui.max_rect().width());
                     }
-                    // 与三栏路径同一个 widget:同一个 `PreviewState`、同一条
-                    // 渲染链路,不另起一份。
+                    // 禅定正文走 Live 浏览态(P3,live-unify-plan):块级富
+                    // 渲染、只读 —— 与当前 render_mode 解耦,源码模式下进
+                    // 禅定同样看富渲染。浏览是**帧内临时值**:每帧强制
+                    // browse_only + 关 browse_enabled(点击/双击都不进编辑、
+                    // 不抢焦点),不碰持久化的 render_mode(R3);退出禅定的
+                    // 交互还原在 `State::toggle_zen`(browse_enabled 复位,
+                    // 写作态由 live::ui 的既定翻转自愈)。
                     //
                     // 解构再分头借用:`&mut self.state.tabs` 与 `&self.state.ai`
                     // 是同一棵树上的不相交分支,挨着写会被借用检查器拦下。
+                    // Live 自带 ScrollArea(`auto_shrink([false,false])`)会把
+                    // 父 Ui 的矩形**向下撑出**内容区:CentralPanel 之后的
+                    // `ui::zen_nav` 读的是同一个根 Ui 的 `max_rect()`,被撑
+                    // 出的那 2px 会让导航列的驻位矩形越过窗口底缘 —— 导航行
+                    // 的视口剔除判据随之失真(2026-10-15 实测,P3)。故把正文
+                    // 关进**带固定矩形**的子 Ui:高度增长留在子 Ui 内,不向
+                    // 上传播。横向仍由上面的 `vertical_centered` +
+                    // `set_max_width` 限定(同一 I-E. 上限语义)。
+                    let body_rect = ui.available_rect_before_wrap();
                     let LaterMdApp { state, outbox, .. } = self;
                     let tab = state.tabs.current_mut();
+                    tab.live.browse_only = true;
+                    tab.live.browse_enabled = false;
+                    tab.live.browse_locked = true;
+                    tab.live.active = None;
+                    tab.live.pending_caret = None;
+                    tab.live.pending_range = None;
                     // heal 条件同三栏路径:仅 AI 流式写入本标签时开。
                     let streaming_here =
                         state.ai.is_streaming() && state.ai_active_tab == Some(tab.id);
-                    crate::ui::preview::ui(
-                        ui,
+                    // 打字机/专注关:浏览态没有活动块,两者天然失效 —— 显式
+                    // false 让禅定帧不进打字机记忆读写(decisions-pending #122
+                    // 的边界同口径)。
+                    let mut body = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(body_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    crate::live::ui(
+                        &mut body,
+                        &mut tab.editor,
                         &mut tab.preview,
                         &state.ai,
-                        tab.id,
-                        streaming_here,
+                        &mut tab.cursor,
+                        &mut tab.selection,
+                        &mut tab.live,
+                        crate::ui::editor::tab_editor_id(tab.id),
+                        false,
+                        false,
                         tab.document
                             .path
                             .as_deref()
                             .and_then(std::path::Path::parent),
+                        streaming_here,
+                        &state.keymap,
                         outbox,
                     );
                 });
@@ -7710,6 +7745,83 @@ mod tests {
         // 正文仍然渲染在同一个 PreviewState 上(禅定不是换渲染器)
         assert!(!zen.is_empty(), "禅定帧仍有内容被绘制:{zen:?}");
         assert!(app.state.layout.zen, "绘制不翻转禅定");
+    }
+
+    /// P3/R3 守门:禅定帧**不改 UI 之外的状态** —— ① `render_mode` 不被禅定
+    /// 碰(禅定与模式解耦,浏览是帧内临时值);②禅定帧不把读者拽进编辑:点
+    /// 击正文不产活动块、不写 `cursor.byte`;③正文仍完整渲染(禅定不是白
+    /// 屏);④退出禅定还原 `browse_enabled`(交互语义不被禅定带歪)。
+    #[test]
+    fn zen_frame_never_mutates_render_mode_or_steals_the_caret() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let mut app = LaterMdApp::default();
+        let text = "# 标题\n\n正文一段。\n";
+        app.state.tabs.current_mut().editor.replace_all(text);
+        let before_mode = app.state.render_mode;
+        app.state.apply(Message::ZenToggled);
+
+        // 正文中心点:带动 ead 一下完整事件帧(press 必须单独占一帧)。
+        let center = egui::pos2(screen.center().x, 200.0);
+        let primary = |pressed| egui::Event::PointerButton {
+            pos: center,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let painted = |app: &mut LaterMdApp, events: Vec<egui::Event>| -> Vec<String> {
+            let output = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            let texts = painted_text(&output.shapes);
+            output.drop_without_applying_deltas();
+            texts
+        };
+        let mut last = Vec::new();
+        for events in [
+            vec![egui::Event::PointerMoved(center)],
+            vec![primary(true)],
+            vec![primary(false)],
+            Vec::new(),
+        ] {
+            last = painted(&mut app, events);
+        }
+
+        let tab = app.state.tabs.current();
+        assert_eq!(
+            app.state.render_mode, before_mode,
+            "禅定不改持久化的 render_mode"
+        );
+        assert!(
+            tab.live.active.is_none(),
+            "禅定帧不产生活动块:{:?}",
+            tab.live
+        );
+        assert!(tab.live.browse_only, "禅定帧仍是浏览态");
+        assert_eq!(tab.cursor.byte, None, "禅定帧不写光标字节");
+        assert_eq!(tab.editor.text(), text, "禅定帧不改动文本");
+        assert!(
+            last.iter().any(|t| t.contains("标题")),
+            "禅定正文照常渲染:{last:?}"
+        );
+
+        // 退出禅定:browse_enabled 还原,render_mode 不动
+        app.state.apply(Message::ZenToggled);
+        let _ = painted(&mut app, Vec::new());
+        assert!(!app.state.layout.zen, "退出禅定");
+        assert!(
+            app.state.tabs.current().live.browse_enabled,
+            "退出禅定还原浏览优先的交互"
+        );
+        assert_eq!(
+            app.state.render_mode, before_mode,
+            "禅定往返不动 render_mode"
+        );
     }
 
     /// Zen 下正文按 `ZEN_TEXT_W` 限宽。宽度由 `draw_zen` 自己吐出来(探针见
