@@ -715,8 +715,8 @@ impl LaterMdApp {
         // commit message 建议:复制即时写系统剪贴板,关闭只发消息,清建议的
         // 归约在 `App::logic`(见 `commit_dialog` 文档)。
         if let Some(subject) = self.state.ai_commit_suggestion.clone() {
-            let (_, close) = commit_dialog(ui, &subject);
-            if close.clicked() {
+            let (_, close, x) = commit_dialog(ui, &subject);
+            if close.clicked() || x {
                 outbox.push(Message::AiCommitDismissed);
             }
         }
@@ -725,12 +725,12 @@ impl LaterMdApp {
         // 放弃只发消息,替换与作废在归约。Esc 的消费在 `reduce`(浮窗在场
         // 即归它,先于蒙层/禅定/查找条等其它 Esc 语义)。
         if let Some(session) = self.state.ai_polish.clone() {
-            let (confirm, dismiss, _copy) =
+            let (confirm, dismiss, _copy, x) =
                 selection_ai_polish_dialog(ui, &session.draft, self.state.ai.is_streaming());
             if confirm.clicked() {
                 outbox.push(Message::SelectionAiPolishConfirmed);
             }
-            if dismiss.clicked() {
+            if dismiss.clicked() || x {
                 outbox.push(Message::SelectionAiPolishDismissed);
             }
         }
@@ -766,7 +766,7 @@ impl LaterMdApp {
             let open_in_editor = self.state.git.absolute_path(&path).is_some_and(|abs| {
                 self.state.tabs.current().document.path.as_deref() == Some(abs.as_path())
             });
-            let (confirm, cancel) = checkout_dialog(
+            let (confirm, cancel, x) = checkout_dialog(
                 ui,
                 &path,
                 open_in_editor,
@@ -775,7 +775,7 @@ impl LaterMdApp {
             if confirm.clicked() {
                 outbox.push(Message::GitCheckoutConfirmed);
             }
-            if cancel.clicked() {
+            if cancel.clicked() || x {
                 outbox.push(Message::GitCheckoutCancelled);
             }
         }
@@ -784,11 +784,11 @@ impl LaterMdApp {
         // 受影响文件数由归约在挂起时折算(search.confirm_replace);真正的
         // 替换在「全部替换」点击之后的归约里执行,确认后命中列表重收敛。
         if let Some(plan) = &self.state.search.confirm_replace {
-            let (confirm, cancel) = search_replace_dialog(ui, plan.paths.len());
+            let (confirm, cancel, x) = search_replace_dialog(ui, plan.paths.len());
             if confirm.clicked() {
                 outbox.push(Message::SearchReplaceAllConfirmed);
             }
-            if cancel.clicked() {
+            if cancel.clicked() || x {
                 outbox.push(Message::SearchReplaceAllCancelled);
             }
         }
@@ -799,11 +799,11 @@ impl LaterMdApp {
         // 不再渲染。文案用标签显示名(#37 别名优先)—— 用户在标签条上认
         // 的是什么名字,模态就问什么名字。
         if let Some(tab) = self.state.tabs.confirm_close_tab() {
-            let (confirm, cancel) = tab_close_dialog(ui, &tab.display_name());
+            let (confirm, cancel, x) = tab_close_dialog(ui, &tab.display_name());
             if confirm.clicked() {
                 outbox.push(Message::TabCloseConfirmed);
             }
-            if cancel.clicked() {
+            if cancel.clicked() || x {
                 outbox.push(Message::TabCloseCancelled);
             }
         }
@@ -823,11 +823,11 @@ impl LaterMdApp {
                 .map(|index| self.state.tabs.tabs[index].document.base_name())
                 .unwrap_or_else(|| "未知(标签已关闭)".to_owned());
             if let Some(rename) = self.state.tabs.rename.as_mut() {
-                let (confirm, cancel) = crate::ui::tabs::rename_dialog(ui, rename, &file_label);
+                let (confirm, cancel, x) = crate::ui::tabs::rename_dialog(ui, rename, &file_label);
                 if confirm.clicked() {
                     outbox.push(Message::TabRenameConfirmed);
                 }
-                if cancel.clicked() {
+                if cancel.clicked() || x {
                     outbox.push(Message::TabRenameCancelled);
                 }
             }
@@ -837,11 +837,11 @@ impl LaterMdApp {
         // 这里只收草稿、按名称合法性禁用「创建」、点按只发消息 —— 落盘、
         // 缓存失效与开标签全在归约(与图片框同一纪律:对话框不碰 IO)。
         if let Some(new_file) = self.state.file_tree.new_file.as_mut() {
-            let (confirm, cancel) = crate::ui::sidebar::new_file_dialog(ui, new_file);
+            let (confirm, cancel, x) = crate::ui::sidebar::new_file_dialog(ui, new_file);
             if confirm.clicked() {
                 outbox.push(Message::FileTreeNewFileConfirmed);
             }
-            if cancel.clicked() {
+            if cancel.clicked() || x {
                 outbox.push(Message::FileTreeNewFileCancelled);
             }
         }
@@ -849,11 +849,11 @@ impl LaterMdApp {
         // 文件树右键「新建文件夹」浮窗(context-menu-plan §3 M2):与新建
         // 文档同纪律 —— 只收草稿,落盘在归约(confirm_new_folder)。
         if let Some(new_folder) = self.state.file_tree.new_folder.as_mut() {
-            let (confirm, cancel) = crate::ui::sidebar::new_folder_dialog(ui, new_folder);
+            let (confirm, cancel, x) = crate::ui::sidebar::new_folder_dialog(ui, new_folder);
             if confirm.clicked() {
                 outbox.push(Message::FileTreeNewFolderConfirmed);
             }
-            if cancel.clicked() {
+            if cancel.clicked() || x {
                 outbox.push(Message::FileTreeNewFolderCancelled);
             }
         }
@@ -861,11 +861,11 @@ impl LaterMdApp {
         // 文件树右键「重命名」浮窗:草稿预填现名,确认走归约
         // (confirm_rename:真实改名 + 标签换绑)。
         if let Some(rename) = self.state.file_tree.rename.as_mut() {
-            let (confirm, cancel) = crate::ui::sidebar::rename_dialog(ui, rename);
+            let (confirm, cancel, x) = crate::ui::sidebar::rename_dialog(ui, rename);
             if confirm.clicked() {
                 outbox.push(Message::FileTreeRenameConfirmed);
             }
-            if cancel.clicked() {
+            if cancel.clicked() || x {
                 outbox.push(Message::FileTreeRenameCancelled);
             }
         }
@@ -874,11 +874,11 @@ impl LaterMdApp {
         // (confirm_delete:dirty 拒绝 / 干净关标签 / 废纸篓)。
         if let Some(path) = self.state.file_tree.delete_confirm.as_ref() {
             let is_dir = path.is_dir();
-            let (confirm, cancel) = crate::ui::sidebar::delete_confirm_dialog(ui, path, is_dir);
+            let (confirm, cancel, x) = crate::ui::sidebar::delete_confirm_dialog(ui, path, is_dir);
             if confirm.clicked() {
                 outbox.push(Message::FileTreeDeleteConfirmed);
             }
-            if cancel.clicked() {
+            if cancel.clicked() || x {
                 outbox.push(Message::FileTreeDeleteCancelled);
             }
         }
@@ -889,7 +889,7 @@ impl LaterMdApp {
         // 载荷。「浏览」与「上传」只发消息:文件选择、复制进 `.assets/`、
         // 后台上传都在归约(对话框不碰 IO)。
         if self.state.image_dialog.open {
-            let (insert, browse, upload, cancel) = crate::ui::image_dialog::dialog(
+            let (insert, browse, upload, cancel, x) = crate::ui::image_dialog::dialog(
                 ui,
                 &mut self.state.image_dialog,
                 &self.state.bed.profiles,
@@ -905,7 +905,7 @@ impl LaterMdApp {
             if upload.clicked() {
                 outbox.push(Message::ImageUploadRequested);
             }
-            if cancel.clicked() {
+            if cancel.clicked() || x {
                 outbox.push(Message::ImageDialogClosed);
             }
         }
@@ -1731,38 +1731,46 @@ fn cursor_position(text: &str, byte: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// commit message 建议浮窗;返回(复制, 关闭)按钮的响应,测试定位用
-/// (与 `ui::menubar::item` 同款手法)。
+/// commit message 建议浮窗;返回(复制, 关闭, ×)响应,测试定位用
+/// (与 `ui::menubar::item` 同款手法,× 与「关闭」同语义)。
 ///
 /// 复制即时写系统剪贴板(`Context::copy_text`,UI 侧效果,不改状态——
 /// 不经用户动作覆盖剪贴板会冲掉用户正在搬运的内容);关闭只发消息,
 /// 清建议的归约在 `App::logic`。
-fn commit_dialog(ui: &mut egui::Ui, subject: &str) -> (egui::Response, egui::Response) {
+fn commit_dialog(ui: &mut egui::Ui, subject: &str) -> (egui::Response, egui::Response, bool) {
     let ctx = ui.ctx().clone();
     let mut buttons = None;
+    let mut close = false;
     egui::Window::new("AI: commit message")
         // 固定初始位置:浮窗出现位置可预期(不与菜单栏重叠),拖动后由
         // Area 记忆保持;显式初始位也让无头测试的帧间位置稳定。
         .default_pos([80.0, 120.0])
         .collapsible(false)
         .resizable(false)
+        .title_bar(false)
         .frame(crate::ui::workbench::dialog_frame(ui))
         .show(ui.ctx(), |ui| {
+            close = crate::ui::workbench::dialog_header(ui, "AI: commit message");
             ui.label("建议的 commit subject:");
             ui.label(egui::RichText::new(subject).strong());
-            ui.horizontal(|ui| {
+            crate::ui::workbench::dialog_footer_divider(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 let copy = ui.button("复制");
+                ui.add_space(crate::ui::tokens::SPACE_MD);
+                let dismiss = ui.button("关闭");
                 if copy.clicked() {
                     ctx.copy_text(subject.to_owned());
                 }
-                buttons = Some((copy, ui.button("关闭")));
+                buttons = Some((copy, dismiss));
             });
         });
-    buttons.expect("浮窗必然绘制按钮")
+    let (copy, dismiss) = buttons.expect("浮窗必然绘制按钮");
+    (copy, dismiss, close)
 }
 
-/// 选区润色确认浮窗(#61 M3);返回(确认替换, 放弃, 复制)按钮的响应,
-/// 测试定位用(与 `commit_dialog` 同款手法;真正的替换/放弃在归约)。
+/// 选区润色确认浮窗(#61 M3);返回(确认替换, 放弃, 复制, ×)响应,
+/// 测试定位用(与 `commit_dialog` 同款手法,× 与「放弃」同语义;
+/// 真正的替换/放弃在归约)。
 ///
 /// 正文是**只读**多行文本区(`&str` 的不可变 `TextBuffer`),包在
 /// ScrollArea 里可滚动 —— 润色草稿可能比视口长。流式进行中草稿逐块增长
@@ -1772,9 +1780,10 @@ fn selection_ai_polish_dialog(
     ui: &mut egui::Ui,
     draft: &str,
     streaming: bool,
-) -> (egui::Response, egui::Response, egui::Response) {
+) -> (egui::Response, egui::Response, egui::Response, bool) {
     let ctx = ui.ctx().clone();
     let mut buttons = None;
+    let mut close = false;
     egui::Window::new("AI 润色")
         // 固定初始位与尺寸:浮窗出现位置可预期(commit_dialog 同款),
         // resizable 允许用户拉大看长草稿。
@@ -1782,8 +1791,10 @@ fn selection_ai_polish_dialog(
         .default_size([380.0, 240.0])
         .collapsible(false)
         .resizable(true)
+        .title_bar(false)
         .frame(crate::ui::workbench::dialog_frame(ui))
         .show(ui.ctx(), |ui| {
+            close = crate::ui::workbench::dialog_header(ui, "AI 润色");
             ui.label(if streaming {
                 "润色中…(完成后可确认整段替换选区)"
             } else {
@@ -1804,29 +1815,35 @@ fn selection_ai_polish_dialog(
                             .desired_width(340.0),
                     );
                 });
-            ui.horizontal(|ui| {
+            crate::ui::workbench::dialog_footer_divider(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                let confirm = ui.add_enabled(!streaming, egui::Button::new("确认替换"));
+                ui.add_space(crate::ui::tokens::SPACE_MD);
+                let dismiss = ui.button(if streaming { "放弃" } else { "放弃(Esc)" });
                 let copy = ui.button("复制");
                 if copy.clicked() {
                     ctx.copy_text(draft.to_owned());
                 }
-                let confirm = ui.add_enabled(!streaming, egui::Button::new("确认替换"));
-                let dismiss = ui.button(if streaming { "放弃" } else { "放弃(Esc)" });
                 buttons = Some((confirm, dismiss, copy));
             });
         });
-    buttons.expect("浮窗必然绘制按钮")
+    let (confirm, dismiss, copy) = buttons.expect("浮窗必然绘制按钮");
+    (confirm, dismiss, copy, close)
 }
 
-/// 破坏性确认浮窗骨架(「关闭标签」与「Git:回滚」共用,2026-10-10 观感
-/// 改版:裸 Window + 默认按钮 → DANGER 警示横幅 + 右对齐按钮行):
+/// 破坏性确认浮窗骨架(「关闭标签」与「Git:回滚」共用):
 ///
+/// * 标题行:加粗标题居左 + × 关闭钮居右,下方细分隔线
+///   ([`crate::ui::workbench::dialog_header`],2026-10-15 观感改版);
 /// * 说明行(默认前景,各弹窗自己的 lead);
 /// * 警示横幅:淡红底 + 红描边圆角条(与设置页 card 的左侧强调条同款
 ///   语言,强调色换 DANGER),不可逆警示居中其上;
 /// * 可选附加警示行(checkout 的针对性行为告知,`escalate` 升黄);
-/// * 按钮右对齐:中性「取消」+ 危险实心确认钮([`danger_button`])。
+/// * 页脚细分隔线 + 按钮右对齐:中性「取消」在左、危险实心确认钮
+///   ([`danger_button`])居右。
 ///
-/// 返回(确认, 取消)按钮的响应,测试定位用;真正的动作都在归约。
+/// 返回(确认, 取消, ×是否被点)供测试定位,取消语义 = 取消钮或 ×
+/// 任一被点;真正的动作都在归约。
 pub(crate) fn destructive_confirm_dialog(
     ui: &mut egui::Ui,
     title: &str,
@@ -1834,8 +1851,9 @@ pub(crate) fn destructive_confirm_dialog(
     warning: &str,
     confirm_text: &str,
     extra: Option<(&str, bool)>,
-) -> (egui::Response, egui::Response) {
+) -> (egui::Response, egui::Response, bool) {
     let mut buttons = None;
+    let mut close = false;
     let danger = crate::ui::tokens::DANGER;
     egui::Window::new(title)
         .title_bar(false)
@@ -1844,12 +1862,7 @@ pub(crate) fn destructive_confirm_dialog(
         .resizable(false)
         .frame(crate::ui::workbench::dialog_frame(ui))
         .show(ui.ctx(), |ui| {
-            ui.label(
-                egui::RichText::new(title)
-                    .size(crate::ui::tokens::text::TITLE)
-                    .strong(),
-            );
-            ui.add_space(crate::ui::tokens::SPACE_XS);
+            close = crate::ui::workbench::dialog_header(ui, title);
             ui.label(lead);
             egui::Frame::NONE
                 .fill(egui::Color32::from_rgba_unmultiplied(
@@ -1885,17 +1898,20 @@ pub(crate) fn destructive_confirm_dialog(
                 });
             }
             ui.add_space(crate::ui::tokens::SPACE_XS);
-            // 按钮行用普通 horizontal(取消在左、危险确认在右):不用
-            // right_to_left —— 它的 cross-center 子 Ui 在 Window 里会申领
-            // 整块剩余高度,窗被撑高、按钮跨帧漂移(无头测试当场抓到:
-            // 采点帧 y=231、点击帧 y=374,点击落空)。
-            ui.horizontal(|ui| {
-                let cancel = ui.button("取消");
+            // 页脚分隔线 + 按钮右对齐(right_to_left 布局里先加的在最右:
+            // 危险确认居右、取消在其左)。cross 取 Min 不取 Center ——
+            // Center 子 Ui 在 Window 里会申领整块剩余高度,窗被撑高、按钮
+            // 跨帧漂移(无头测试当场抓到:采点帧 y=231、点击帧 y=374)。
+            crate::ui::workbench::dialog_footer_divider(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 let confirm = danger_button(ui, confirm_text);
+                ui.add_space(crate::ui::tokens::SPACE_MD);
+                let cancel = ui.button("取消");
                 buttons = Some((confirm, cancel));
             });
         });
-    buttons.expect("浮窗必然绘制按钮")
+    let (confirm, cancel) = buttons.expect("浮窗必然绘制按钮");
+    (confirm, cancel, close)
 }
 
 /// 危险操作按钮:与 [`crate::settings::primary_button`] 同构(实心底 +
@@ -1912,9 +1928,9 @@ fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(button)
 }
 
-/// 脏标签关闭确认浮窗;返回(确认关闭, 取消)按钮的响应,测试定位用
+/// 脏标签关闭确认浮窗;返回(确认关闭, 取消, ×)响应,测试定位用
 /// (与 `checkout_dialog` 同款手法;真正的移除在归约)。
-fn tab_close_dialog(ui: &mut egui::Ui, name: &str) -> (egui::Response, egui::Response) {
+fn tab_close_dialog(ui: &mut egui::Ui, name: &str) -> (egui::Response, egui::Response, bool) {
     destructive_confirm_dialog(
         ui,
         "关闭标签",
@@ -1925,7 +1941,7 @@ fn tab_close_dialog(ui: &mut egui::Ui, name: &str) -> (egui::Response, egui::Res
     )
 }
 
-/// 回滚确认浮窗;返回(回滚, 取消)按钮的响应,测试定位用(与
+/// 回滚确认浮窗;返回(回滚, 取消, ×)响应,测试定位用(与
 /// `commit_dialog` 同款手法)。只展示与收集点击,checkout 在归约。
 /// `open_in_editor`/`dirty` 驱动当前文档的针对性警示
 /// ([`checkout_extra_warning`]),dirty 状态取自缓冲真源、每帧重估。
@@ -1934,7 +1950,7 @@ fn checkout_dialog(
     path: &str,
     open_in_editor: bool,
     dirty: bool,
-) -> (egui::Response, egui::Response) {
+) -> (egui::Response, egui::Response, bool) {
     destructive_confirm_dialog(
         ui,
         "Git: 回滚文件",
@@ -1945,10 +1961,13 @@ fn checkout_dialog(
     )
 }
 
-/// 侧边栏「全部替换」确认浮窗;返回(全部替换, 取消)按钮的响应,测试
+/// 侧边栏「全部替换」确认浮窗;返回(全部替换, 取消, ×)响应,测试
 /// 定位用(与 `checkout_dialog` 同款手法;真正的替换在归约)。附加行
 /// 告知打开中文件的差异行为(缓冲替换 vs 直接写盘,见归约注释)。
-fn search_replace_dialog(ui: &mut egui::Ui, files: usize) -> (egui::Response, egui::Response) {
+fn search_replace_dialog(
+    ui: &mut egui::Ui,
+    files: usize,
+) -> (egui::Response, egui::Response, bool) {
     destructive_confirm_dialog(
         ui,
         "搜索: 全部替换",
@@ -2014,7 +2033,7 @@ mod tests {
             let mut rect = Rect::NOTHING;
             for _ in 0..4 {
                 ctx.run_ui(RawInput::default(), |ui| {
-                    let (yes, no) = search_replace_dialog(ui, 1);
+                    let (yes, no, _x) = search_replace_dialog(ui, 1);
                     rect = if confirm { yes.rect } else { no.rect };
                 })
                 .drop_without_applying_deltas();
@@ -4495,7 +4514,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                let (copy, close) = commit_dialog(ui, "docs: 新增README.md");
+                let (copy, close, _x) = commit_dialog(ui, "docs: 新增README.md");
                 rects.set((copy.rect, close.rect));
             },
         )
@@ -4620,7 +4639,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                let (confirm, dismiss, _copy) = selection_ai_polish_dialog(ui, "润色稿", false);
+                let (confirm, dismiss, _copy, _x) = selection_ai_polish_dialog(ui, "润色稿", false);
                 rects.set((confirm.rect, dismiss.rect));
             },
         );
@@ -4680,7 +4699,8 @@ mod tests {
         });
         let rects2 = Cell::new((Rect::NOTHING, Rect::NOTHING));
         let output = ctx.run_ui(RawInput::default(), |ui| {
-            let (confirm, dismiss, _copy) = selection_ai_polish_dialog(ui, "甲乙 polished", false);
+            let (confirm, dismiss, _copy, _x) =
+                selection_ai_polish_dialog(ui, "甲乙 polished", false);
             rects2.set((confirm.rect, dismiss.rect));
         });
         output.drop_without_applying_deltas();
@@ -4836,7 +4856,7 @@ mod tests {
 
         // 帧 1:渲染浮窗拿按钮位置(Area 按 id 记忆,draw 内位置一致)
         ctx.run_ui(RawInput::default(), |ui| {
-            let (confirm, cancel) = checkout_dialog(ui, "a.md", false, false);
+            let (confirm, cancel, _x) = checkout_dialog(ui, "a.md", false, false);
             rects.set((confirm.rect, cancel.rect));
         })
         .drop_without_applying_deltas();
@@ -4897,6 +4917,116 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, Message::GitCheckoutConfirmed)),
             "{:?}",
+            app.outbox
+        );
+    }
+
+    /// 回滚确认浮窗观感守门(2026-10-15 图2风格改版):确认钮右对齐贴窗
+    /// 右缘(内距 20)、取消在其左且同一行;窗口高度跨帧恒定且不被撑高
+    /// —— 防 right_to_left 的 cross-Center 子 Ui 在 Window 里申领整块剩余
+    /// 高度(2026-10-10 旧坑:采点帧与点击帧 y 差 143,点击落空)。
+    #[test]
+    fn confirm_dialog_footer_right_aligned_and_height_stable() {
+        let ctx = egui::Context::default();
+        let mut geo = None;
+        let mut heights = Vec::new();
+        for _ in 0..4 {
+            ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(test_viewport()),
+                    ..Default::default()
+                },
+                |ui| {
+                    let (confirm, cancel, _x) = checkout_dialog(ui, "a.md", false, false);
+                    let rect = ui
+                        .ctx()
+                        .memory(|memory| memory.area_rect(egui::Id::new(Some("Git: 回滚文件"))))
+                        .expect("浮窗 Area 已注册");
+                    geo = Some((confirm.rect, cancel.rect, rect));
+                },
+            )
+            .drop_without_applying_deltas();
+            let (_, _, rect) = geo.expect("至少跑了一帧");
+            heights.push(rect.height());
+        }
+        let (confirm, cancel, window) = geo.expect("至少跑了一帧");
+        assert!(confirm.right() > cancel.right(), "确认钮在取消钮右侧");
+        assert!(
+            (confirm.center().y - cancel.center().y).abs() < 1.0,
+            "两钮同一行:confirm y={:?} cancel y={:?}",
+            confirm.center(),
+            cancel.center()
+        );
+        let inset = window.right() - confirm.right();
+        assert!(
+            (10.0..=34.0).contains(&inset),
+            "确认钮贴窗右缘(内距 20):inset={inset}"
+        );
+        assert!(cancel.left() > window.center().x, "按钮组整体落在右半区");
+        // 首帧是 sizing pass,从第二帧起高度必须稳定(不逐帧长高)。
+        assert_eq!(heights[1], heights[2], "窗口高度跨帧恒定:{heights:?}");
+        assert_eq!(heights[2], heights[3], "窗口高度跨帧恒定:{heights:?}");
+        assert!(heights[3] < 360.0, "窗口未被撑高:{heights:?}");
+    }
+
+    /// 标题行 × 关闭钮:与「取消」同语义,完整 draw 下点击发
+    /// GitCheckoutCancelled(× 的位置由窗口几何推出:内距 20 + 28px 图标
+    /// 命中区,中心在内容右缘向内 14、顶缘向下 14)。
+    #[test]
+    fn checkout_dialog_close_icon_sends_cancel() {
+        let mut app = LaterMdApp::default();
+        app.state.git.confirm_checkout = Some("a.md".to_owned());
+        let ctx = egui::Context::default();
+        let mut close_center = None;
+        // 帧 1-3:渲染浮窗,按窗口几何推出 × 中心(Area 按 id 记忆,后续
+        // 帧 draw 内位置一致)
+        for _ in 0..3 {
+            ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(test_viewport()),
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = checkout_dialog(ui, "a.md", false, false);
+                    let window = ui
+                        .ctx()
+                        .memory(|memory| memory.area_rect(egui::Id::new(Some("Git: 回滚文件"))))
+                        .expect("浮窗 Area 已注册");
+                    // × 图标 28px 命中区,中心 = 内容右缘向内 14、顶缘向下 14
+                    close_center = Some(egui::pos2(
+                        window.right() - 20.0 - 14.0,
+                        window.top() + 20.0 + 14.0,
+                    ));
+                },
+            )
+            .drop_without_applying_deltas();
+        }
+        let pos = close_center.expect("浮窗几何已记录");
+        let click = |pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        for events in [
+            vec![Event::PointerMoved(pos)],
+            vec![click(true)],
+            vec![click(false)],
+        ] {
+            let output = ctx.run_ui(
+                RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.drop_without_applying_deltas();
+        }
+        assert!(
+            app.outbox
+                .iter()
+                .any(|m| matches!(m, Message::GitCheckoutCancelled)),
+            "× 关闭应与取消同语义:{:?}",
             app.outbox
         );
     }

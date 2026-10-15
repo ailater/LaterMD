@@ -1143,37 +1143,42 @@ fn files_panel(
 /// 分隔符时禁用:这两种名 `filetree::create_markdown` 必拒,让按钮先灰
 /// 掉比让用户点了吃一条错误提示友好。归约侧仍防御性拒绝直发的消息。
 ///
-/// 返回(创建, 取消)响应供无头测试定位(与 `tabs::rename_dialog` 同款)。
+/// 返回(创建, 取消, ×)响应供无头测试定位(与 `tabs::rename_dialog`
+/// 同款,× 与「取消」同语义)。
 pub(crate) fn new_file_dialog(
     ui: &mut egui::Ui,
     new_file: &mut crate::filetree::NewFileDraft,
-) -> (egui::Response, egui::Response) {
+) -> (egui::Response, egui::Response, bool) {
     let mut buttons = None;
+    let mut close = false;
     egui::Window::new("新建文档")
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ui.ctx().viewport_rect().center())
         .collapsible(false)
         .resizable(false)
+        .title_bar(false)
         .frame(crate::ui::workbench::dialog_frame(ui))
         .show(ui.ctx(), |ui| {
+            close = crate::ui::workbench::dialog_header(ui, "新建文档");
             ui.label("文件名");
             ui.text_edit_singleline(&mut new_file.draft)
                 .on_hover_text("可省略 .md 后缀;已存在同名文件时自动让开");
             ui.add_space(tokens::SPACE_XS);
             ui.weak(format!("位置:{}", new_file.dir.display()));
-            ui.add_space(tokens::SPACE_SM);
-            ui.separator();
-            ui.horizontal(|ui| {
+            crate::ui::workbench::dialog_footer_divider(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 let name = new_file.draft.trim();
                 let ready = crate::filetree::valid_file_name(name);
                 let confirm = ui
                     .add_enabled(ready, egui::Button::new("创建"))
                     .on_disabled_hover_text("文件名不能为空,也不能包含路径分隔符");
+                ui.add_space(tokens::SPACE_MD);
                 let cancel = ui.button("取消");
                 buttons = Some((confirm, cancel));
             });
         });
-    buttons.expect("浮窗必然绘制创建/取消按钮")
+    let (confirm, cancel) = buttons.expect("浮窗必然绘制创建/取消按钮");
+    (confirm, cancel, close)
 }
 
 /// 「新建文件夹」浮窗(context-menu-plan §3 M2):形态与
@@ -1181,62 +1186,68 @@ pub(crate) fn new_file_dialog(
 /// 落盘在归约(`State::confirm_new_folder`)。文件夹名不补后缀,
 /// 也没有「可省略 .md」的提示。
 ///
-/// 返回(创建, 取消)响应供无头测试定位。
+/// 返回(创建, 取消, ×)响应供无头测试定位。
 pub(crate) fn new_folder_dialog(
     ui: &mut egui::Ui,
     draft: &mut crate::filetree::NewFileDraft,
-) -> (egui::Response, egui::Response) {
+) -> (egui::Response, egui::Response, bool) {
     let mut buttons = None;
+    let mut close = false;
     egui::Window::new("新建文件夹")
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ui.ctx().viewport_rect().center())
         .collapsible(false)
         .resizable(false)
+        .title_bar(false)
         .frame(crate::ui::workbench::dialog_frame(ui))
         .show(ui.ctx(), |ui| {
+            close = crate::ui::workbench::dialog_header(ui, "新建文件夹");
             ui.label("文件夹名");
             ui.text_edit_singleline(&mut draft.draft);
             ui.add_space(tokens::SPACE_XS);
             ui.weak(format!("位置:{}", draft.dir.display()));
-            ui.add_space(tokens::SPACE_SM);
-            ui.separator();
-            ui.horizontal(|ui| {
+            crate::ui::workbench::dialog_footer_divider(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 let ready = crate::filetree::valid_file_name(draft.draft.trim());
                 let confirm = ui
                     .add_enabled(ready, egui::Button::new("创建"))
                     .on_disabled_hover_text("名字不能为空,也不能包含路径分隔符");
+                ui.add_space(tokens::SPACE_MD);
                 let cancel = ui.button("取消");
                 buttons = Some((confirm, cancel));
             });
         });
-    buttons.expect("浮窗必然绘制创建/取消按钮")
+    let (confirm, cancel) = buttons.expect("浮窗必然绘制创建/取消按钮");
+    (confirm, cancel, close)
 }
 
 /// 「重命名」浮窗(context-menu-plan §3 M2,真实文件改名):预填现名
 /// (调用方已填),确认发 `FileTreeRenameConfirmed`;改名 + 打开中标签
 /// 换绑在归约(`State::confirm_rename`)。
 ///
-/// 返回(确定, 取消)响应供无头测试定位。
+/// 返回(确定, 取消, ×)响应供无头测试定位。
 pub(crate) fn rename_dialog(
     ui: &mut egui::Ui,
     draft: &mut crate::filetree::RenameDraft,
-) -> (egui::Response, egui::Response) {
+) -> (egui::Response, egui::Response, bool) {
     let mut buttons = None;
+    let mut close = false;
     egui::Window::new("重命名")
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ui.ctx().viewport_rect().center())
         .collapsible(false)
         .resizable(false)
+        .title_bar(false)
         .frame(crate::ui::workbench::dialog_frame(ui))
         .show(ui.ctx(), |ui| {
+            close = crate::ui::workbench::dialog_header(ui, "重命名");
             ui.label("新名字");
             ui.text_edit_singleline(&mut draft.draft)
                 .on_hover_text("只改这一项的名字;打开中的文档会跟着换到新路径");
             ui.add_space(tokens::SPACE_XS);
             ui.weak(format!("原路径:{}", draft.from.display()));
-            ui.add_space(tokens::SPACE_SM);
-            ui.separator();
-            ui.horizontal(|ui| {
+            crate::ui::workbench::dialog_footer_divider(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 // 现名相同视为未改,禁用确定(避免一次无意义 rename)
                 let current = draft
                     .from
@@ -1248,23 +1259,25 @@ pub(crate) fn rename_dialog(
                 let confirm = ui
                     .add_enabled(ready, egui::Button::new("确定"))
                     .on_disabled_hover_text("名字不能为空、不能含路径分隔符,也不能与现名相同");
+                ui.add_space(tokens::SPACE_MD);
                 let cancel = ui.button("取消");
                 buttons = Some((confirm, cancel));
             });
         });
-    buttons.expect("浮窗必然绘制确定/取消按钮")
+    let (confirm, cancel) = buttons.expect("浮窗必然绘制确定/取消按钮");
+    (confirm, cancel, close)
 }
 
 /// 「删除」确认浮窗(context-menu-plan §3 M2):复用
 /// `destructive_confirm_dialog` 的危险语义;文案按文件/目录分叉,
 /// 删除走系统废纸篓(可恢复)在文案里明说。
 ///
-/// 返回(删除, 取消)响应供无头测试定位。
+/// 返回(删除, 取消, ×)响应供无头测试定位。
 pub(crate) fn delete_confirm_dialog(
     ui: &mut egui::Ui,
     path: &Path,
     is_dir: bool,
-) -> (egui::Response, egui::Response) {
+) -> (egui::Response, egui::Response, bool) {
     let (lead, warning) = if is_dir {
         (
             format!("把文件夹 {} 移入废纸篓?", path.display()),

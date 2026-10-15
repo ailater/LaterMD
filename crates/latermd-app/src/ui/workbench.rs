@@ -243,13 +243,60 @@ fn divider_is_hot(ui: &egui::Ui) -> bool {
 }
 
 /// 浮窗统一的 macOS 风格卡片：柔和边界、内容色底和充足内距。
+///
+/// 2026-10-15 观感改版（对齐现代 Web 弹窗）：圆角提到 14、内距到 20，
+/// 描边从「随分隔线热度变化」改为**常量** border 档（浮窗不是面板边界,
+/// 描边不该跟 `divider_is_hot` 联动闪变），另加一层低偏移柔和投影把
+/// 浮层从底面上托起来。颜色全部取自当前主题 token,明暗各自成立。
 pub(crate) fn dialog_frame(ui: &egui::Ui) -> egui::Frame {
     let colors = crate::theme::shell(ui);
     egui::Frame::window(ui.style())
         .fill(colors.content)
-        .stroke(separator(ui))
-        .corner_radius(egui::CornerRadius::same(12))
-        .inner_margin(egui::Margin::same(16))
+        .stroke(egui::Stroke::new(
+            1.0 / ui.ctx().pixels_per_point(),
+            colors.border,
+        ))
+        .corner_radius(egui::CornerRadius::same(14))
+        .inner_margin(egui::Margin::same(20))
+        .shadow(egui::Shadow {
+            offset: [0, 8],
+            blur: 24,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(38),
+        })
+}
+
+/// 对话框标题行(现代 Web 弹窗式):加粗标题居左,× 关闭钮居右,下方
+/// 一条细分隔线把标题区与正文分开。返回 × 是否被点 —— 与 footer 的
+/// 「取消」同语义,由调用方并入取消通路(浮窗本身不发消息)。
+///
+/// 行内用 `right_to_left(Align::Min)` 把 × 推到右缘:cross 取 Min 而非
+/// Center,子 Ui 贴内容高、不申领 Window 剩余高度(destructive_confirm
+/// 2026-10-10 的踩坑记录:Center 在 Window 里会把窗撑高、按钮跨帧漂移)。
+pub(crate) fn dialog_header(ui: &mut egui::Ui, title: &str) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(title)
+                .size(crate::ui::tokens::text::TITLE)
+                .strong(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            close = small_icon(ui, crate::ui::icons::Icon::Close, "关闭").clicked();
+        });
+    });
+    ui.add_space(crate::ui::tokens::SPACE_XS);
+    ui.separator();
+    ui.add_space(crate::ui::tokens::SPACE_SM);
+    close
+}
+
+/// 对话框页脚分隔线:按钮行与正文之间的一条细线(与 [`dialog_header`]
+/// 的标题分隔线同一档,页脚右侧放按钮行由各对话框自己排)。
+pub(crate) fn dialog_footer_divider(ui: &mut egui::Ui) {
+    ui.add_space(crate::ui::tokens::SPACE_SM);
+    ui.separator();
+    ui.add_space(crate::ui::tokens::SPACE_SM);
 }
 
 fn action(ui: &mut egui::Ui, rect: Rect, icon: Icon, tip: &str, selected: bool) -> bool {
