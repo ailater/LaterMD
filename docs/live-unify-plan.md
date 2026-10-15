@@ -16,7 +16,7 @@
 | P3 | 禅定切到 Live 浏览态 | 完成 | 2026-10-15 | [#241](https://github.com/ailater/LaterMd/pull/241) |
 | P4 | 删右栏（面板 / 布局状态 / 命令 / 入口 / 常量） | 完成 | 2026-10-15 | [#242](https://github.com/ailater/LaterMd/pull/242) |
 | P5 | 测试迁移 + PreviewState 瘦身 | 完成 | 2026-10-15 | [#243](https://github.com/ailater/LaterMd/pull/243) |
-| P6 | 文档与 CHANGELOG | 完成 | 2026-10-15 | (本轮) |
+| P6 | 文档与 CHANGELOG | 完成 | 2026-10-15 | [#254](https://github.com/ailater/LaterMd/pull/254) |
 
 ### 执行备注(每次推进一步时在此登记,供下一轮接手)
 
