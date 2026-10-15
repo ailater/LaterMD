@@ -957,7 +957,10 @@ pub fn workspace_picker(
         if !tree.recents.is_empty() {
             ui.separator();
         }
-        if ui.button("打开文件夹…").clicked() {
+        // 纯 CJK 标签行走 menu_item(墨迹重心补偿);上方路径行走
+        // selectable_label(路径以拉丁为主,墨迹偏心不同向),见 menu_item
+        // 模块注释的适用边界。
+        if crate::ui::menu_item::button(ui, "打开文件夹…").clicked() {
             outbox.push(Message::FileTreeRootPick);
             ui.close();
         }

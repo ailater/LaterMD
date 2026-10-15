@@ -1609,45 +1609,50 @@ fn tree_row(
 /// 既有消息通道 —— 打开走 `FileSelected`(与行点击同一条),重命名/
 /// 删除只发请求,浮窗与确认在 `layout.rs` 顶层接线;独立成函数便于
 /// 无头测试直接构建与点击(tabs.rs `context_menu_items` 同手法)。
+/// 条目用 `menu_item::button`(自绘,墨迹重心补偿,见 ui/menu_item.rs
+/// 模块注释)而非裸 `ui.button`:
+/// egui Button 的行盒几何居中会让 CJK 墨迹在 hover 灰影里偏上 ~2.5px
+/// (2026-10-15 坤哥反馈,menu_item 模块注释有三源取证)。
 pub(crate) fn tree_context_menu(ui: &mut egui::Ui, entry: &TreeEntry, outbox: &mut Vec<Message>) {
+    use crate::ui::menu_item;
     if entry.is_dir {
-        if ui.button("新建文档").clicked() {
+        if menu_item::button(ui, "新建文档").clicked() {
             outbox.push(Message::FileTreeNewFileRequested(entry.path.clone()));
         }
-        if ui.button("新建文件夹").clicked() {
+        if menu_item::button(ui, "新建文件夹").clicked() {
             outbox.push(Message::FileTreeNewFolderRequested(entry.path.clone()));
         }
         ui.separator();
-    } else if ui.button("打开").clicked() {
+    } else if menu_item::button(ui, "打开").clicked() {
         outbox.push(Message::FileSelected(entry.path.clone()));
     }
-    if ui.button("重命名").clicked() {
+    if menu_item::button(ui, "重命名").clicked() {
         outbox.push(Message::FileTreeRenameRequested(entry.path.clone()));
     }
-    if ui.button("删除").clicked() {
+    if menu_item::button(ui, "删除").clicked() {
         outbox.push(Message::FileTreeDeleteRequested(entry.path.clone()));
     }
     ui.separator();
-    if !entry.is_dir && ui.button("查看文件历史").clicked() {
+    if !entry.is_dir && menu_item::button(ui, "查看文件历史").clicked() {
         outbox.push(Message::GitFileHistoryRequested(entry.path.clone()));
     }
-    if ui.button("复制路径").clicked() {
+    if menu_item::button(ui, "复制路径").clicked() {
         outbox.push(Message::FileTreeCopyPath {
             path: entry.path.clone(),
             relative: false,
         });
     }
-    if ui.button("复制相对路径").clicked() {
+    if menu_item::button(ui, "复制相对路径").clicked() {
         outbox.push(Message::FileTreeCopyPath {
             path: entry.path.clone(),
             relative: true,
         });
     }
     ui.separator();
-    if ui.button("在文件管理器中显示").clicked() {
+    if menu_item::button(ui, "在文件管理器中显示").clicked() {
         outbox.push(Message::FileTreeReveal(entry.path.clone()));
     }
-    if entry.is_dir && ui.button("刷新").clicked() {
+    if entry.is_dir && menu_item::button(ui, "刷新").clicked() {
         outbox.push(Message::FileTreeRefreshRequested);
     }
 }

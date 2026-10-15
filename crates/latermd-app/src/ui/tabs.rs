@@ -286,9 +286,11 @@ pub(crate) struct TabMenuItems {
 }
 
 /// 单条菜单项:可用性由调用方判定(无目标/已是当前模式即禁用),禁用态
-/// 给悬停说明。
+/// 给悬停说明。用 `crate::ui::menu_item`(自绘,墨迹重心补偿,见
+/// ui/menu_item.rs 模块注释)而非裸 `egui::Button`:行盒几何居中会让
+/// CJK 标签在 hover 灰影里偏上。
 fn menu_item(ui: &mut egui::Ui, label: &str, enabled: bool, disabled_hint: &str) -> egui::Response {
-    let response = ui.add_enabled(enabled, egui::Button::new(label));
+    let response = crate::ui::menu_item::button_enabled(ui, enabled, label);
     if enabled {
         response
     } else {

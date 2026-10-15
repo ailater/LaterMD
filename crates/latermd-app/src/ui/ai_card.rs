@@ -396,17 +396,19 @@ impl LinkHandler for RichLinkHandler {
         }
         let clicked = Rc::clone(&self.clicked);
         let local = crate::doclink::classify(href) == crate::doclink::HrefKind::Local;
+        // 条目用 menu_item(自绘,墨迹重心补偿):CJK 标签在 egui Button 的
+        // hover 灰影里偏上 ~2.5px(menu_item 模块注释有取证)。
         response.context_menu(|ui| {
             if local {
-                if ui.button("打开文档").clicked() {
+                if crate::ui::menu_item::button(ui, "打开文档").clicked() {
                     clicked.borrow_mut().push(Message::DocLinkClicked {
                         href: href.to_owned(),
                     });
                 }
-            } else if ui.button("打开链接").clicked() {
+            } else if crate::ui::menu_item::button(ui, "打开链接").clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(href.to_owned()));
             }
-            if ui.button("复制链接地址").clicked() {
+            if crate::ui::menu_item::button(ui, "复制链接地址").clicked() {
                 clicked
                     .borrow_mut()
                     .push(Message::CopyText(href.to_owned()));
@@ -420,10 +422,10 @@ impl LinkHandler for RichLinkHandler {
     fn image_response(&self, _ui: &egui::Ui, _alt: &str, url: &str, response: &egui::Response) {
         let clicked = Rc::clone(&self.clicked);
         response.context_menu(|ui| {
-            if ui.button("在浏览器打开").clicked() {
+            if crate::ui::menu_item::button(ui, "在浏览器打开").clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(url.to_owned()));
             }
-            if ui.button("复制图片地址").clicked() {
+            if crate::ui::menu_item::button(ui, "复制图片地址").clicked() {
                 clicked.borrow_mut().push(Message::CopyText(url.to_owned()));
             }
         });
