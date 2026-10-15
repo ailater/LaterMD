@@ -49,8 +49,10 @@ y[0,35](36px)右端 `#202124` 底上 7 组非背景像素群,等距 ~32px(WINDOW
 
 x-runs:`(683,700) (715,732) (749,762) (781,794) (815,824) (846,857) (878,889)`
 
-对照 `ui/titlebar.rs:45-53` 的 `TITLE_BUTTONS = [PanelLeft, PanelRight, Zen, Settings, Minimize, Maximize, Close]`(= 规格 §3.1 表):**齿轮是第 4 组 x(781,794)**,最左第 1 组是 `┃左`。
+对照验收当时的 `TITLE_BUTTONS = [PanelLeft, PanelRight, Zen, Settings, Minimize, Maximize, Close]`(= 规格 §3.1 表):**齿轮是第 4 组 x(781,794)**,最左第 1 组是 `┃左`。
 > 备注:验收棒任务描述写「最左一个是齿轮」,与规格 ui-shell-redesign.md §3.1 及代码常量不符,按规格验收通过。齿轮若要独占最左需改 `TITLE_BUTTONS` 顺序,属产品决策,未动。
+>
+> **2026-10-15 live-unify P4 后记**:右栏对照预览退役,`PanelRight` 键删除,现表 `TITLE_BUTTONS = [PanelLeft, Zen, Settings, Minimize, Maximize, Close]`(6 键;上方 x-runs 是 7 键时代的验收记录,不再对应现码)。
 
 ### ⑤ 状态栏横跨 —— PASS(横跨与左端采样;右端无内容,见 #33)
 

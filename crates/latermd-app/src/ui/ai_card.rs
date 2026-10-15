@@ -1,7 +1,7 @@
 //! AI 指令卡与富渲染链接 handler(右栏预览与 Live 写作渲染**同一套**)。
 //!
 //! 2026-10-15 从 [`crate::ui::preview`] 搬出并拆层(live-unify-plan P2/D1):
-//! 原 [`crate::ui::preview::AiLinkHandler`] 是纯右栏能力,右栏退役后 AI 卡
+//! 原 preview::AiLinkHandler(右栏 handler,已随之退役)是纯右栏能力,右栏退役后 AI 卡
 //! 必须有宿主。拆法:
 //!
 //! * 基础层 [`RichLinkHandler`]:wiki/hl/emoji/task/mermaid 的样式、点击、
@@ -179,7 +179,9 @@ impl RichLinkHandler {
         self.clicked.borrow().clone()
     }
 
-    /// 本帧 emoji 占位区快照(手型抑制 + 无头探针消费)。
+    /// 本帧 emoji 占位区快照(手型抑制 + 无头探针消费)。预览面板 P4 起
+    /// 无生产调用者,唯一消费者是其测试 → 挂 cfg(test)(P5 随迁移定去留)。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn emoji_rects_snapshot(&self) -> Vec<egui::Rect> {
         self.emoji_rects.borrow().clone()
     }

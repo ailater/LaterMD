@@ -8,6 +8,11 @@
 //! [`Message::AiLinkClicked`],与链接点击同一条归约(流式续写、防重入都
 //! 在归约侧)。
 
+// P4(live-unify)起预览面板无生产调用者(三栏与禅定都走 live::ui);模块
+// 与它的测试按计划在 P5 整体迁移/退役,在那之前保住测试路径编译 —— 生产
+// 构建对整模块豁免 dead_code。
+#![cfg_attr(not(test), allow(dead_code))]
+
 use crate::ai::AiState;
 use crate::state::{Message, PreviewState};
 use eframe::egui;

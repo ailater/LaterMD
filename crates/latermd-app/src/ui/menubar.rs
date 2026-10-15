@@ -105,7 +105,6 @@ const FORMAT_MENU: [&[Command]; 5] = [
 const VIEW_MENU: [&[Command]; 2] = [
     &[
         Command::ToggleSidebar,
-        Command::ToggleRightPreview,
         Command::ToggleLivePreview,
         Command::TypewriterToggle,
         Command::FocusModeToggle,
@@ -195,14 +194,13 @@ fn command_mnemonic(cmd: Command) -> char {
         Command::ImageInsert => 'P',
         Command::EmojiPicker => 'M',
         Command::ToggleSidebar => 'S',
-        Command::ToggleRightPreview => 'P',
         Command::ToggleLivePreview => 'V',
-        // W = typewriter 的词尾;视图菜单内 S/P/V/T 已被占用,菜单内唯一
+        // W = typewriter 的词尾;视图菜单内 S/V/T 已被占用,菜单内唯一
         // (条目层助记是菜单内命名空间,与全局 Alt 层无关)
         Command::TypewriterToggle => 'W',
-        // F = Focus 的词首;视图菜单内 S/P/V/W/T/Z 均未占 F,菜单内唯一
+        // F = Focus 的词首;视图菜单内 S/V/W/T/Z 均未占 F,菜单内唯一
         Command::FocusModeToggle => 'F',
-        // M = Minimap 的词首;视图菜单内 S/P/V/W/F/T/Z 均未占 M,菜单内唯一
+        // M = Minimap 的词首;视图菜单内 S/V/W/F/T/Z 均未占 M,菜单内唯一
         Command::ToggleMinimap => 'M',
         Command::ToggleTheme => 'T',
         Command::ToggleZen => 'Z',
@@ -248,14 +246,13 @@ fn mnemonic_label(ui: &egui::Ui, label: &str, letter: char) -> egui::text::Layou
 /// 布偶开关命令的当前值(菜单条目勾选态;#67 M2):`Some(true/false)` =
 /// 开/关,`None` = 非开关类命令(菜单条目不带勾选列)。
 ///
-/// 口径:只覆盖**有布尔语义**的开关 —— 视图菜单的侧边栏/预览栏/Live/
+/// 口径:只覆盖**有布尔语义**的开关 —— 视图菜单的侧边栏/Live/
 /// 打字机/专注/minimap/禅定;「切换主题」是明暗互换而非开/关(哪个算
 /// 「开」没有自然答案),不加勾选态。真值从 [`State`] 单一事实源取,
 /// 与设置页/标题栏按钮同源(取舍见 decisions-pending #129)。
 pub(crate) fn toggle_checked(cmd: Command, state: &State) -> Option<bool> {
     Some(match cmd {
         Command::ToggleSidebar => state.layout.left,
-        Command::ToggleRightPreview => state.layout.right,
         Command::ToggleLivePreview => state.render_mode == RenderMode::Live,
         Command::TypewriterToggle => state.theme.show_typewriter,
         Command::FocusModeToggle => state.theme.show_focus_mode,
@@ -1654,10 +1651,6 @@ mod tests {
         // 的出厂字段一致)
         let state = State::default();
         assert_eq!(toggle_checked(Command::ToggleSidebar, &state), Some(true));
-        assert_eq!(
-            toggle_checked(Command::ToggleRightPreview, &state),
-            Some(true)
-        );
         assert_eq!(
             toggle_checked(Command::ToggleLivePreview, &state),
             Some(false),
