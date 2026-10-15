@@ -445,6 +445,20 @@ fn measure(ui: &mut egui::Ui, text: &str, font: &egui::FontId) -> f32 {
 /// egui 0.36 没有 `push_style`(也没有 RAII 的 StyleGuard),故手工
 /// save/restore:`set_style` 换进局部样式、绘完立刻换回原值。作用域只包
 /// 这一个控件 —— 不还原会顺带改掉同窗内后续所有控件的观感。
+/// 弹窗单行输入框的**最小高度**。
+///
+/// egui 0.36 的 `TextEdit` 高度只由字体行高决定(实测 19px),**不读**
+/// [`crate::ui::tokens::INPUT_H`] —— 后者只投影给 `spacing.interact_size.y`
+/// (按钮等点击类控件)。19px 框装 10px 字形,上下各只剩 4~5px,大写字母
+/// (无降部)视觉重心本就偏上,读起来「字体靠上」(2026-10-15 坤哥反馈)。
+///
+/// 取 32 而非 36:单行输入框在 360 宽的弹窗里,36 略笨重;32 上下各留
+/// 约 11px,既有呼吸感又不抢标题的层级。
+///
+/// **必须与 `vertical_align(Align::Center)` 配对使用** —— 见
+/// [`dialog_text_edit`] 里的说明:框高和文字位置是两个独立开关。
+const DIALOG_INPUT_H: f32 = 32.0;
+
 pub(crate) fn dialog_text_edit(
     ui: &mut egui::Ui,
     text: &mut dyn egui::widgets::text_edit::TextBuffer,
@@ -465,11 +479,32 @@ pub(crate) fn dialog_text_edit(
     }
     style.visuals.selection.stroke = egui::Stroke::new(1.0 * px, colors.accent);
     ui.set_style(style);
+    // `min_size` 撑起框高:egui 0.36 的 `TextEdit` 高度**只**由字体行高
+    // 决定(实测 19px),不读 `spacing.interact_size.y` —— 所以项目约定的
+    // [`crate::ui::tokens::INPUT_H`] 对它无效。19px 框装 10px 字形,
+    // 上下各只 4~5px,大写字母(无降部)视觉重心偏上,读起来「字体靠上」
+    // (2026-10-15 坤哥反馈)。高度取 `INPUT_H` 同档的 32px:比 36 略
+    // 收,避免单行输入框在弹窗里显得笨重;守门见
+    // `dialog_input_box_has_breathing_room`。
+    //
+    // 水平方向仍用 `desired_width(INFINITY)` 撑满:那是宽度,与高度无关。
     let response = ui.add(
         egui::TextEdit::singleline(text)
             .id(ui.make_persistent_id("dialog-text-edit"))
             .hint_text(hint)
-            .desired_width(f32::INFINITY),
+            .desired_width(f32::INFINITY)
+            // 宽度留 0(由 `desired_width` 决定):`min_size` 的 x 传
+            // `INFINITY` 会与 `desired_width` 的无界宽相减,产出 NaN
+            // rect(实测 `widget rect is NaN: [[-inf ..] [NaN ..]]` 报错)
+            .min_size(egui::vec2(0.0, DIALOG_INPUT_H))
+            // **两个都必需,缺一不可**:
+            // · `min_size` 撑起框高(默认框高 = 字体行高,只有 19px);
+            // · `vertical_align(Center)` 让文字在框内垂直居中 ——
+            //   egui 0.36 的 `TextEdit` 默认 `align = Align2::LEFT_TOP`
+            //   (`builder.rs` 的 `align.align_size_within_rect`),文字**锚在
+            //   框顶**。只加 `min_size` 的话框变高而文字不动,上内边距仍是
+            //   4px(实测),「字体靠上」一点没改善。
+            .vertical_align(egui::Align::Center),
     );
     ui.set_style(saved);
     response.on_hover_text(tooltip)
@@ -1213,6 +1248,85 @@ mod tests {
             }
             _ => None,
         })
+    }
+
+    /// 弹窗输入框的**内边距与垂直居中**守门(2026-10-15 坤哥「框里的
+    /// 字体感觉靠上」)。
+    ///
+    /// 现象**不是**「文字没居中」—— 修之前的墨迹中心只比框中心高 0.5px
+    /// (亚像素噪声),数学上就是居中的。真因是两个独立开关都缺:
+    /// ① egui 0.36 的 `TextEdit` 高度**只**由字体行高决定(实测 19px),
+    /// **不读** [`crate::ui::tokens::INPUT_H`](后者只投影给
+    /// `spacing.interact_size.y`,即按钮等点击类控件)→ 框太矮;
+    /// ② `TextEdit` 默认 `align = Align2::LEFT_TOP`
+    /// (`builder.rs` 的 `align.align_size_within_rect`)→ 文字**锚在框顶**。
+    /// 只补 ① 的话框变高、文字不动,上内边距仍是 4px,现象一点没改善。
+    ///
+    /// 两条判据分别盯两个开关,**都要断言**:
+    /// · `pad_top >= 8` 盯 ①(框高);
+    /// · 墨迹中心与框中心差 `|d| <= 2` 盯 ②(文字位置)—— 只断言内边距
+    ///   会漏:框高但贴顶时,内边距也可能勉强达标。
+    ///
+    /// 阈值依据(实测两档配置):
+    /// | 配置 | 上 | 下 | 中心差 |
+    /// |---|---|---|---|
+    /// | 两个开关都开 | 10.5 | 11.5 | -0.50 |
+    /// | 只开 `min_size` | 4.0 | 18.0 | -7.00 |
+    /// 中心差阈值 2px:正确实现 0.5,坏实现 7.0,取 2 留 3.5 倍余量。
+    /// 内边距阈值 8px 与项目 `SPACE_MD` 同档;正确实现 10.5,留 1.3 倍。
+    #[test]
+    fn dialog_input_box_has_breathing_room() {
+        const MIN_PAD: f32 = 8.0;
+        const MAX_CENTER_SKEW: f32 = 2.0;
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let mut rect = None;
+        let mut ink = None;
+        for _ in 0..2 {
+            let mut text = "AGENTS.md".to_owned();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    ..Default::default()
+                },
+                |ui| {
+                    centered_dialog(ui, "内边距探针")
+                        .default_width(360.0)
+                        .resizable(false)
+                        .show(ui.ctx(), |ui| {
+                            rect = Some(dialog_text_edit(ui, &mut text, "新名称", "").rect);
+                        });
+                },
+            );
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(t) = &clipped.shape {
+                    if t.galley.job.text == "AGENTS.md" {
+                        // `Galley::mesh_bounds` = 字形墨迹的真实包围盒
+                        // (galley 局部坐标,加回 `pos` 才是屏幕坐标)。
+                        ink = Some(t.galley.mesh_bounds.translate(t.pos.to_vec2()));
+                    }
+                }
+            }
+            output.drop_without_applying_deltas();
+        }
+        let r = rect.expect("输入框已绘制");
+        let k = ink.expect("文字已绘制");
+        // 判据①:框高够(上内边距留白)
+        let pad_top = k.top() - r.top();
+        assert!(
+            pad_top >= MIN_PAD,
+            "输入框上内边距 {pad_top:.1}px < {MIN_PAD}px(框高仅 {:.0}px,字行高 {:.0}px)—— \
+             egui 的 TextEdit 不读 tokens::INPUT_H,要自己给 min_size",
+            r.height(),
+            k.height()
+        );
+        // 判据②:文字垂直居中(不贴框顶)
+        let skew = (k.center().y - r.center().y).abs();
+        assert!(
+            skew <= MAX_CENTER_SKEW,
+            "输入框内文字偏心 {skew:.1}px —— TextEdit 默认 Align2::LEFT_TOP \
+             锚在框顶,要 vertical_align(Align::Center)"
+        );
     }
 
     /// `middle_elide` 截中间、留两端(2026-10-15 坤哥:路径的辨识信息在
