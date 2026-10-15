@@ -542,12 +542,14 @@ pub(crate) fn dialog_text_edit(
             //   (`builder.rs` 的 `align.align_size_within_rect`),
             //   不设的话行盒锚在框顶。
             .vertical_align(egui::Align::Center)
-            // 视觉重心补偿:见 `DIALOG_TEXT_DY`。左右保持 0 —— 只动垂直。
-            // `egui::Margin` 只有 `same`/`symmetric` 两个构造器,「仅上边距」
-            // 得用结构体字面量(字段 `left`/`right`/`top`/`bottom`)。
+            // 视觉重心补偿:见 `DIALOG_TEXT_DY`。**左右必须保留 egui 默认的
+            // 4px** —— `TextEdit` 的默认 margin 是 `Margin::symmetric(4, 2)`
+            // (`builder.rs`),第一版把左右一并写成 0,文字直接贴左边缘
+            // (2026-10-15 坤哥「有点太靠左了」)。`egui::Margin` 只有
+            // `same`/`symmetric` 两个构造器,「仅改垂直」得用结构体字面量。
             .margin(egui::Margin {
-                left: 0,
-                right: 0,
+                left: 4,
+                right: 4,
                 top: DIALOG_TEXT_DY as i8,
                 bottom: 0,
             }),
@@ -1403,6 +1405,16 @@ mod tests {
              偏离基线 {PAD_DIFF_BASE}px 超过 {MAX_PAD_DIFF}px —— \
              DIALOG_TEXT_DY / DIALOG_INPUT_H / 字号 任一被改都会跑出区间",
             pad_top - pad_bottom
+        );
+        // 判据④(水平):文字不贴左边缘。第一版 `.margin()` 把左右也写成 0,
+        // 盖掉了 egui 默认的 `Margin::symmetric(4, 2)`,文字直接贴左框边
+        // (2026-10-15 坤哥「有点太靠左了」)。`mesh_bounds` 左侧比真实
+        // 墨迹多约 1px,故阈值取 3(正确实现 ≥4,贴边为 0~1)。
+        let pad_left = k.left() - r.left();
+        assert!(
+            pad_left >= 3.0,
+            "输入框左留白 {pad_left:.1}px < 3px —— `.margin()` 覆盖了 egui 默认的\
+             水平内边距(默认 `Margin::symmetric(4, 2)`),左右要保留 4px"
         );
     }
 
