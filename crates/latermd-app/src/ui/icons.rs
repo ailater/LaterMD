@@ -627,52 +627,59 @@ impl Icon {
             }
             // —— 警告(2026-10-15):圆角三角 + 感叹号 ——
             Self::Warning => {
-                // 圆角三角形。做法:三条边各自退进 `round`,角上用该角的
-                // 内切圆弧补 3 段过渡 —— 与 `round_rect` 的「每 90° 8 段」
-                // 同款思路,只是三角的角是 60°,同样段数已足够平滑。
+                // 圆角三角形。做法:每个角的两条邻边各退进到**切点**,
+                // 角上用 3 段圆弧连接 —— 与 `round_rect` 的「每 90° 8 段」
+                // 同款思路,只是三角的角约 60°,3 段已足够平滑。
                 //
-                // 圆心在**角平分线**上,距角点 = r / sin(θ/2);θ 由两邻边
-                // 单位向量的叉积绝对值给出(θ 的正弦)。三顶点坐标写死,
-                // 角平分线方向与圆弧起止角随之确定,无需 atan2 绕回处理。
+                // **切点必须落在圆上**(离圆心恰好 R),否则圆弧起点与直线
+                // 接缝处会跳变,三条边接不成闭合轮廓。2026-10-15 真机截图
+                // 抓到过这个 bug:第一版把切点算成「沿边退 R」,那点到圆心
+                // 的距离是 0.248 而非 R=0.16,墨迹渲染成了「⏎」而不是三角。
+                // 守门见 `warning_icon_is_left_right_symmetric`(左右对称)。
+                //
+                // 切线长(角点到切点)= **R·cot(θ/2)** = R·cos(θ/2)/sin(θ/2),
+                // θ 是内角;圆心在角平分线上距角点 `R / sin(θ/2)`。
+                // 两式都只用 cos θ = u1·u1(邻边单位向量点积),不需要
+                // `atan2` 绕回处理。
                 const R: f32 = 0.16;
                 const VERTS: [(f32, f32); 3] = [(0.0, -0.46), (-0.46, 0.36), (0.46, 0.36)];
-                // (角点下标, 前邻下标, 后邻下标):三角形顶点顺序即边界
-                // 走向,每个角的「进入边」与「离开边」固定。
+                // (角点下标, 前邻下标, 后邻下标):三角形绕行 0→1→2→0,
+                // 故角 i 的前邻 = (i+2)%3、后邻 = (i+1)%3。
                 const CORNERS: [(usize, usize, usize); 3] = [(0, 2, 1), (1, 0, 2), (2, 1, 0)];
-                let sub = |p: (f32, f32), q: (f32, f32)| -> (f32, f32) {
-                    let len = ((q.0 - p.0).powi(2) + (q.1 - p.1).powi(2)).sqrt();
-                    let t = R / len;
-                    (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t)
+                // 邻边单位向量(从角点指向邻居)
+                let unit = |from: (f32, f32), to: (f32, f32)| {
+                    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+                    let len = (dx * dx + dy * dy).sqrt();
+                    (dx / len, dy / len)
                 };
                 let mut pts: Vec<(f32, f32)> = Vec::with_capacity(64);
                 for (i, j, k) in CORNERS {
                     let corner = VERTS[i];
-                    let (prev, next) = (VERTS[j], VERTS[k]);
-                    let (dx1, dy1) = (prev.0 - corner.0, prev.1 - corner.1);
-                    let (dx2, dy2) = (next.0 - corner.0, next.1 - corner.1);
-                    let l1 = (dx1.powi(2) + dy1.powi(2)).sqrt();
-                    let l2 = (dx2.powi(2) + dy2.powi(2)).sqrt();
-                    // 角平分线 = 两邻边单位向量之和(等权即角平分)
-                    let (bx, by) = (dx1 / l1 + dx2 / l2, dy1 / l1 + dy2 / l2);
-                    let lb = (bx.powi(2) + by.powi(2)).sqrt();
-                    let half_sin = (dx1 * dy2 - dy1 * dx2).abs() / (l1 * l2) / 2.0;
-                    let (cx, cy) = (
-                        corner.0 + bx / lb * (R / half_sin),
-                        corner.1 + by / lb * (R / half_sin),
-                    );
-                    // 前一段边(进入本角)→ 角圆弧 → 后一段边,顺序不跳
-                    let (mut sx, mut sy) = sub(prev, corner);
-                    pts.push((sx, sy));
-                    let a0 = (sy - cy).atan2(sx - cx);
-                    let a1 = (next.1 - cy).atan2(next.0 - cx);
+                    let (u1, u2) = (unit(corner, VERTS[j]), unit(corner, VERTS[k]));
+                    // 内角 θ 的余弦(夹角):u1·u2
+                    let cos_t = u1.0 * u2.0 + u1.1 * u2.1;
+                    // 半角公式(θ∈(0,π) ⇒ 两半角均在 (0, π/2),根号取正)
+                    let sin_half = ((1.0 - cos_t) / 2.0).max(0.0).sqrt();
+                    let cos_half = ((1.0 + cos_t) / 2.0).max(0.0).sqrt();
+                    // 角平分线单位向量 = u1 + u2 归一(非平角时成立)
+                    let (bx, by) = (u1.0 + u2.0, u1.1 + u2.1);
+                    let lb = (bx * bx + by * by).sqrt().max(f32::MIN_POSITIVE);
+                    // 圆心:角平分线上距角点 R/sin(θ/2)
+                    let d = R / sin_half.max(f32::MIN_POSITIVE);
+                    let (cx, cy) = (corner.0 + bx / lb * d, corner.1 + by / lb * d);
+                    // 切点:沿两条邻边各走「切线长」R·cot(θ/2)
+                    let tan_len = R * cos_half / sin_half.max(f32::MIN_POSITIVE);
+                    let t1 = (corner.0 + u1.0 * tan_len, corner.1 + u1.1 * tan_len);
+                    let t2 = (corner.0 + u2.0 * tan_len, corner.1 + u2.1 * tan_len);
+                    // 切点 → 3 段圆弧 → 切点,顺序不跳
+                    let a0 = (t1.1 - cy).atan2(t1.0 - cx);
+                    let a1 = (t2.1 - cy).atan2(t2.0 - cx);
+                    pts.push(t1);
                     for step in 1..=3 {
                         let ang = a0 + shortest_sweep(a0, a1) * (step as f32 / 4.0);
-                        sx = cx + R * ang.cos();
-                        sy = cy + R * ang.sin();
-                        pts.push((sx, sy));
+                        pts.push((cx + R * ang.cos(), cy + R * ang.sin()));
                     }
-                    let (ex, ey) = sub(corner, next);
-                    pts.push((ex, ey));
+                    pts.push(t2);
                 }
                 path(&pts);
                 pts.push(pts[0]);
@@ -926,6 +933,59 @@ mod tests {
             "这些图标一帧都没画出来(绘制分支写了但没调 painter,界面上是空白):{}",
             blank.join(", ")
         );
+    }
+
+    /// ⚠ 图标的**形状**守门(2026-10-15 真机截图抓到)。
+    ///
+    /// 上一轮只判「有形状产出」,结果真机上渲染成了「⏎」而不是三角警告
+    /// 号 —— **有墨迹不等于画对了**,这是本项目自绘图标最容易漏的一层。
+    ///
+    /// 判据取「**左右对称**」:三角形三顶点 x 为 `0 / -0.46 / +0.46`,
+    /// 墨迹包围盒必须关于绘制中心对称;而画坏的版本三条边没首尾相接,
+    /// 包围盒明显偏一侧。这是三角形状最本质、又不依赖具体算法的约束
+    /// (不数段数、不量弧长、不比对顶点坐标)。
+    ///
+    /// 为什么用**相对**偏移而不是绝对像素:图标随 `size` 等比缩放
+    /// (见本文件头部约定),绝对值判据会被改 `size` 误伤。
+    ///
+    /// 阈值 0.02 的依据:正确实现偏差严格为 0(顶点 x=0、圆弧对称);
+    /// 坏实现实测 **12.0%**。取 2% 留 6 倍余量,又不至于宽到放过轻微跑偏。
+    #[test]
+    fn warning_icon_is_left_right_symmetric() {
+        const SIZE: f32 = 200.0;
+        let ctx = egui::Context::default();
+        let center = egui::pos2(300.0, 300.0);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            Icon::Warning.draw(ui.painter(), center, SIZE, Color32::WHITE);
+        });
+        // 墨迹包围盒。**只统计三角形描边的线段** —— 感叹号(竖 + 点)
+        // 在 x=0 上,量它不影响对称性结论,故一并算入也安全。
+        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+        for clipped in &output.shapes {
+            if let egui::Shape::LineSegment { points, .. } = &clipped.shape {
+                for p in points {
+                    min_x = min_x.min(p.x);
+                    max_x = max_x.max(p.x);
+                }
+            }
+        }
+        assert!(
+            min_x.is_finite(),
+            "没拿到墨迹(线段数为 0),Warning 分支没画任何东西"
+        );
+        let width = max_x - min_x;
+        assert!(width > SIZE * 0.3, "墨迹宽度异常小:{width:.1}");
+        let mid = (min_x + max_x) / 2.0;
+        // Rust 的 format spec 没有 printf 的 `%`(要写成 `{:.1}` + 手动乘),
+        // 这里把比值先乘成百分数再格式化。
+        let skew = ((mid - center.x) / (width / 2.0)).abs();
+        assert!(
+            skew < 0.02,
+            "⚠ 墨迹应左右对称(三角形),实得偏心 {:.1}% —— \
+             三条边没首尾相接,真机渲染成了「⏎」而不是三角警告号",
+            skew * 100.0
+        );
+        output.drop_without_applying_deltas();
     }
 
     /// [`ALL_ICONS`] 不含重复项。
