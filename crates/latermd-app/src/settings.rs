@@ -736,6 +736,18 @@ fn appearance_legacy(
         // #57 M2:左缘标签导航三态,与主题/密度选择同款 selectable_label
         // (即时生效,非草稿模式 —— 显示偏好拨一下就该看到)。默认悬停,
         // 常显/关闭是显式选择(取舍见 decisions-pending #107)。
+        settings_row(ui, "默认模式", |ui| {
+            for mode in crate::theme::DefaultViewMode::ALL {
+                if ui
+                    .selectable_label(theme.default_view_mode == mode, mode.label())
+                    .clicked()
+                {
+                    outbox.push(Message::DefaultViewModeChanged(mode));
+                }
+            }
+        });
+        ui.weak("应用启动时进入的视图；上次选择会恢复上次退出时的模式。");
+
         settings_row(ui, "禅定模式", |ui| {
             for mode in ZenNavMode::ALL {
                 if ui

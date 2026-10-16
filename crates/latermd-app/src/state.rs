@@ -1119,6 +1119,11 @@ pub enum Message {
     /// 归约同时复位会话级悬停态:新模式从干净状态起算(常显不继承旧会话
     /// 的去抖残值,关闭后再开悬停不带着残置可见位)。
     ZenNavModeChanged(crate::theme::ZenNavMode),
+    /// 设置页改「默认视图模式」(写作/源码/对照/上次选择):落
+    /// `theme.default_view_mode` 并即时写 settings.json。只影响下次启动
+    /// (`State::restore_layout` 消费),当前会话的视图不动 —— 改偏好不
+    /// 等于要立刻换视图。
+    DefaultViewModeChanged(crate::theme::DefaultViewMode),
 }
 
 /// 字符偏移 → 字节偏移(替换命中落 `String` 前的换算;落在多字节字符
@@ -1396,6 +1401,10 @@ impl State {
             Message::ZenNavModeChanged(mode) => {
                 self.theme.zen_nav = mode;
                 self.zen_nav = ZenNavState::default();
+                self.persist_theme();
+            }
+            Message::DefaultViewModeChanged(mode) => {
+                self.theme.default_view_mode = mode;
                 self.persist_theme();
             }
             Message::ToggleLivePreview => self.cycle_render_mode(),
@@ -2991,6 +3000,12 @@ impl State {
     pub fn restore_layout(&mut self, layout: LayoutSettings) {
         let mode = layout.render_mode.unwrap_or(RenderMode::Live);
         self.layout = layout;
+        let mode = match self.theme.default_view_mode {
+            crate::theme::DefaultViewMode::Live => RenderMode::Live,
+            crate::theme::DefaultViewMode::Source => RenderMode::Source,
+            crate::theme::DefaultViewMode::Split => RenderMode::Split,
+            crate::theme::DefaultViewMode::Last => mode,
+        };
         self.render_mode = RenderMode::Source;
         // 旧存档只有 source / live 两档;split 是新值,同一条装载路径。
         if mode != RenderMode::Source {
@@ -3510,7 +3525,11 @@ impl State {
             FileCmd::New => {
                 self.git.close_diff_workspace();
                 // 多标签:新建永远开新标签,当前标签的未保存稿不受影响
-                self.spawn_tab(None, "");
+                let index = self.spawn_tab(None, "");
+                // 新建是明确的写入意图:切到源码档并把插入点落入
+                // 空编辑器,用户按键即可开始,不受当前浏览/对照档遮挡。
+                self.set_render_mode(RenderMode::Source);
+                self.tabs.tabs[index].focus_editor_on_next_frame = true;
             }
             FileCmd::Open => {
                 self.git.close_diff_workspace();

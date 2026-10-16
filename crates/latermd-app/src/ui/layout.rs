@@ -818,6 +818,15 @@ impl LaterMdApp {
                             editor.text(),
                         )
                     });
+                if tab.focus_editor_on_next_frame {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(
+                            crate::ui::editor::tab_editor_id(*id).with("focus-new"),
+                            true,
+                        )
+                    });
+                    tab.focus_editor_on_next_frame = false;
+                }
                 crate::ui::editor::ui(
                     ui,
                     editor,
