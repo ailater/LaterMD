@@ -284,9 +284,10 @@ pub fn ui(
     // 写回当帧 output.state 还是写回前的旧快照,定位只能用写回目标本身。
     let mut ime_write_back: Option<usize> = None;
 
-    // 总行数 = 1 + '\n' 数(与 galley 的逻辑行划分同构),闭内行号槽与
-    // 闭外 #68 拖影判定(上一帧高亮框重算)共用一份。
-    let total_lines = 1 + editor.text().bytes().filter(|b| *b == b'\n').count();
+    // 总行数(与 galley 的逻辑行划分同构),闭内行号槽与闭外 #68 拖影
+    // 判定(上一帧高亮框重算)共用一份。rope 维护行计数,取它是 O(1);
+    // 旧写法逐字节扫全篇,而本函数在源码/分栏档每帧都跑。
+    let total_lines = editor.len_lines();
 
     // 打字机模式(#64 M1):每标签一份记忆(源码/Live 分槽),帧首读、
     // 帧末写回。关闭态不读写 temp、闭包内不进任何打字机分支 —— 滚动行为

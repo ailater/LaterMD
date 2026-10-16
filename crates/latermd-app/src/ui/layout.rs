@@ -782,19 +782,23 @@ impl LaterMdApp {
                 } else {
                     None
                 };
-                // 查找卡打开时,把全部命中的字符区间克隆给编辑器侧做
+                // 查找卡打开时,把全部命中的字符区间交给编辑器侧做
                 // 「页面级高亮」(VS Code 的 find match 橙色底):当前条
-                // 由 pending_selection 的选区承担,其余命中画浅底。克隆是
-                // 借用边界所需 —— 下面 editor::ui 拿的是 &mut TabState。
+                // 由 pending_selection 的选区承担,其余命中画浅底。
+                //
+                // 只借不拷:`editor::ui` 拿的是 `&[Range<usize>]`(它只读),
+                // 而它借走的 `&mut TabState` 与 `state.find` 是 `state` 的
+                // 两个不相交字段,借用分割成立 —— 旧写法每次都克隆整条
+                // hits(常见词在大文档里上千条,每帧一遍)。
                 //
                 // 分栏档的中央同样是源码 TextEdit,故两档都给(写作档的富
                 // 渲染没有「页面级浅底」这层绘制)。
                 let source_column = state.render_mode != crate::live::RenderMode::Live;
-                let find_marks: Vec<std::ops::Range<usize>> =
+                let find_marks: &[std::ops::Range<usize>] =
                     if state.find.open && source_column && !state.find.hits.is_empty() {
-                        state.find.hits.clone()
+                        &state.find.hits
                     } else {
-                        Vec::new()
+                        &[]
                     };
                 let keep_find_focus = state.find.open
                     && source_column
@@ -859,7 +863,7 @@ impl LaterMdApp {
                     // 右键菜单条目的键位标注与菜单栏同源(context-menu-plan §3 M1)。
                     &state.keymap,
                     outbox,
-                    &find_marks,
+                    find_marks,
                 );
                 // 命中回填沿用编辑器的选区/滚动通道,但不能终止查找框的连续输入。
                 if keep_find_focus {
@@ -1859,10 +1863,9 @@ fn status_bar(ui: &mut egui::Ui, state: &crate::state::State) {
     // 里摞过三行(见 tests::status_bar_is_a_single_row 的教训注记),新版
     // allocate_exact_size 定形单行,窄窗按优先级省略右段/左段明细。
     let tab = state.tabs.current();
-    let position = tab
-        .cursor
-        .byte
-        .map(|byte| cursor_position(tab.editor.text(), byte));
+    // 行列换算走 rope 的 `line_col`(`O(log N)`);旧写法扫光标之前的全部
+    // 文本求 `'\n'` 数,光标在文末即 O(全篇),而状态栏每帧都画。
+    let position = tab.cursor.byte.map(|byte| tab.editor.line_col(byte));
     crate::ui::workbench::status_bar(ui, state, position);
 }
 
@@ -1946,18 +1949,6 @@ fn recovery_bar(
 /// 光标行列(1 起):行按换行数,列按该行字符数(中文按字计,与编辑器
 /// 的视觉列一致)。
 ///
-/// `byte` 可能是**过期快照**:格式动作在归约侧整篇替换文本,而本函数在
-/// 同一帧的绘制序里先于编辑器跑,拿到的还是按旧文本折出的字节(状态栏
-/// 2026-09-27 实测崩溃:「byte index not a char boundary」)。收缩到字符
-/// 边界而非钳长,越界与非边界一并兜住。
-fn cursor_position(text: &str, byte: usize) -> (usize, usize) {
-    let byte = text.floor_char_boundary(byte.min(text.len()));
-    let before = &text[..byte];
-    let line = before.matches('\n').count() + 1;
-    let col = before.chars().rev().take_while(|ch| *ch != '\n').count() + 1;
-    (line, col)
-}
-
 /// commit message 建议浮窗;返回(复制, 关闭, ×)响应,测试定位用
 /// (与 `ui::menubar::item` 同款手法,× 与「关闭」同语义)。
 ///
@@ -7400,7 +7391,7 @@ mod tests {
     /// 光标,三态循环两整圈(六次点击)。崩溃机制:格式归约整篇替换文本
     /// 后,状态栏(绘制序先于编辑器)拿按**旧文本**折出的 `cursor.byte`
     /// 切**新文本**,`byte index not a char boundary` panic —— 修复在
-    /// `cursor_position` 的边界收缩与 `apply_format` 的字节重折算。
+    /// `EditorBuffer::line_col` 的边界收缩与 `apply_format` 的字节重折算。
     #[test]
     fn task_button_cycling_on_cjk_never_panics() {
         use crate::compose::FormatAction;
@@ -7517,19 +7508,25 @@ mod tests {
     /// 状态栏行列换算对**非边界字节**不 panic:过期快照的字节可能落在
     /// CJK 字符中间(见 `task_button_cycling_on_cjk_never_panics` 的机制
     /// 说明),收缩到所属字符起点而不是 panic。
+    ///
+    /// 换算本身已下沉到 `latermd_editor::EditorBuffer::line_col`(走 rope,
+    /// `O(log N)`),这里的期望值仍是当年崩溃帧的实值 —— 换实现不能换结果。
     #[test]
-    fn cursor_position_tolerates_stale_mid_char_bytes() {
+    fn line_col_tolerates_stale_mid_char_bytes() {
         let text = "- [ ] 纯中文行\n第二行乙";
+        let buf = latermd_editor::EditorBuffer::new(text);
         // 字节 14 落在 '文'(12..15)中间 —— 崩溃帧的实值;收缩到 '中'
         // 之后(字节 12),按字符计列
-        let (line, col) = cursor_position(text, 14);
+        let (line, col) = buf.line_col(14);
         assert_eq!((line, col), (1, 9));
         // 越界钳制到文末仍是合法行为
-        let (line, _) = cursor_position(text, 10_000);
+        let (line, _) = buf.line_col(10_000);
         assert_eq!(line, 2);
         // 正常路径不变
-        assert_eq!(cursor_position("abc", 2), (1, 3));
-        assert_eq!(cursor_position("甲乙\n丙", 7), (2, 1), "第二行行首");
+        let ascii = latermd_editor::EditorBuffer::new("abc");
+        assert_eq!(ascii.line_col(2), (1, 3));
+        let cjk = latermd_editor::EditorBuffer::new("甲乙\n丙");
+        assert_eq!(cjk.line_col(7), (2, 1), "第二行行首");
     }
 
     /// **状态栏必须是单行**(2026-10-08 真机复核补的守门断言)。

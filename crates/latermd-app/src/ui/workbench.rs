@@ -211,7 +211,9 @@ pub(crate) fn status_bar(ui: &mut egui::Ui, state: &State, position: Option<(usi
     if let Some((line, col)) = position {
         details.push(format!("行 {line} · 列 {col}"));
     }
-    details.push(format!("{} 字", tab.editor.text().chars().count()));
+    // rope 的字符计数是 O(1);`text().chars().count()` 是每帧一遍全篇
+    // UTF-8 解码,而状态栏每帧都画(大文档上这是纯浪费)。
+    details.push(format!("{} 字", tab.editor.len_chars()));
     for (index, text) in details.into_iter().enumerate() {
         let galley =
             ui.painter()
