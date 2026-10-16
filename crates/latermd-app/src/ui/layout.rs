@@ -512,14 +512,28 @@ impl LaterMdApp {
         // 表达(三态互斥,不再有独立的开合 bool 与「离开 Live 该不该回来」
         // 的快照补工);②用 `TabState::live_right` 这一份独立块状态与独立
         // id 命名空间(见 PR1);③审阅 Git diff 时让位,与旧口径一致。
-        if split && !git_diff_workspace {
+        //
+        // **常显 + `show_collapsible`**(2026-10-16 坤哥:关闭动画没回来):
+        // 旧预览面板一直走 egui 的收展通道,分栏 ⇄ 其它档的切换因此有
+        // 滑出/滑入动画;PR#252 移植时改成了条件 `show`,开合变成瞬移。
+        // 现在恢复:每帧都以 `show_collapsible` 呈现,工作 bool 从
+        // `render_mode == Split` 播种 —— egui 在「拖到最小宽再往外拖」
+        // (收起)与「收起态细把手往外拖」(展开)及双击边缘时翻转它,
+        // 翻转后用 [`Message::CompareColumnToggled`] 收敛回 `render_mode`
+        // (Split ⇄ 非 Split 恰是同一个 toggle),`render_mode` 仍是唯一
+        // 状态源。完全收起时 egui 只画右缘一根细把手(旧口径同款),
+        // `add_contents` 不再执行。
+        let mut compare_open = split;
+        if !git_diff_workspace {
             let preview_max = (ui.available_width() - crate::ui::workbench::EDITOR_MIN_W)
                 .clamp(tokens::PREVIEW_MIN_W, 880.0);
-            crate::ui::workbench::restore_panel_width(
-                ui,
-                COMPARE_PANEL_ID,
-                self.state.layout.live_right_width,
-            );
+            if split {
+                crate::ui::workbench::restore_panel_width(
+                    ui,
+                    COMPARE_PANEL_ID,
+                    self.state.layout.live_right_width,
+                );
+            }
             // 拖动命中半径**只在对照列这一帧**局部抬高(出厂 3.0 → 6.0,
             // 命中带宽 6px → 12px)。窄带宽落在同底色的面板之间,没有任何
             // 视觉线索指向它,实测完全找不到可拖处(2026-10-13 历史实测;
@@ -549,7 +563,7 @@ impl LaterMdApp {
                         // `Frame::stroke` 是四边描边,会把顶/右/底也描上。
                         .stroke(egui::Stroke::NONE),
                 )
-                .show(ui, |ui| {
+                .show_collapsible(ui, &mut compare_open, |ui| {
                     // egui 0.36 的侧栏面板按**内容 min_rect** 定实际宽度
                     // (`Frame::show` 的 rect 跟随内容收缩),而下面的固定矩形
                     // 子 Ui 是隔离 ScrollArea 撑高坑的必需品,其 min_rect
@@ -615,6 +629,11 @@ impl LaterMdApp {
                         outbox,
                     );
                 });
+            // egui 在拖拽收起/把手拖开/双击边缘时翻转工作 bool;收敛回
+            // `render_mode`(Split ⇄ 非 Split 与该 toggle 同一映射)。
+            if compare_open != split {
+                self.outbox.push(Message::CompareColumnToggled);
+            }
             if restore_grab {
                 // nav 在本函数更早 show(③ 在 ④ 之前),它读到的已是出厂值;
                 // 这里恢复后受影响的只有后续 panel —— 而它们都不 resizable,
@@ -8138,6 +8157,156 @@ mod tests {
             (after - (edge - 100.0)).abs() < 1.5,
             "拖动 100px 松手后,左缘应停在 {edge}−100 处;实得 {after}(出厂数值拖不动 = 命中带抬高回归)"
         );
+    }
+
+    /// 对照列**拖到最小宽再往外拖**(egui 的 drag-to-collapse 手势)必须
+    /// 收起并**收敛回三态状态源**:工作 bool 被 egui 翻成 false 后,归约
+    /// 侧应经 [`Message::CompareColumnToggled`] 落到源码档。方向:对照列
+    /// 左缘向**右** = 变窄,越过 `PREVIEW_MIN_W` 触发收起。
+    #[test]
+    fn compare_column_drag_past_min_collapses_into_source_mode() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let (ctx, mut app) = compare_only_app(screen, false);
+        let frame = |app: &mut LaterMdApp, events: Vec<egui::Event>| {
+            ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    app.reduce(ui.ctx());
+                    app.draw(ui);
+                },
+            )
+            .drop_without_applying_deltas()
+        };
+        frame(&mut app, vec![]);
+        let edge = egui::PanelState::load(&ctx, egui::Id::new(COMPARE_PANEL_ID))
+            .expect("对照列 PanelState 存在")
+            .outer_rect
+            .left();
+        let y = screen.height() / 2.0;
+        // 悬停进带(抬高后的 6px 命中带)→ 按下 → 左缘右拖 60px(420→360,
+        // 已越过 260?没有 —— 越过收起线要拖到 raw<260,即 x > edge+160)。
+        frame(
+            &mut app,
+            vec![Event::PointerMoved(egui::pos2(edge - 5.0, y))],
+        );
+        frame(
+            &mut app,
+            vec![Event::PointerButton {
+                pos: egui::pos2(edge - 5.0, y),
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+        );
+        for d in [60.0, 120.0, 200.0] {
+            frame(&mut app, vec![Event::PointerMoved(egui::pos2(edge + d, y))]);
+        }
+        frame(
+            &mut app,
+            vec![Event::PointerButton {
+                pos: egui::pos2(edge + 200.0, y),
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+        );
+        frame(&mut app, vec![]);
+        assert_eq!(
+            app.state.render_mode,
+            crate::live::RenderMode::Source,
+            "拖过最小宽收起对照列,应收敛到源码档(工作 bool 翻转没有回流 = 状态源分叉)"
+        );
+    }
+
+    /// 关闭对照列必须有**滑出动画**(2026-10-16 坤哥:动画没回来):切到
+    /// 非分栏档后的第一帧列还在(只是开始滑),随后逐帧向右退场直至消失。
+    /// 走 `show_collapsible` 的滑出通道;若退回条件 `show` 的瞬移实现,
+    /// 首帧列就不见了,本测试必红。观测通道 = 面板 Frame 的填充矩形
+    /// (`Shape::Rect`):滑动是整块平移,形状 rect 左缘逐帧右移;动画中
+    /// egui 刻意不落盘 `PanelState`,读不到过程值,只能看形状。
+    #[test]
+    fn compare_column_slides_closed_over_frames() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let (ctx, mut app) = compare_only_app(screen, false);
+        let frame = |app: &mut LaterMdApp, reduce: bool| -> Vec<egui::epaint::ClippedShape> {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    if reduce {
+                        app.reduce(ui.ctx());
+                    }
+                    app.draw(ui);
+                },
+            );
+            out.textures_delta.clear();
+            out.shapes
+        };
+        // 对照列的填充矩形:够高、宽落在面板档位区间(编辑区/窗口底都是
+        // 全宽,落不进这个带宽)、且是同帧里最靠右的一块。
+        let panel_rect = |shapes: &[egui::epaint::ClippedShape]| -> Option<Rect> {
+            shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(r)
+                        if r.rect.height() > 400.0
+                            && (300.0..700.0).contains(&r.rect.width())
+                            && r.fill != egui::Color32::TRANSPARENT =>
+                    {
+                        Some(r.rect)
+                    }
+                    _ => None,
+                })
+                .max_by(|a, b| a.left().total_cmp(&b.left()))
+        };
+
+        let open = panel_rect(&frame(&mut app, false)).expect("前置:分栏档有对照列");
+        assert!(
+            (open.width() - 420.0).abs() < 1.0,
+            "前置:面板宽应为默认 420,实得 {:.1}",
+            open.width()
+        );
+
+        // 走真实归约:分栏 → 源码(循环档序 源码 → 写作 → 分栏 → 源码)
+        app.state.apply(Message::ToggleLivePreview);
+        assert_eq!(app.state.render_mode, crate::live::RenderMode::Source);
+
+        // 切换后的第一帧列必须**还在**(开始滑 ≠ 瞬移)。
+        let first = panel_rect(&frame(&mut app, true)).expect("关闭后的第一帧列应仍在滑出");
+        assert!(
+            first.left() >= open.left() - 0.5,
+            "滑出应从全开位置起步,首帧左缘 {:.1} vs 全开 {:.1}",
+            first.left(),
+            open.left()
+        );
+
+        // 逐帧右移,直至退场。无头帧的时间不推进,egui 每帧按 stable_dt
+        // 推进动画,几十帧内收完。
+        let mut edge = first.left();
+        let mut gone = false;
+        for _ in 0..60 {
+            match panel_rect(&frame(&mut app, false)) {
+                Some(r) => {
+                    assert!(
+                        r.left() >= edge - 0.5,
+                        "滑出应单调向右:{edge:.1} → {:.1}",
+                        r.left()
+                    );
+                    edge = r.left();
+                }
+                None => {
+                    gone = true;
+                    break;
+                }
+            }
+        }
+        assert!(gone, "60 帧内应滑完退场(卡在 {edge:.1})");
     }
 
     /// 离开分栏档时不得留下悬空的线(与旧「对照预览收起」同一条判据)。
