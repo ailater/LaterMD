@@ -905,24 +905,21 @@ fn search_results(
                         // sidebar resize frame. Search rows are one-line
                         // buttons, so the row-height estimate is exact.
                         let row_h = ui_row_height(ui);
-                        let mut skipped = 0usize;
                         for hit in group {
                             let row_rect = egui::Rect::from_min_size(
                                 ui.cursor().min,
                                 egui::vec2(ui.available_width(), row_h),
                             );
                             if ui.is_rect_visible(row_rect) {
-                                if skipped > 0 {
-                                    ui.add_space(row_h * skipped as f32);
-                                    skipped = 0;
-                                }
                                 search_row(ui, hit, outbox);
                             } else {
-                                skipped += 1;
+                                // Advance immediately. Delaying all skipped rows
+                                // until the next visible hit tests every row in a
+                                // long off-screen run against the same cursor
+                                // position, so rows that should enter the viewport
+                                // are skipped too and the list shows blank space.
+                                ui.allocate_space(egui::vec2(ui.available_width(), row_h));
                             }
-                        }
-                        if skipped > 0 {
-                            ui.add_space(row_h * skipped as f32);
                         }
                     });
             }
