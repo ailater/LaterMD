@@ -342,6 +342,15 @@ pub fn ui(
                     let edit =
                         edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)));
                     let output = edit.show(row);
+                    if row.ctx().data(|d| {
+                        d.get_temp::<bool>(editor_id.with("focus-new"))
+                            .unwrap_or(false)
+                    }) {
+                        row.ctx()
+                            .memory_mut(|mem| mem.request_focus(output.response.response.id));
+                        row.ctx()
+                            .data_mut(|d| d.remove::<bool>(editor_id.with("focus-new")));
+                    }
                     (slot, output)
                 })
                 .inner;

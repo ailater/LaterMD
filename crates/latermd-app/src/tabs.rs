@@ -124,6 +124,8 @@ pub struct TabState {
     /// 移动主编辑区的可编辑块。浏览标志由使用方每帧置位,与禅定的临时浏览
     /// 同款手法。
     pub live_right: LiveState,
+    /// 新建空文档首帧请求编辑器焦点，消费一次后清除。
+    pub focus_editor_on_next_frame: bool,
 }
 
 impl TabState {
@@ -154,6 +156,7 @@ impl TabState {
             live,
             live_right,
             editor,
+            focus_editor_on_next_frame: false,
         }
     }
 

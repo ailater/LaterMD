@@ -745,7 +745,15 @@ pub fn ui(
                         .ctx()
                         .data(|d| d.get_temp::<f32>(editor_id.with(("live-render-h", index))))
                         .unwrap_or(0.0);
-                    let above_fold = cursor_y + known_h < clip.min.y;
+                    // 上缘判定带 1px 容差:ScrollArea 的内容 cursor 与 clip
+                    // 缘之间存在亚像素舍入差(实测 0.1px),首块恰贴视口顶时
+                    // `cursor_y + known_h < clip.min.y` 会被这点误差判真 ——
+                    // 首块从此永远走占位臂不渲染(known_h 恒 0,误判自我
+                    // 维持),写作/对照列顶部整块空白(2026-10-16 坤哥截图,
+                    // 写作与分栏两档同根因)。方向取保守:差这 1px 本来也
+                    // 看不见字形,宁可多画不可空块。
+                    const ABOVE_FOLD_SLOP: f32 = 1.0;
+                    let above_fold = cursor_y + known_h < clip.min.y - ABOVE_FOLD_SLOP;
                     if !is_active && (below_fold || above_fold) {
                         let dark_mode = matches!(ui.ctx().theme(), egui::Theme::Dark);
                         let rich_handler = RichLinkHandler::new(
@@ -1696,6 +1704,66 @@ mod tests {
             cursor = block.end;
         }
         assert_eq!(cursor, editor.text().len());
+    }
+
+    /// 首块必须真的渲染在视口顶(写作/分栏两档同守):估高剔除臂的
+    /// 上缘判定曾不带容差,ScrollArea 内容 cursor 与 clip 缘之间的亚像素
+    /// 舍入差(实测 0.1px)让首块被判「整块在视口上方」,从此永远走占位
+    /// 臂不渲染(known_h 恒 0,误判自我维持)—— 列顶部整块空白,即
+    /// 「预览上面多了很多空行」。守门走真实 app 整帧:只有生产面板组合
+    /// 才复现那 0.1px;手搭 Panel 复刻测不到。
+    #[test]
+    fn first_block_renders_at_top_in_live_and_split() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 968.0));
+        for mode in [
+            crate::live::RenderMode::Live,
+            crate::live::RenderMode::Split,
+        ] {
+            let mut app = crate::LaterMdApp::default();
+            app.state.render_mode = mode;
+            // 文档首块是 H1「LaterMD」(初始示例文档),富渲染成独立标题。
+            let mut heading: Option<egui::Rect> = None;
+            // 6 帧:分栏对照列走 `show_collapsible` 滑入动画(PR#258),
+            // 前几帧面板还没展开,首块字形要等动画到位才出现。
+            for _ in 0..6 {
+                // eframe 0.36:logic(归约)与 ui(绘制)两段,缺一会空帧。
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ui| app.reduce(ui.ctx()),
+                )
+                .drop_without_applying_deltas();
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ui| app.draw(ui),
+                );
+                for clipped in &output.shapes {
+                    if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                        // 首块 H1 的富渲染文本恰为「LaterMD」(代码块正文
+                        // 也含这串,必须精确等值);中央/对照列都在 x ≥ 240
+                        // (排除侧栏同名词),跳过顶部模式切换条所在带
+                        // (y < 40)。
+                        if t.galley.text() == "LaterMD" && t.pos.x >= 240.0 && t.pos.y >= 40.0 {
+                            heading = Some(egui::Rect::from_min_size(t.pos, t.galley.size()));
+                        }
+                    }
+                }
+                output.drop_without_applying_deltas();
+            }
+            let heading = heading.unwrap_or_else(|| {
+                panic!("{mode:?}:首块 H1 必须渲染在列顶(修复前被亚像素误判吃掉)");
+            });
+            assert!(
+                heading.top() < 200.0,
+                "{mode:?}:首块应贴列顶,实测 {heading:?}"
+            );
+        }
     }
 
     /// 修订号不变就不重算块(每次编辑都重解析会拖垮打字)。

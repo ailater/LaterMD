@@ -202,6 +202,39 @@ impl ZenNavMode {
     }
 }
 
+/// 启动时的默认视图模式(写作 / 源码 / 对照 / 上次选择)。只作用于启动
+/// 装载(`State::restore_layout`);会话内的模式切换仍实时记进布局存档,
+/// 供「上次选择」档恢复。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultViewMode {
+    /// 每次启动进入写作(Live 富渲染)。
+    Live,
+    /// 每次启动进入源码。
+    Source,
+    /// 每次启动进入对照(源码 + 右侧只读列)。
+    Split,
+    /// 恢复上次退出时的视图(出厂默认 —— 与既有行为一致:布局存档没记
+    /// 模式时回落写作)。升级用户不被默默改行为,换档是显式选择。
+    #[default]
+    Last,
+}
+
+impl DefaultViewMode {
+    /// 设置页可选项顺序(写作 → 源码 → 对照 → 上次选择)。
+    pub const ALL: [DefaultViewMode; 4] = [Self::Live, Self::Source, Self::Split, Self::Last];
+
+    /// 设置页显示名(与顶栏模式切换条同词:写作/源码/对照)。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Live => "写作",
+            Self::Source => "源码",
+            Self::Split => "对照",
+            Self::Last => "上次选择",
+        }
+    }
+}
+
 /// 排版偏好(#23)的字号取值域(pt,闭区间):下限 12 是中文可读性下限
 /// (auto-plan #23),上限 24。默认 15。F2 的滑杆 range 与本常量同源。
 pub const EDITOR_FONT_SIZE_MIN: f32 = 12.0;
@@ -298,6 +331,10 @@ pub struct ThemeSettings {
     /// 开关先例落 settings.json(旧档缺字段由 struct 级 `#[serde(default)]`
     /// 兜底回悬停)。关闭档在禅定帧走零路径(不进任何绘制分支)。
     pub zen_nav: ZenNavMode,
+    /// 启动默认视图模式(写作/源码/对照/上次选择):只作用于启动装载,
+    /// 会话内切档不受限。出厂「上次选择」= 既有行为(升级用户零变化);
+    /// 旧 settings.json 缺字段由 struct 级 `#[serde(default)]` 兜底。
+    pub default_view_mode: DefaultViewMode,
     /// 正文样式覆盖;`None` = 出厂默认(见 [`default_markdown_style`])。
     pub overrides: Option<MarkdownStyle>,
     /// Emoji 面板「最近使用」(docs/emoji-plan.md §6.3):新的在前、去重、
@@ -334,6 +371,7 @@ impl Default for ThemeSettings {
             show_typewriter: false,
             show_focus_mode: false,
             zen_nav: ZenNavMode::default(),
+            default_view_mode: DefaultViewMode::default(),
             overrides: None,
             emoji_recent: Vec::new(),
             skin_style: None,
