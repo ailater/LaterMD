@@ -8226,6 +8226,47 @@ mod tests {
         );
     }
 
+    /// 分隔线必须画在**弹窗之下**:panel_divider 若用独立 `Order::Middle`
+    /// 散层,egui 出形状时先排已注册 Area(全部 `egui::Window`),非 Area
+    /// 散层兜底追加在最后 ⇒ 线横穿设置/关于等一切弹窗(2026-10-16 坤哥
+    /// 截图实测)。改为画进根层(调用点在中央内容之后 ⇒ 盖得住面板)后,
+    /// 分隔线形状必须先于弹窗标题形状出现。本测试断言形状**流序**:
+    /// 分隔线竖线的下标 < 弹窗「设置」标题的下标;独立散层实现必红。
+    #[test]
+    fn compare_divider_paints_below_dialogs() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let (ctx, mut app) = compare_only_app(screen, false);
+        let _ = shell_full_gap(&ctx);
+        app.state.settings.open = true;
+        // egui Window 首帧是 sizing pass,不出内容形状;第二帧起再取证。
+        let mut out = FullOutput::default();
+        for _ in 0..2 {
+            out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+        }
+        let divider_idx = out.shapes.iter().position(|clipped| {
+            matches!(&clipped.shape, egui::Shape::LineSegment { points, stroke }
+                if (points[0].x - points[1].x).abs() < 0.01
+                    && (points[1].y - points[0].y).abs() > screen.height() * 0.6
+                    && stroke.width > 0.0)
+        });
+        let dialog_idx = out.shapes.iter().position(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == "设置")
+        });
+        let divider_idx = divider_idx.expect("分栏档应有分隔线");
+        let dialog_idx = dialog_idx.expect("设置弹窗应已渲染(标题「设置」)");
+        assert!(
+            divider_idx < dialog_idx,
+            "分隔线(形状下标 {divider_idx})必须画在弹窗(下标 {dialog_idx})之下"
+        );
+    }
+
     /// 对照列要有**列头**(「对照」标题 + 右缘「只读」徽标):P4 曾随右栏
     /// 整删,2026-10-16 恢复。无头夹具不装字体(CI 无 CJK),但 galley 仍
     /// 携带文本串,按文字内容断言即可,不依赖字形渲染。

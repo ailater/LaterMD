@@ -365,11 +365,12 @@ pub(crate) fn panel_divider(ui: &egui::Ui, panel_id: &str, open: bool) {
         ),
     );
     let x = edge - 0.5 * stroke.width;
-    ui.ctx()
-        .layer_painter(egui::LayerId::new(
-            egui::Order::Middle,
-            id.with("__divider"),
-        ))
+    // 画在**调用方所在层**(根层)而不是独立 `Order::Middle` 散层:egui
+    // 出同一 Order 的形状时,先排已注册 Area(所有 `egui::Window` 弹窗),
+    // 再兜底追加非 Area 散层 —— 散层永远压在全部弹窗之上(2026-10-16
+    // 坤哥截图:分隔线横穿设置弹窗)。根层内按提交序,调用点(layout ⑥)
+    // 在中央面板内容之后 ⇒ 盖得住面板,又在弹窗之下。
+    ui.painter()
         .vline(x, egui::Rangef::new(top, bottom), stroke);
 }
 
