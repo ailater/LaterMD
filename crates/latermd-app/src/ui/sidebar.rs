@@ -1863,6 +1863,9 @@ const GIT_SECTION_MIN_H: f32 = 72.0;
 const GIT_SECTION_MAX_H: f32 = 520.0;
 /// 拖拽带的命中高度(可见分割线只有 1px,居中)。
 const GIT_SECTION_HANDLE_H: f32 = 7.0;
+/// 折叠标题和嵌套 ScrollArea 的布局会额外产生少量像素,不能让这部分
+/// 误差把外层 `nav-body` 撑出滚动条。
+const GIT_SECTION_LAYOUT_SAFETY_H: f32 = 12.0;
 
 /// 三分区的**默认**高度:以当前 Git body 的可用高度扣除固定装饰后
 /// 三等分。这里不能使用 `clip_rect()`——Git 页位于外层 `nav-body`
@@ -1872,8 +1875,8 @@ const GIT_SECTION_HANDLE_H: f32 = 7.0;
 /// 吃这个值(窗口高度变了跟着重算);拖过的分区用自己的持久值,与三等分无关。
 fn git_section_third_default(panel: &egui::Ui) -> f32 {
     let spacing = panel.spacing();
-    let chrome = 3.0
-        * (spacing.interact_size.y + GIT_SECTION_HANDLE_H + 2.0 * spacing.item_spacing.y)
+    let chrome = GIT_SECTION_LAYOUT_SAFETY_H
+        + 3.0 * (spacing.interact_size.y + GIT_SECTION_HANDLE_H + 2.0 * spacing.item_spacing.y)
         + 3.0 * (tokens::gap::XS + spacing.item_spacing.y);
     ((panel.available_height() - chrome) / 3.0).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
 }
