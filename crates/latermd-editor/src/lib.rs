@@ -82,6 +82,44 @@ impl EditorBuffer {
         self.rope.line_to_byte(line_idx.min(self.rope.len_lines()))
     }
 
+    /// 全文行数(与 galley 的逻辑行划分同构:`1 + '\n'` 数)。
+    ///
+    /// rope 内部维护行计数,故是 `O(1)`。此前调用方拿它靠
+    /// `text().bytes().filter(|b| *b == b'\n').count()`,结果等价却是
+    /// `O(全文字节数)`,而它在源码模式**每帧**都要跑一次。
+    pub fn len_lines(&self) -> usize {
+        self.rope.len_lines()
+    }
+
+    /// 字节偏移 → 行号(0-based),`O(log N)`。`byte_idx` 超界时钳制到文末。
+    pub fn byte_to_line(&self, byte_idx: usize) -> usize {
+        self.rope.byte_to_line(byte_idx.min(self.rope.len_bytes()))
+    }
+
+    /// 字节偏移 → `(行号, 列号)`,均 1-based(状态栏显示口径)。
+    ///
+    /// `byte` 可能是**过期快照**:格式动作在归约侧整篇替换文本,而状态栏
+    /// 在同一帧的绘制序里先于编辑器跑,拿到的还是按旧文本折出的字节
+    /// (2026-09-27 实测崩溃:「byte index not a char boundary」)。故先收缩
+    /// 到字符边界再钳长,越界与非边界一并兜住。
+    ///
+    /// 此前这一步是扫描光标之前的全部文本求 `'\n'` 数 —— `O(光标前字节
+    /// 数)`,光标在文末即 `O(全文)`,且每帧一次;rope 的 `byte_to_line` 是
+    /// `O(log N)`。列号按**字符**计(CJK 一字一列),与原实现同口径。
+    pub fn line_col(&self, byte: usize) -> (usize, usize) {
+        let len = self.rope.len_bytes();
+        if len == 0 {
+            return (1, 1);
+        }
+        let byte = byte.min(len);
+        // 落在多字节字符中间时归到所属字符起点(ropey 语义),再取回字节。
+        let byte = self.rope.char_to_byte(self.rope.byte_to_char(byte));
+        let line = self.rope.byte_to_line(byte);
+        let line_start = self.rope.line_to_byte(line);
+        let col = self.rope.byte_to_char(byte) - self.rope.byte_to_char(line_start);
+        (line + 1, col + 1)
+    }
+
     /// 在字符偏移处插入文本(增量)。空文本为无操作,不推进修订号。
     pub fn insert_chars(&mut self, char_idx: usize, text: &str) {
         if text.is_empty() {
@@ -217,6 +255,51 @@ mod tests {
         // 越界钳制,不 panic。
         assert_eq!(buf.char_to_byte(usize::MAX), CJK.len());
         assert_eq!(buf.byte_to_char(usize::MAX), buf.len_chars());
+    }
+
+    /// `len_lines` 必须与「`1 + '\n'` 数」同值 —— 它被行号槽与 minimap
+    /// 拖影判定消费,旧实现就是那个计数式;换口径不能换结果。
+    #[test]
+    fn len_lines_matches_newline_count() {
+        for text in ["", "\n", "a", "a\n", "a\nb", "a\nb\n", "\n\n", "甲\n乙\n丙"] {
+            let buf = EditorBuffer::new(text);
+            assert_eq!(
+                buf.len_lines(),
+                1 + text.bytes().filter(|b| *b == b'\n').count(),
+                "{text:?}"
+            );
+        }
+        // 编辑后仍成立(rope 行计数随增量维护,不是惰性重算)。
+        let mut buf = EditorBuffer::new("a\nb");
+        buf.insert_chars(3, "\nc");
+        assert_eq!(buf.len_lines(), 3);
+    }
+
+    /// `line_col` 的口径:1-based 行列、列按字符计(CJK 一字一列)、
+    /// 陈旧/越界/落在多字节字符中间一律兜住不 panic。
+    ///
+    /// 期望值写成硬编码字面量 —— 若照抄成「与某个函数的输出比」,断言就
+    /// 恒绿,守不住这次换实现的等价性。
+    #[test]
+    fn line_col_is_one_based_and_tolerates_stale_bytes() {
+        let buf = EditorBuffer::new("abc\ndef");
+        assert_eq!(buf.line_col(0), (1, 1));
+        assert_eq!(buf.line_col(2), (1, 3));
+        assert_eq!(buf.line_col(4), (2, 1), "换行之后是第二行行首");
+        assert_eq!(buf.line_col(usize::MAX), (2, 4), "越界钳到文末");
+
+        // CJK:列号按字符数,不按字节数。
+        let cjk = EditorBuffer::new("甲乙\n丙");
+        assert_eq!(cjk.line_col(0), (1, 1));
+        assert_eq!(cjk.line_col(3), (1, 2), "第二个字,不是第四列");
+        assert_eq!(cjk.line_col(7), (2, 1));
+        // 落在「丙」的中间(8 字节起),归到该字符起点。
+        assert_eq!(cjk.line_col(8), (2, 1));
+        assert_eq!(cjk.line_col(usize::MAX), (2, 2));
+
+        // 空文档:没有可崩的边界。
+        assert_eq!(EditorBuffer::new("").line_col(0), (1, 1));
+        assert_eq!(EditorBuffer::new("").line_col(999), (1, 1));
     }
 
     #[test]

@@ -478,6 +478,12 @@ fn heal_complete_document_is_identity_and_borrowed() {
 /// - **切换文本后首帧等于 miss 量级**:同 id 换文本必然 hash 不匹配 → 全量
 ///   重建(vendored 层单槽缓存的既定行为;M2 的改造落在 app 侧把槽位按
 ///   tab 分开,单槽语义不变,本断言维持原向)。
+///
+///   判据是 miss 帧与稳态帧的**倍数**,而这个倍数**随构建档位浮动**
+///   (2026-10-16 重标定:dev 依赖栈开 `-O3` 后,稳态帧被加速得比 miss 帧
+///   更多,倍数从 >5× 掉到 3.9×,原阈值 5.0 于是无理由地红)。倍数的语义
+///   不变量是「miss 比 hit 贵一个量级」;改构建配置后要重新标定,别把红
+///   当成性能退化。
 #[test]
 fn markdown_cache_hits_in_steady_state_and_misses_on_text_change() {
     let rendered_a = latermd_md::expand_wikilinks(&sample_doc(4, 300));
@@ -498,9 +504,15 @@ fn markdown_cache_hits_in_steady_state_and_misses_on_text_change() {
     );
 
     let switched = label_frame(&ctx, &rendered_b);
+    // 3.0 的标定(2026-10-16,dev 依赖栈 `opt-level = 3`):稳态 ~520µs、
+    // 换文本 ~2.0ms,实测比值 3.75–3.90,取 3.0 留约 25% 余量。
+    //
+    // 不用 `cold` 当尺子:它是**首帧**,46ms 里绝大部分是字体装载与
+    // syntect `SyntaxSet` 的一次性初始化,不是 miss 路径的成本 —— 拿它比
+    // 会把「预热」误读成「未命中」。
     assert!(
-        switched.as_secs_f64() > hot.as_secs_f64() * 5.0,
-        "换文本首帧 {switched:?} 应是 miss 量级(≫ 稳态 {hot:?});若变快了,说明切文本路径已有缓存,回归断言需要跟着改向"
+        switched.as_secs_f64() > hot.as_secs_f64() * 3.0,
+        "换文本首帧 {switched:?} 应是 miss 量级(≫ 稳态 {hot:?},冷帧 {cold:?});若跌到同量级,说明切文本路径已有缓存,回归断言需要跟着改向"
     );
 }
 

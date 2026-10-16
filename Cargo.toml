@@ -30,3 +30,18 @@ repository = "https://github.com/ailater/LaterMd"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# dev:业务代码保持 0 优化(调试体验不变),但**依赖栈开优化**。
+#
+# egui / epaint / wgpu / krilla 这一层在 `opt-level = 0` 下极慢:立即模式
+# 每帧重排全部 widget,热路径全是依赖栈里的代码。旧配置下 dev 构建的帧率
+# 与 release 差一个量级,「调 UI 时卡」基本都来自这里,而非本项目代码。
+#
+# `debug = "line-tables-only"`:保留 panic 的行号,丢掉变量级 DWARF ——
+# 后者是 target/ 体积的主要来源(每份测试二进制数百 MB)。
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false

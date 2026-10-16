@@ -206,7 +206,11 @@ pub struct PreviewState {
     /// 渲染文本的偏移口径与源码不同(五层改写会位移),故这份拷贝只作
     /// 「大纲 span 锚定的文本」与快照一致性断言的锚点;渲染侧另有块级
     /// 改写产物(`LiveState::rich_block_with_base`),不读这里。
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// **只在 `#[cfg(test)]` 下存在**:生产路径无任何消费者(全仓只有
+    /// 测试读它),而它每次修订号前进都要付一次整篇 `String` 深拷贝 ——
+    /// 敲一个字拷一篇,纯属为测试付费。
+    #[cfg(test)]
     pub text: String,
     /// 快照对应的 [`EditorBuffer::revision`]。
     pub synced_rev: u64,
@@ -228,14 +232,18 @@ impl PreviewState {
     /// 唯一消费者是已退役的右栏预览,每次修订号前进都重算它们是纯浪费。
     /// Live 侧按块改写并缓存结果(`rich_cache`),稳态帧零解析;大纲仍在
     /// 这里一次性算出侧栏要用。
+    ///
+    /// 源文本只在 `#[cfg(test)]` 下留一份拷贝(理由见字段注记);`outline`
+    /// 直接吃缓冲的 `&str`,生产构建因此**零拷贝**。
     pub fn new(editor: &EditorBuffer) -> Self {
-        let text = editor.text().to_owned();
+        let text = editor.text();
         // 顺序曾固定为 **wikilink 展开 → 高亮 `==` 链接改写 → emoji 链接
         // 改写 → 任务 checkbox 链接改写**,那条顺序纪律搬去了
         // `LiveState::rich_block_with_base` 的层序注释(五层含图片改写)。
         Self {
-            outline: latermd_md::outline(&text),
-            text,
+            outline: latermd_md::outline(text),
+            #[cfg(test)]
+            text: text.to_owned(),
             synced_rev: editor.revision(),
         }
     }
