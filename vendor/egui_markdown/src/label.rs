@@ -101,7 +101,7 @@ struct CachedCodeBlock {
 }
 
 #[inline]
-fn hash_text(
+pub(crate) fn hash_text(
   text: &str,
   style: &MarkdownStyle,
   font: &FontId,
@@ -453,9 +453,29 @@ fn hit_galleys_id(id: egui::Id) -> egui::Id {
 /// The table is only valid in the frame it was written (screen rects go stale
 /// the moment anything scrolls or resizes), so reading it in a later frame —
 /// or before the label ever rendered — returns `None`.
+///
+/// **The reset pass is explicit.** `render` clears the table for the current
+/// frame before laying anything out, so a frame whose label rendered **only
+/// estimated placeholders** (a host-side viewport cull; see `crate::estimate`)
+/// reports `None` — the absence is observable, which is exactly what a host
+/// needs to distinguish "rendered but culled by the layout cache" from "never
+/// rendered this frame".
 pub fn block_span_rects(ui: &egui::Ui, id: egui::Id) -> Option<Vec<BlockSpanRect>> {
   let (frame, blocks) = ui.data(|d| d.get_temp::<(u64, Vec<BlockSpanRect>)>(block_rects_id(id)))?;
   (frame == ui.ctx().cumulative_pass_nr()).then_some(blocks)
+}
+
+/// Whether the label with this `id` recorded a block table **this frame**.
+///
+/// A cheaper probe than [`block_span_rects`] for hosts that only need to know
+/// whether a label really rendered (as opposed to being estimated away):
+/// it returns `true` exactly when the table exists and belongs to the current
+/// pass. Headless tests use it to assert viewport-culling behavior.
+pub fn block_span_rects_present(ui: &egui::Ui, id: egui::Id) -> bool {
+  let Some((frame, _)) = ui.data(|d| d.get_temp::<(u64, Vec<BlockSpanRect>)>(block_rects_id(id))) else {
+    return false;
+  };
+  frame == ui.ctx().cumulative_pass_nr()
 }
 
 /// Look up the on-screen rect of the block containing a byte `offset` in the
@@ -895,6 +915,40 @@ impl<'a> MarkdownLabel<'a> {
         max_rows: Some(self.max_lines.unwrap_or(1)),
       },
     }
+  }
+
+  /// Estimated laid-out height of this label's content at the current wrap
+  /// width, without shaping the text.
+  ///
+  /// Mirrors what [`Self::show`] would lay out — same heal, style, font and
+  /// wrap resolution, same segmented-path flush semantics — with the accuracy
+  /// bounds documented in [`crate::estimate`]. Intended for hosts that need a
+  /// placeholder height for content they have decided not to render this frame
+  /// (off-screen blocks in a virtualized layout). The structural model is
+  /// cached per widget id and text hash, so repeated calls at changing widths
+  /// cost arithmetic only.
+  pub fn estimated_height(&self, ui: &Ui) -> f32 {
+    let context_style = egui_markdown_style::global_style(ui.ctx());
+    let style = self.style.unwrap_or(context_style.as_ref());
+    let color = ui.visuals().text_color();
+    let font = self.font.clone().unwrap_or_else(|| FontSelection::Default.resolve(ui.style()));
+    let wrap = self.resolve_wrap(ui);
+    crate::estimate::estimated_height(
+      ui,
+      crate::estimate::HeightParams {
+        id: self.id,
+        text: self.text,
+        heal: self.heal,
+        font,
+        wrap_width: wrap.max_width,
+        style,
+        color,
+        dark_mode: ui.visuals().dark_mode,
+        handler: self.link_handler,
+        scroll_code_blocks: self.scroll_code_blocks,
+        code_block_buttons: self.code_block_buttons.is_some(),
+      },
+    )
   }
 
   /// Re-apply live wrap fields that are deliberately excluded from layout cache keys.

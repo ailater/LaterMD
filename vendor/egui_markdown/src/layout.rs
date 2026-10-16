@@ -36,7 +36,7 @@ const LINE_HEIGHT_FLOOR_SLACK_PX: f32 = 0.75;
 /// engage, absolute snapping slack is added so a pixel-snapped row still clears the
 /// fallback face's row-height need (see [`LINE_HEIGHT_FLOOR_SLACK_PX`]).
 #[inline]
-fn line_height_for(size: f32, style: &MarkdownStyle) -> Option<f32> {
+pub(crate) fn line_height_for(size: f32, style: &MarkdownStyle) -> Option<f32> {
   let ratio_height = size * style.line_height_ratio;
   let floor_height = size * style.min_line_height_em + LINE_HEIGHT_FLOOR_SLACK_PX;
   Some(ratio_height.max(floor_height))
