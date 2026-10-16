@@ -1790,7 +1790,7 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
     // 三分区默认高度:视口高度三等分(用户没拖过时各分 1/3;拖过的分区
     // 用持久值,不吃这个默认)。
     let third = git_section_third_default(panel);
-    let changes_height = git_section_height(panel, "changes", third);
+    let [changes_height, repo_height, file_history_height] = git_section_heights(panel, third);
     let changes_section = egui::CollapsingHeader::new(format!("更改({})", git.entries.len()))
         .id_salt("git-changes")
         .default_open(true)
@@ -1826,7 +1826,6 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
         true,
     )
     .is_open();
-    let repo_height = git_section_height(panel, "repository", third);
     let repo_section = git_repo_section(panel, git, |ui| {
         egui::ScrollArea::vertical()
             .id_salt("git-log-scroll")
@@ -1843,7 +1842,6 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
 
     panel.add_space(tokens::gap::XS);
     let file_count = git.file_history.as_ref().map_or(0, |h| h.commits.len());
-    let file_history_height = git_section_height(panel, "file-history", third);
     let file_section = egui::CollapsingHeader::new(format!("文件历史({file_count})"))
         .id_salt("git-file-history")
         .default_open(true)
@@ -1879,6 +1877,18 @@ fn git_section_third_default(panel: &egui::Ui) -> f32 {
         + 3.0 * (spacing.interact_size.y + GIT_SECTION_HANDLE_H + 2.0 * spacing.item_spacing.y)
         + 3.0 * (tokens::gap::XS + spacing.item_spacing.y);
     ((panel.available_height() - chrome) / 3.0).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
+}
+
+fn git_section_heights(panel: &egui::Ui, default: f32) -> [f32; 3] {
+    let names = ["changes", "repository", "file-history"];
+    let mut heights = names.map(|name| git_section_height(panel, name, default));
+    let budget = (panel.available_height() - GIT_SECTION_LAYOUT_SAFETY_H).max(0.0);
+    let total = heights.iter().sum::<f32>();
+    if total > budget {
+        let scale = budget / total;
+        heights.iter_mut().for_each(|height| *height *= scale);
+    }
+    heights
 }
 
 fn git_section_height(panel: &egui::Ui, name: &str, default: f32) -> f32 {
