@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MarkdownLabel::estimated_height`: the estimated laid-out height of the label's content at the
+  current wrap width, computed by a structural walk over the parsed tokens (per-glyph advance
+  sums, per-line fence segments, construct heights) instead of shaping. Intended for hosts that
+  need a placeholder height for content they have decided not to render this frame (off-screen
+  blocks in a virtualized layout). The model is cached per widget id and text hash, so repeated
+  calls at changing widths cost one arithmetic pass. Plain text, headings, lists, fences and
+  code frames are exact to within a row; tables, images and block widgets are structural
+  approximations corrected by measurement once rendered.
+- `block_span_rects_present`: a cheap probe for whether the label with this id recorded a block
+  table in the current pass — the absence is observable, which is what a host needs to
+  distinguish "rendered but culled by the layout cache" from "never rendered this frame".
 - `LinkHandler::link_response` and `LinkHandler::image_response`, called with the interaction
   `Response` of default-rendered links (galley path on secondary click, per-link widgets in table
   cells, and `egui::Image` blocks under the `images` feature), so hosts can attach context menus

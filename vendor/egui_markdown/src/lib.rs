@@ -33,6 +33,9 @@
 //   4. Feature-gate the dependency: `math = ["dep:egui_math"]`, delegating to it
 //      for inline/display math rendering (same pattern as egui_extras for tables).
 
+/// Estimated laid-out height without shaping (placeholder heights for
+/// viewport-managed hosts).
+pub mod estimate;
 /// The [`MarkdownLabel`] widget.
 pub mod label;
 /// Layout job construction from token streams.
@@ -56,7 +59,7 @@ pub mod types;
 pub use egui_markdown_style::{global_style, set_style};
 pub use label::MarkdownLabel;
 pub use label::{
-  block_rect_at_offset, block_span_rects, char_index_at_pos, cursor_from_pos, glyph_at_index,
+  block_rect_at_offset, block_span_rects, block_span_rects_present, char_index_at_pos, cursor_from_pos, glyph_at_index,
   last_non_whitespace_glyph, section_anchors, BlockSpanRect, OverflowWrap, SectionAnchor,
 };
 pub use layout::CodeThemeArg;
