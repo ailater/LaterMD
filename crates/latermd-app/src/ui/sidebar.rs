@@ -304,6 +304,13 @@ fn draw_body(
     workbench: bool,
     outbox: &mut Vec<Message>,
 ) {
+    if matches!(*active_tab, SidebarTab::Git) {
+        // Git 的三个分区各自拥有滚动区;再包一层 nav-body 会把固定分区
+        // 高度当成外层内容高度,在底部制造一个多余的滚动条。
+        git_panel(panel, git, outbox);
+        return;
+    }
+
     egui::ScrollArea::vertical()
         .id_salt("nav-body")
         .auto_shrink([false, false])
@@ -312,7 +319,7 @@ fn draw_body(
             SidebarTab::Files => files_panel(ui, file_tree, current_file, git, workbench, outbox),
             SidebarTab::Search => search_panel(ui, search, file_tree.root.as_deref(), outbox),
             SidebarTab::Outline => outline_panel(ui, outline, outbox),
-            SidebarTab::Git => git_panel(ui, git, outbox),
+            SidebarTab::Git => unreachable!("Git is rendered outside nav-body"),
             SidebarTab::Backlinks => backlinks_panel(
                 ui,
                 backlinks,
