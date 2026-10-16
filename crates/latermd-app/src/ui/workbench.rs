@@ -117,6 +117,34 @@ pub(crate) fn label_at(
     rect
 }
 
+/// 面板列头:左侧标题、右缘徽标(28px 定高,横向撑满可用宽)。
+/// 2026-10-16 随对照列回归(`对照 / 只读`;P4 曾随右栏整删)。
+pub(crate) fn pane_heading(ui: &mut egui::Ui, title: &str, detail: &str) {
+    let colors = crate::theme::shell(ui);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::hover());
+    label_at(
+        ui,
+        rect.left(),
+        rect.center().y,
+        title,
+        12.0,
+        colors.secondary,
+    );
+    let text = ui.painter().layout_no_wrap(
+        detail.to_owned(),
+        egui::FontId::proportional(11.0),
+        colors.secondary,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.right() - text.size().x,
+            rect.center().y - text.mesh_bounds.center().y,
+        ),
+        text,
+        colors.secondary,
+    );
+}
+
 pub(crate) fn small_icon(ui: &mut egui::Ui, icon: Icon, tip: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
     let colors = crate::theme::shell(ui);

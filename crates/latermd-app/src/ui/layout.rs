@@ -572,6 +572,10 @@ impl LaterMdApp {
                     // 松手帧又按内容宽存回,拖动等于无效(2026-10-15 坤哥
                     // 实测「宽度拉不动」;无头探针:撑满=420,不撑=260)。
                     ui.set_min_width(ui.available_rect_before_wrap().width());
+                    // 列头在滚动区外固定(旧「对照预览」口径,P4 曾随右栏
+                    // 整删;2026-10-16 恢复)。三态下右栏是 Live 富渲染的
+                    // 只读对照,不再是旧「预览」,故标题叫「对照」。
+                    crate::ui::workbench::pane_heading(ui, "对照", "只读");
                     let LaterMdApp { state, outbox, .. } = self;
                     let tab = state.tabs.current_mut();
                     // 只读:浏览 + 硬锁(点击/双击/跳转都不进编辑、不抢焦点)。
@@ -8219,6 +8223,119 @@ mod tests {
             app.state.render_mode,
             crate::live::RenderMode::Source,
             "拖过最小宽收起对照列,应收敛到源码档(工作 bool 翻转没有回流 = 状态源分叉)"
+        );
+    }
+
+    /// 对照列要有**列头**(「对照」标题 + 右缘「只读」徽标):P4 曾随右栏
+    /// 整删,2026-10-16 恢复。无头夹具不装字体(CI 无 CJK),但 galley 仍
+    /// 携带文本串,按文字内容断言即可,不依赖字形渲染。
+    #[test]
+    fn compare_column_has_readonly_pane_heading() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let (ctx, mut app) = compare_only_app(screen, false);
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| app.draw(ui),
+        );
+        out.textures_delta.clear();
+        let mut seen = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                seen.push(text.galley.text().to_owned());
+            }
+        }
+        assert!(
+            seen.iter().any(|t| t == "对照"),
+            "对照列应有「对照」列头,实得 {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t == "只读"),
+            "对照列应有「只读」徽标,实得 {seen:?}"
+        );
+    }
+
+    /// 拖动中分隔线要**跟着指针走**,不是停在拖动前的锚点上:2026-10-13
+    /// 坤哥实测「线不跟着我拉的框走」的真 bug 就发生在这里 —— 拖动中
+    /// `PanelState` 被 egui 刻意停写、`Response.rect` 又拿旧边界算,锚点
+    /// 必须 取 `interact_pointer_pos`。P4 删面板时连带删了本测试,现随
+    /// 对照列回归恢复。方向:向左拖 = 对照列变宽。
+    #[test]
+    fn compare_divider_follows_the_drag() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let (ctx, mut app) = compare_only_app(screen, false);
+        // 分隔线取色的亮度全距锚点要先把 shell 探针写上(同族测试同款)。
+        let _ = shell_full_gap(&ctx);
+        let start_x = divider_geometry(&mut app, &ctx, screen, vec![])
+            .expect("分栏档应有分隔线")
+            .x;
+        let press_y = screen.height() / 2.0;
+        // 按下必须**单独占一帧**:egui 要先落一次 press 才把 widget 标记为
+        // 按压中,同帧再发 PointerMoved 不构成拖动(实测 dragged() 恒 false、
+        // interact_pointer_pos() 恒 None,现象与「线不跟手」一模一样)。
+        divider_geometry(
+            &mut app,
+            &ctx,
+            screen,
+            vec![egui::Event::PointerMoved(egui::pos2(
+                start_x - 2.0,
+                press_y,
+            ))],
+        );
+        divider_geometry(
+            &mut app,
+            &ctx,
+            screen,
+            vec![Event::PointerButton {
+                pos: egui::pos2(start_x - 2.0, press_y),
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+        );
+        let mut xs = Vec::new();
+        for step in 1..=5 {
+            let target_x = start_x - step as f32 * 24.0;
+            divider_geometry(
+                &mut app,
+                &ctx,
+                screen,
+                vec![egui::Event::PointerMoved(egui::pos2(target_x, press_y))],
+            );
+            xs.push(
+                divider_geometry(&mut app, &ctx, screen, vec![])
+                    .expect("拖动过程中线仍在")
+                    .x,
+            );
+        }
+        divider_geometry(
+            &mut app,
+            &ctx,
+            screen,
+            vec![Event::PointerButton {
+                pos: egui::pos2(start_x - 120.0, press_y),
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+        );
+        let mut prev = start_x;
+        let mut moved = 0;
+        for x in &xs {
+            assert!(
+                *x < prev + 0.5,
+                "线应随指针左移单调跟随,却从 {prev:.1} 退到 {x:.1}(全序列 {xs:?})"
+            );
+            if *x < prev - 1.0 {
+                moved += 1;
+            }
+            prev = *x;
+        }
+        assert!(
+            moved >= 4,
+            "5 步拖动里应至少 4 步看到线在动,实得 {moved} 步(xs={xs:?},起点 {start_x:.1})"
         );
     }
 
