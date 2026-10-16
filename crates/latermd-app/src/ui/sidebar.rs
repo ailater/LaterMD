@@ -1864,17 +1864,18 @@ const GIT_SECTION_MAX_H: f32 = 520.0;
 /// 拖拽带的命中高度(可见分割线只有 1px,居中)。
 const GIT_SECTION_HANDLE_H: f32 = 7.0;
 
-/// 三分区的**默认**高度:Git 页视口(clip_rect)高度扣除固定装饰 ——
-/// 顶部工具行、三枚折叠头、三条拖拽带、工具行后与分区间共四段间距,
-/// 另按每枚控件一次的 egui 自动 item_spacing 留余 —— 后三等分。用户
-/// 没拖过的分区都吃这个值(窗口高度变了跟着重算);拖过的分区用自己
-/// 的持久值,与三等分无关。
+/// 三分区的**默认**高度:以当前 Git body 的可用高度扣除固定装饰后
+/// 三等分。这里不能使用 `clip_rect()`——Git 页位于外层 `nav-body`
+/// `ScrollArea` 内,其裁剪区包含了父级视口,但真正能布局的空间是当前
+/// `Ui` 的 `available_height()`。顶部工具行已经在调用本函数前布局完成,
+/// 因此这里只扣除三枚折叠头、三条拖拽带及其间距。用户没拖过的分区都
+/// 吃这个值(窗口高度变了跟着重算);拖过的分区用自己的持久值,与三等分无关。
 fn git_section_third_default(panel: &egui::Ui) -> f32 {
     let spacing = panel.spacing();
-    let chrome = tokens::TOOLBAR_H
-        + 3.0 * (spacing.interact_size.y + GIT_SECTION_HANDLE_H + 2.0 * spacing.item_spacing.y)
-        + 4.0 * (tokens::gap::XS + spacing.item_spacing.y);
-    ((panel.clip_rect().height() - chrome) / 3.0).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
+    let chrome = 3.0
+        * (spacing.interact_size.y + GIT_SECTION_HANDLE_H + 2.0 * spacing.item_spacing.y)
+        + 3.0 * (tokens::gap::XS + spacing.item_spacing.y);
+    ((panel.available_height() - chrome) / 3.0).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
 }
 
 fn git_section_height(panel: &egui::Ui, name: &str, default: f32) -> f32 {
