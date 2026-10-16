@@ -899,8 +899,30 @@ fn search_results(
                     .id_salt(relative)
                     .default_open(true)
                     .show(ui, |ui| {
+                        // Search results can reach MAX_HITS. Keep the group
+                        // affordance, but reserve off-screen rows instead of
+                        // building a LayoutJob/Button for every hit on every
+                        // sidebar resize frame. Search rows are one-line
+                        // buttons, so the row-height estimate is exact.
+                        let row_h = ui_row_height(ui);
+                        let mut skipped = 0usize;
                         for hit in group {
-                            search_row(ui, hit, outbox);
+                            let row_rect = egui::Rect::from_min_size(
+                                ui.cursor().min,
+                                egui::vec2(ui.available_width(), row_h),
+                            );
+                            if ui.is_rect_visible(row_rect) {
+                                if skipped > 0 {
+                                    ui.add_space(row_h * skipped as f32);
+                                    skipped = 0;
+                                }
+                                search_row(ui, hit, outbox);
+                            } else {
+                                skipped += 1;
+                            }
+                        }
+                        if skipped > 0 {
+                            ui.add_space(row_h * skipped as f32);
                         }
                     });
             }
