@@ -51,6 +51,8 @@
 
 - **【修复 2026-10-16】关闭对照列的滑出动画回归(PR #258,非 vendor)**:PR#252 把右栏从旧的条件 `show_collapsible` 改成条件 `show`,开合变瞬移。现恢复常显 + `show_collapsible`:工作 bool 每帧从 `render_mode == Split` 播种,egui 在拖拽收起/双击边缘/收起态把手拖开时翻转它,翻转经 `Message::CompareColumnToggled` 收敛回 `render_mode`(`render_mode` 仍是唯一状态源)。守门测试两条:`compare_column_slides_closed_over_frames`(切换后首帧列仍在、逐帧右移退场,条件 `show` 必红)+ `compare_column_drag_past_min_collapses_into_source_mode`(drag-to-collapse 收敛回源码档,摘掉收敛推送必红)。
 
+- **【补缺 2026-10-16】P4 删除盘点后补回最后两件(非 vendor)**:①列头 `pane_heading` 回归(「对照」+「只读」徽标,28px 固定在滚动区外;文案按三态身份改叫「对照」,不再叫旧「对照预览」);②「分隔线拖动中跟指针走」守门测试恢复(旧 `preview_divider_follows_the_drag` 的等价物,`panel_divider` 拖动中取 `interact_pointer_pos` 的三段锚点由此钉住 —— 2026-10-13「线不跟手」真 bug 的回归防线)。两条均红绿闭环(`compare_column_has_readonly_pane_heading` / `compare_divider_follows_the_drag`)。至此 P4 删除清单逐项盘点完毕:代码与测试面全部回归或被三态设计有意识取代,无其余缺口。
+
 
 ## 阻塞
 
