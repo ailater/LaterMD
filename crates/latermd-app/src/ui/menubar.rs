@@ -106,6 +106,7 @@ const VIEW_MENU: [&[Command]; 2] = [
     &[
         Command::ToggleSidebar,
         Command::ToggleLivePreview,
+        Command::ToggleCompare,
         Command::TypewriterToggle,
         Command::FocusModeToggle,
         Command::ToggleMinimap,
@@ -194,6 +195,8 @@ fn command_mnemonic(cmd: Command) -> char {
         Command::ImageInsert => 'P',
         Command::EmojiPicker => 'M',
         Command::ToggleSidebar => 'S',
+        // C = Compare 词首;视图菜单内 S/V 未占 C,菜单内唯一
+        Command::ToggleCompare => 'C',
         Command::ToggleLivePreview => 'V',
         // W = typewriter 的词尾;视图菜单内 S/V/T 已被占用,菜单内唯一
         // (条目层助记是菜单内命名空间,与全局 Alt 层无关)
@@ -253,6 +256,8 @@ fn mnemonic_label(ui: &egui::Ui, label: &str, letter: char) -> egui::text::Layou
 pub(crate) fn toggle_checked(cmd: Command, state: &State) -> Option<bool> {
     Some(match cmd {
         Command::ToggleSidebar => state.layout.left,
+        // 对照列开合:勾选 = 分栏档(三态互斥)
+        Command::ToggleCompare => state.render_mode == RenderMode::Split,
         Command::ToggleLivePreview => state.render_mode == RenderMode::Live,
         Command::TypewriterToggle => state.theme.show_typewriter,
         Command::FocusModeToggle => state.theme.show_focus_mode,

@@ -42,7 +42,7 @@ pub const BRAND_LOGO: f32 = 18.0;
 /// 标题栏右端窗口按钮枚数(与 [`crate::ui::titlebar::TITLE_BUTTONS`] 同
 /// 源;`WINDOW_BTN.x` 乘它得整排宽。两者不同步时有断言钉住,见
 /// `titlebar::tests::button_rects_tile_from_the_right_edge`)。
-pub const TITLE_BUTTON_N: usize = 6;
+pub const TITLE_BUTTON_N: usize = 7;
 /// 标题栏右侧窗口按钮命中区(Win 风整块,mac/Linux 同款统一)。
 pub const WINDOW_BTN: egui::Vec2 = egui::Vec2::new(32.0, 24.0);
 /// 标题栏右端「命令箱」的横向几何(docs/ui-shell-redesign-v2.md §5.6):
@@ -64,13 +64,15 @@ pub const TITLE_SEARCH_HINT: &str = "搜索文档…";
 pub const TITLE_CMD_TO_BTN: f32 = 8.0;
 /// 命令箱控件的高度(胶囊 / 切换同高,垂直居中于 36px 标题栏)。
 pub const TITLE_CMD_H: f32 = 24.0;
-/// 七枚窗口按钮的总宽(= 7 × [`WINDOW_BTN`].x = 224)。
+/// 七枚窗口按钮的总宽(= [`TITLE_BUTTON_N`] × [`WINDOW_BTN`].x = 224)。
 pub const TITLE_BUTTONS_W: f32 = TITLE_BUTTON_N as f32 * WINDOW_BTN.x;
 /// 左段窗口标题的最小可见宽;窄于此则标题给命令箱让位(先截断 ellipsis,
-/// 再整段不画)。264 的来历见 docs/ui-shell-redesign-v2.md §5.6。
-pub const TITLE_TEXT_MIN_W: f32 = 264.0;
+/// 再整段不画)。264 的来历见 docs/ui-shell-redesign-v2.md §5.6;三态视图
+/// 恢复第 7 枚窗口按钮(对照列)后 264 会让 900px 窗掉出命令箱,2026-10-15
+/// 让到 252(252 + 命令箱 416 + 留白 8 + 七键 224 = 900)。
+pub const TITLE_TEXT_MIN_W: f32 = 252.0;
 /// 窗口不再画命令箱的宽度阈值(docs/ui-shell-redesign-v2.md §5.6):
-/// 命令箱 416 + 到六枚按钮 8 + 6×32 + 标题最小 264 = 880。
+/// 命令箱 416 + 到按钮 8 + 七键 7×32 + 标题最小 252 = 900。
 /// (命令箱 416 = 搜索 260 + 间隙 6 + 三段切换 150,随三态视图上调。)
 pub const TITLE_CMD_MAX_W: f32 =
     TITLE_CMD_W + TITLE_CMD_TO_BTN + TITLE_BUTTONS_W + TITLE_TEXT_MIN_W;

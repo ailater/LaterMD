@@ -922,9 +922,8 @@ pub(super) fn mode_switch(ui: &mut egui::Ui, rect: Rect, state: &State, outbox: 
             .clicked()
             && !selected
         {
-            // 点任意一段都发同一条消息,归约按 [`RenderMode::cycle`] 推进;
-            // 三段是循环的,「点到目标档」需要连点(与点开关的语义一致)。
-            outbox.push(Message::ToggleLivePreview);
+            // 三段开关是「点谁到谁」的直达语义(循环切档走 Ctrl/Cmd+/ 或菜单)。
+            outbox.push(Message::SetRenderMode(mode));
         }
     }
 }
@@ -1888,8 +1887,8 @@ mod tests {
         }
     }
 
-    /// 三段开关:点**当前**档不产消息(不反转),点任一**其它**档产一条
-    /// `ToggleLivePreview`(归约按 [`RenderMode::cycle`] 推进)。
+    /// 三段开关:点**当前**档不产消息(不反转),点任一**其它**档产恰好
+    /// 一条 `SetRenderMode`(点谁到谁的直达语义;循环切档走 Ctrl/Cmd+/)。
     #[test]
     fn mode_segment_only_switches_when_selecting_another_mode() {
         use crate::live::RenderMode;
@@ -1934,8 +1933,8 @@ mod tests {
                 )
                 .drop_without_applying_deltas();
                 assert!(
-                    matches!(outbox.as_slice(), [Message::ToggleLivePreview]),
-                    "点其它档应发一条 ToggleLivePreview,实得 {outbox:?}"
+                    matches!(outbox.as_slice(), [Message::SetRenderMode(_)]),
+                    "点其它档应发一条 SetRenderMode,实得 {outbox:?}"
                 );
             }
         }

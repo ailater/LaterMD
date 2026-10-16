@@ -509,6 +509,18 @@ impl LaterMdApp {
                 COMPARE_PANEL_ID,
                 self.state.layout.live_right_width,
             );
+            // 拖动命中半径**只在对照列这一帧**局部抬高(出厂 3.0 → 6.0,
+            // 命中带宽 6px → 12px)。窄带宽落在同底色的面板之间,没有任何
+            // 视觉线索指向它,实测完全找不到可拖处(2026-10-13 历史实测;
+            // PR2 恢复面板时漏掉这一段,导致「宽度拉不动」)。必须局部改而
+            // 不是改全局 `Style`:egui 的 resize 半径是全局单值,抬高会连带
+            // nav 右缘误吞编辑区正文的点击。nav 在本函数更早 show,读到的
+            // 已是出厂值;用后即恢复,不留全局副作用。
+            let grab_radius = ui.style().interaction.resize_grab_radius_side;
+            let restore_grab = grab_radius != tokens::PREVIEW_DIVIDER_GRAB;
+            if restore_grab {
+                ui.style_mut().interaction.resize_grab_radius_side = tokens::PREVIEW_DIVIDER_GRAB;
+            }
             egui::Panel::right(COMPARE_PANEL_ID)
                 .resizable(true)
                 .show_separator_line(false)
@@ -527,6 +539,14 @@ impl LaterMdApp {
                         .stroke(egui::Stroke::NONE),
                 )
                 .show(ui, |ui| {
+                    // egui 0.36 的侧栏面板按**内容 min_rect** 定实际宽度
+                    // (`Frame::show` 的 rect 跟随内容收缩),而下面的固定矩形
+                    // 子 Ui 是隔离 ScrollArea 撑高坑的必需品,其 min_rect
+                    // **不会**传播回帧内容层 —— 不显式撑满,面板会缩到
+                    // `size_range` 下限并被 `remember_panel_width` 持久化,
+                    // 松手帧又按内容宽存回,拖动等于无效(2026-10-15 坤哥
+                    // 实测「宽度拉不动」;无头探针:撑满=420,不撑=260)。
+                    ui.set_min_width(ui.available_rect_before_wrap().width());
                     let LaterMdApp { state, outbox, .. } = self;
                     let tab = state.tabs.current_mut();
                     // 只读:浏览 + 硬锁(点击/双击/跳转都不进编辑、不抢焦点)。
@@ -584,6 +604,12 @@ impl LaterMdApp {
                         outbox,
                     );
                 });
+            if restore_grab {
+                // nav 在本函数更早 show(③ 在 ④ 之前),它读到的已是出厂值;
+                // 这里恢复后受影响的只有后续 panel —— 而它们都不 resizable,
+                // 故等价于「不留任何全局副作用」。
+                ui.style_mut().interaction.resize_grab_radius_side = grab_radius;
+            }
         }
         crate::ui::workbench::remember_panel_width(
             ui,
@@ -7957,6 +7983,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 对照列宽度必须**拖得动**,且命中带要够宽:按下点取边界外 5px ——
+    /// 在抬高后的命中带(`PREVIEW_DIVIDER_GRAB`=6)内、egui 出厂半径(3)
+    /// 之外。抬高被删则拖拽根本不启动,本测试必红(2026-10-15 坤哥实测
+    /// 「宽度拉不动」的根因:恢复面板时漏了这处局部抬高,6px 带无视觉
+    /// 线索时出厂 3px 带等于不可命中)。
+    #[test]
+    fn compare_resizes_by_drag_from_within_the_widened_grab_zone() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let (ctx, mut app) = compare_only_app(screen, false);
+        let mut frame = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            )
+            .drop_without_applying_deltas()
+        };
+        let panel_left = || {
+            egui::PanelState::load(&ctx, egui::Id::new(COMPARE_PANEL_ID))
+                .expect("对照列 PanelState 存在")
+                .outer_rect
+                .left()
+        };
+
+        frame(Vec::new());
+        let edge = panel_left();
+        let y = screen.height() / 2.0;
+        // 悬停进带 → 按下 → 分三帧左移 100px → 松手。右栏左缘向左 = 变宽。
+        frame(vec![Event::PointerMoved(egui::pos2(edge - 5.5, y))]);
+        frame(vec![Event::PointerButton {
+            pos: egui::pos2(edge - 5.5, y),
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        }]);
+        for d in [40.0, 70.0, 100.0] {
+            frame(vec![Event::PointerMoved(egui::pos2(edge - d, y))]);
+        }
+        frame(vec![Event::PointerButton {
+            pos: egui::pos2(edge - 100.0, y),
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        }]);
+        frame(Vec::new());
+        let after = panel_left();
+        assert!(
+            (after - (edge - 100.0)).abs() < 1.5,
+            "拖动 100px 松手后,左缘应停在 {edge}−100 处;实得 {after}(出厂数值拖不动 = 命中带抬高回归)"
+        );
     }
 
     /// 离开分栏档时不得留下悬空的线(与旧「对照预览收起」同一条判据)。

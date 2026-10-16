@@ -951,9 +951,15 @@ pub enum Message {
     KeymapReset(Command),
     /// 全部键位恢复出厂。
     KeymapResetAll,
-    /// 三态视图循环切档(三态视图):`源码 → 写作 → 源码+对照 → 源码`,
-    /// 只翻标志,不碰缓冲与光标。`Ctrl/Cmd+/` 与标题栏三段开关共用此入口。
+    /// 三态视图循环切档:`源码 → 写作 → 源码+对照 → 源码`,只翻标志,
+    /// 不碰缓冲与光标。`Ctrl/Cmd+/` 与视图菜单的快捷入口(标题栏三段开关
+    /// 走 [`Message::SetRenderMode`] 直达目标档,不循环)。
     ToggleLivePreview,
+    /// 直接把视图设到指定档(三段开关的「点谁到谁」语义)。
+    SetRenderMode(crate::live::RenderMode),
+    /// 对照列开合:非分栏档 ⇄ 分栏档(标题栏 PanelRight 按钮入口)。
+    /// 开 = 切到分栏;关 = 回源码。写作档点击先切到分栏档(中央变源码)。
+    CompareColumnToggled,
     /// 打开设置对话框并切到指定分页(工具栏齿轮 / 菜单「设置…」入口)。
     SettingsOpened(crate::settings::SettingsTab),
     /// 打开「关于 LaterMD」对话框(帮助菜单入口);归约只置 `about.open`。
@@ -1393,6 +1399,15 @@ impl State {
                 self.persist_theme();
             }
             Message::ToggleLivePreview => self.cycle_render_mode(),
+            Message::SetRenderMode(mode) => self.set_render_mode(mode),
+            Message::CompareColumnToggled => {
+                let target = if self.render_mode == crate::live::RenderMode::Split {
+                    crate::live::RenderMode::Source
+                } else {
+                    crate::live::RenderMode::Split
+                };
+                self.set_render_mode(target);
+            }
             Message::KeymapAssign { cmd, shortcut } => self.assign_shortcut(cmd, shortcut),
             Message::KeymapCleared(cmd) => {
                 self.keymap.set(cmd, None);
@@ -2987,18 +3002,26 @@ impl State {
         }
     }
 
-    /// 循环切档:`Source → Live → Split → Source`(三态视图;`Ctrl/Cmd+/` 与
-    /// 标题栏三段开关共用这一个入口)。
-    ///
-    /// 只翻标志 + 按档位做必要的块表/插入点交接,不做「离开某模式时右栏该
-    /// 不该回来」那类快照补工 —— 三态互斥,右栏的开关就是 `render_mode` 本身。
+    /// 循环切档(`Ctrl/Cmd+/` 与视图菜单):按 [`Self::set_render_mode`]
+    /// 推进一档,交接逻辑全在那边。
     fn cycle_render_mode(&mut self) {
+        self.set_render_mode(self.render_mode.cycle());
+    }
+
+    /// 把视图设到指定档。只翻标志 + 按档位做必要的块表/插入点交接,不做
+    /// 「离开某模式时右栏该不该回来」那类快照补工 —— 三态互斥,右栏的
+    /// 开关就是 `render_mode` 本身。目标等于当前档时是 no-op。
+    fn set_render_mode(&mut self, target: RenderMode) {
+        if self.render_mode == target {
+            return;
+        }
         // 先退出禅定再切换,避免禅定布局被写模式借用。
         if self.layout.zen {
             self.toggle_zen();
         }
-        let entering_live = self.render_mode == RenderMode::Source;
-        self.render_mode = self.render_mode.cycle();
+        let entering_live = self.render_mode == RenderMode::Source && target == RenderMode::Live;
+        let leaving_live = self.render_mode == RenderMode::Live && target != RenderMode::Live;
+        self.render_mode = target;
         self.layout.render_mode = Some(self.render_mode);
         match self.render_mode {
             RenderMode::Live => {
@@ -3010,7 +3033,7 @@ impl State {
                 tab.live.pending_caret = None;
                 tab.live.pending_range = None;
                 let byte = tab.cursor.byte;
-                // 显式从源码切入 Live 时保留源码插入点；新打开/切换文档时
+                // 从源码档切入时保留源码插入点；新打开/切换文档时
                 // cursor.byte 通常为空，仍保持浏览态，等待用户双击。
                 if entering_live {
                     if let Some(byte) = byte {
@@ -3041,13 +3064,15 @@ impl State {
             // Split 的中央仍是源码 TextEdit(与 Source 同一个 widget id),
             // 光标/选区无需交接;右栏是只读渲染,状态每帧由 UI 侧置位。
             RenderMode::Split | RenderMode::Source => {
-                // 离开 Live 前把最后一个活动插入点交给源码 TextEdit。源码和
-                // Live 使用不同的稳定 widget id，若不显式写回，切换后 egui
-                // 会显示文本却丢掉原来的插入位置和焦点。
-                let tab = self.tabs.current_mut();
-                if let Some(byte) = tab.cursor.byte {
-                    let char_idx = tab.editor.byte_to_char(byte);
-                    tab.pending_selection = Some((char_idx, char_idx));
+                if leaving_live {
+                    // 离开 Live 前把最后一个活动插入点交给源码 TextEdit。源码和
+                    // Live 使用不同的稳定 widget id，若不显式写回，切换后 egui
+                    // 会显示文本却丢掉原来的插入位置和焦点。
+                    let tab = self.tabs.current_mut();
+                    if let Some(byte) = tab.cursor.byte {
+                        let char_idx = tab.editor.byte_to_char(byte);
+                        tab.pending_selection = Some((char_idx, char_idx));
+                    }
                 }
             }
         }
