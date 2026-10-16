@@ -47,6 +47,8 @@
 
 - **【补充 2026-10-15】右栏对照预览已按坤哥指令回归为「源码+对照」三态视图**(两个 PR,均非 vendor):[#250](https://github.com/ailater/LaterMd/pull/250) 让 `live::ui` 可被两列各自调用(`ScrollArea` id 参数化 + `TabState::live_right` 独立块状态与独立 id 命名空间),[#252](https://github.com/ailater/LaterMd/pull/252) 落三态(`RenderMode::Split` + `cycle()`、标题栏三段开关、右栏只读面板、现代版分隔线)。**右栏渲染的是 Live 富渲染本身**,不是另一套渲染器 —— P4 删掉的仍是「第二条渲染链路」这个事实本身,本次回归没有重新引入它。P6 的文档清单因此要改写:不再写「对照预览已退役」,改为「对照预览 = 三态视图的分栏档(只读 Live 渲染)」;decisions-pending 里与右栏相关的条目(#78/#79/#80/#115/#121/#122/#129)按三态重述,并新增三态视图的决策条目(互斥三态 / 右栏只读 / 跟随一次 / 分隔线回归)。
 
+- **【修复 2026-10-16】三态视图真机三回归收编([#255](https://github.com/ailater/LaterMd/pull/255),非 vendor)**:①**对照列宽度拉不动**——双根因:(a)egui 0.36 侧栏面板按**内容 min_rect** 定实际宽,而右栏为隔离「ScrollArea 撑高父 Ui」套的固定矩形子 Ui(`new_child`)min_rect **不回传帧内容层**,面板缩到 `size_range` 下限并被 `remember_panel_width` 持久化、松手帧又按内容宽存回 ⇒ 拖动无效;修法 = 面板内容层 `set_min_width` 撑满一行(无头探针:撑满 420 / 不撑 260)。这是个**新通则:egui 0.36 里「固定矩形子 Ui」与「Panel 撑满」不可兼得,Panel 内容必须显式撑宽**。(b)恢复拖动命中半径局部抬高 3.0→6.0(出厂数值实测找不到可拖处);新守门测试按下点取边界外 5.5px(6px 带内、出厂带外),tokens=3 红 / =6 绿双向验证。②**标题栏 PanelRight 键缺失**——恢复 7 键布局,`TITLE_BUTTON_N` 加**编译期断言**钉死与 `TITLE_BUTTONS` 同步(P4 删按钮时 tokens 漏改、原注释声称的断言实际不存在);`TITLE_TEXT_MIN_W` 264→252 保 900px 命令箱。③**三段开关点击语义**——点段改 `Message::SetRenderMode` 直达目标档(点谁到谁),循环仍走 Ctrl/Cmd+/;另补 `Command::ToggleCompare`(Cmd/Ctrl+Alt+R + 视图菜单)给标题栏按钮做对照列开合入口。
+
 
 ## 阻塞
 
