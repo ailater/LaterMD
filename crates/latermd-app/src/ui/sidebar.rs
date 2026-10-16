@@ -1871,20 +1871,24 @@ const GIT_SECTION_LAYOUT_SAFETY_H: f32 = 12.0;
 /// `Ui` 的 `available_height()`。顶部工具行已经在调用本函数前布局完成,
 /// 因此这里只扣除三枚折叠头、三条拖拽带及其间距。用户没拖过的分区都
 /// 吃这个值(窗口高度变了跟着重算);拖过的分区用自己的持久值,与三等分无关。
-fn git_section_third_default(panel: &egui::Ui) -> f32 {
+fn git_section_layout_budget(panel: &egui::Ui) -> f32 {
     let spacing = panel.spacing();
     let chrome = GIT_SECTION_LAYOUT_SAFETY_H
         + 3.0 * (spacing.interact_size.y + GIT_SECTION_HANDLE_H + 2.0 * spacing.item_spacing.y)
         + 3.0 * (tokens::gap::XS + spacing.item_spacing.y);
-    ((panel.available_height() - chrome) / 3.0).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
+    (panel.available_height() - chrome).max(0.0)
+}
+
+fn git_section_third_default(panel: &egui::Ui) -> f32 {
+    (git_section_layout_budget(panel) / 3.0).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
 }
 
 fn git_section_heights(panel: &egui::Ui, default: f32) -> [f32; 3] {
     let names = ["changes", "repository", "file-history"];
     let mut heights = names.map(|name| git_section_height(panel, name, default));
-    let budget = (panel.available_height() - GIT_SECTION_LAYOUT_SAFETY_H).max(0.0);
+    let budget = git_section_layout_budget(panel);
     let total = heights.iter().sum::<f32>();
-    if total > budget {
+    if total > budget && total > 0.0 {
         let scale = budget / total;
         heights.iter_mut().for_each(|height| *height *= scale);
     }
