@@ -17,7 +17,23 @@ Terminal=false
 # desktop-file-validate 只报 hint 不报 error,但菜单重复是真实可见的
 # 副作用。编辑器的细分归位看 MimeType,细分场景归Additional 时才加。
 Categories=Utility;
-# Markdown 文件关联:启动器双击 .md 时以现有窗口打开,不开新窗口。
+# Markdown 文件关联(2026-10-16)。启动器双击 .md 时以现有窗口打开。
+#
+# 两个声明缺一不可:
+# ① `MimeType=` —— 本应用**能处理**哪些 MIME 类型。写了它,LaterMD 才
+#    会出现在文件管理器的「打开方式」列表里。**它不设默认**:XDG 规范
+#    里桌面项只是候选,设默认是用户自己的选择(debian 政策亦不建议安装
+#    包替用户改默认,会顶掉他原有的 MarkText 之类)。
+#    用户要设默认时:xdg-mime default latermd.desktop text/markdown,
+#    或文件管理器里右键 → 打开方式 → 其它 → 始终使用。
+# ② `Exec=... %F` —— 文件以**参数**形式传给程序。`%F` 是「零个或多个
+#    文件」的占位符(单数 %f 只接一个)。**去掉 %F 文件关联就等于没做**:
+#    双击会启动程序但什么也不打开 —— 程序侧见 cli::parse_open_targets。
+#
+# 类型选择:实测本机 shared-mime-info 的 globs2 里 `text/markdown` 已覆盖
+# `*.md` 与 `*.markdown` 两条 glob,故二者共用它即可,不必按扩展名分别
+# 声明。`text/x-markdown` 是历史别名(本机 globs2 里无对应条目),一并
+# 留着无害 —— 部分发行版仍用它做主类型。
 MimeType=text/markdown;text/x-markdown;
 Keywords=Markdown;MD;Editor;Note;Notes;笔记;文档;
 StartupNotify=true
