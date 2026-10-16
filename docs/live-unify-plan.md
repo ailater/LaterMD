@@ -53,6 +53,8 @@
 
 - **【补缺 2026-10-16】P4 删除盘点后补回最后两件(非 vendor)**:①列头 `pane_heading` 回归(「对照」+「只读」徽标,28px 固定在滚动区外;文案按三态身份改叫「对照」,不再叫旧「对照预览」);②「分隔线拖动中跟指针走」守门测试恢复(旧 `preview_divider_follows_the_drag` 的等价物,`panel_divider` 拖动中取 `interact_pointer_pos` 的三段锚点由此钉住 —— 2026-10-13「线不跟手」真 bug 的回归防线)。两条均红绿闭环(`compare_column_has_readonly_pane_heading` / `compare_divider_follows_the_drag`)。至此 P4 删除清单逐项盘点完毕:代码与测试面全部回归或被三态设计有意识取代,无其余缺口。
 
+- **【修复 2026-10-16】分隔线压弹窗(层序,非 P4 缺失而是历史旧病)**:`panel_divider` 原先画在独立 `Order::Middle` 散层,而 egui 出同一 Order 形状时先排**已注册 Area**(全部 `egui::Window` 弹窗)、非 Area 散层兜底追加在最后 ⇒ 线横穿设置/关于等一切弹窗(坤哥截图实测;P4 前的旧 `preview_divider` 同构,属历史旧病)。修法 = 改画**调用方所在层**(根层,提交序:调用点 ⑥ 在中央面板内容之后 ⇒ 盖得住面板;弹窗是注册 Area ⇒ 永远在根层之上)。守门 `compare_divider_paints_below_dialogs` 断言形状流序(分隔线下标 < 弹窗标题下标;egui Window 首帧是 sizing pass 不出形状,须跑两帧取证),独立散层实现必红。
+
 
 ## 阻塞
 
