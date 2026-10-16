@@ -637,6 +637,10 @@ pub fn ui(
     // 逐 handler 记占位区,ScrollArea 之后统一消费。
     let emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>> = Default::default();
 
+    // ScrollArea 状态键:ScrollArea 在 begin() 里以 `panel.make_persistent_id(id_salt)`
+    // 派生,内容闭包里的 `ui` 是子 Ui、id 链不同 —— 锚定读写必须用 panel 级
+    // 派生的同一个键,先在此处取好。
+    let scroll_state_id = panel.make_persistent_id(editor_id.with("live-scroll"));
     let scrolled =
         egui::ScrollArea::vertical()
             // id 必须带 `editor_id`:同一文档可能被两个实例渲染(主写作列 +
@@ -648,6 +652,12 @@ pub fn ui(
                 // 2026-10-10):egui 出厂 item_spacing.y = 3px 会叠加在演算值
                 // 上,归零让前距成为唯一间距源。
                 ui.spacing_mut().item_spacing.y = 0.0;
+                // #111 B 的滚动锚定落点:视口上方块的占位高变化会平移下方全
+                // 部内容,`estimate_drift` 累计本帧全部此类差值,在 ScrollArea
+                // 收尾后把 state.offset 同向修正回去(egui 0.36 的 State 是
+                // persisted+可写,`store` 先于本帧 clamp,修改即生效)。视口
+                // 下方的占位差只改内容总高(滚动条长度),不影响可见几何,
+                // 不补偿。
                 if block_count == 0 {
                     if live.browse_only {
                         // 空文档的浏览态没有可渲染块，只显示非编辑提示。双击
@@ -694,6 +704,10 @@ pub fn ui(
                 // 前一块的分类(首块无前距:vendored `had_content` 同语义,
                 // 文档顶贴顶不悬空)。
                 let mut prev_kind: Option<BlockKind> = None;
+                // 视口外块估高剔除(#111 B):本帧被剔除块的「估计高 − 实测高」
+                // 累计,ScrollArea 收尾后按顶部/底部位置补偿滚动偏移。见
+                // [`estimate_drift`] 的逐条说明。
+                let mut estimate_drift: f32 = 0.0;
                 for index in 0..block_count {
                     let range = live.blocks[index].clone();
                     // 块文本直接借用共享缓冲；渲染缓存持有改写结果，稳态帧不再复制整块。
@@ -709,6 +723,98 @@ pub fn ui(
                         ));
                     }
                     prev_kind = Some(kind);
+                    // 视口外块估高剔除(#111 B,decisions-pending 备选 B 的落地):
+                    // 屏外块不 shape,用 vendored 估高器(`estimate.rs`,结构化
+                    // 遍历 + 逐字宽度求和,缓存于 id+文本 hash)占位。命中条件
+                    // 与 vendored flush 段剔除同向(起于裁剪底缘之外才剔),
+                    // 故滚动中被裁到的块**当帧即真实渲染**,视口内几何永远精
+                    // 确,滚动无跳变;被替换的估高与实测的差值按块在视口上/
+                    // 下方分别补偿(`estimate_drift`),滚动锚定不因占位失准
+                    // 而漂移。首帧估高误差造成的滚动条长度失真由后续帧的
+                    // 剔除-渲染交替逐步消化(每帧最多一个方向失真,方向稳定)。
+                    // 富渲染配置逐块镜像(与下方真实渲染臂完全一致,估高器按
+                    // 这些配置计算,含 mermaid 块高与滚动代码框头)。
+                    let clip = ui.clip_rect();
+                    let cursor_y = ui.cursor().top();
+                    let is_active = !live.browse_only && live.active == Some(index);
+                    let below_fold = cursor_y > clip.max.y;
+                    // 上方剔除:块底 = cursor_y + 高(本帧估高或上一帧实测,任一
+                    // 近似)。ui.cursor().bottom() 在无限高内容 Ui 下恒 inf,不可
+                    // 用 —— egui 0.36 的 content Ui 是 max_rect 无界的。
+                    let known_h = ui
+                        .ctx()
+                        .data(|d| d.get_temp::<f32>(editor_id.with(("live-render-h", index))))
+                        .unwrap_or(0.0);
+                    let above_fold = cursor_y + known_h < clip.min.y;
+                    if !is_active && (below_fold || above_fold) {
+                        let dark_mode = matches!(ui.ctx().theme(), egui::Theme::Dark);
+                        let rich_handler = RichLinkHandler::new(
+                            TaskProbeDomain::Live(range.start),
+                            dark_mode,
+                            ui.visuals().text_color(),
+                            std::rc::Rc::clone(&emoji_rects),
+                        )
+                        .with_ai(crate::ui::rich_widgets::ai_link_color(dark_mode), ai);
+                        let (block_rendered, ..) =
+                            live.rich_block_with_base(index, block_text, base_dir);
+                        // heal 与真实臂同开关:流式帧的残缺 fence 在估高里也
+                        // 补闭合,高度与真实渲染同源。
+                        let estimate = egui_markdown::MarkdownLabel::new(
+                            editor_id.with(("live-render", index)),
+                            block_rendered.as_ref(),
+                        )
+                        .font(egui::FontId::new(
+                            crate::theme::editor_font_size(ui.ctx()),
+                            crate::fonts::preview_body_family(ui.ctx()),
+                        ))
+                        .wrap()
+                        .overflow_wrap(egui_markdown::OverflowWrap::BreakAll)
+                        .scroll_code_blocks(true)
+                        .shrink_code_blocks(true)
+                        .code_block_min_width(Some(200.0))
+                        .code_block_buttons(&crate::ui::rich_widgets::code_copy_buttons)
+                        .heal(heal)
+                        .defer_offscreen_highlight(true)
+                        .link_handler(&rich_handler)
+                        .estimated_height(ui);
+                        let estimate = estimate.max(1.0);
+                        // 占位高度含块内边距(Frame NONE 内距 4×2 与真实臂同款),
+                        // 估高器算的是 galley 高,不含 TextEdit 内距;真实渲染块
+                        // 的框高 = galley 高 + 上下 2px。补齐这两像素让占位与
+                        // 实测的差值只剩估高误差本身。
+                        let placeholder = estimate + 4.0;
+                        let rect = egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(ui.available_width(), placeholder),
+                        );
+                        ui.allocate_rect(rect, egui::Sense::hover());
+                        // 差值记账:块在视口上方,占位高度变化直接平移下方所有
+                        // 内容 → 等量补偿滚动偏移;在下方,只影响滚动条长度,
+                        // 不补偿。估高与实测的差只在块被真实渲染的帧才可知,
+                        // 所以这里记的是「估高 vs 上一帧实测」——块一直在屏外
+                        // 时无实测可比,记 0(占位高度恒等于估高,滚动几何以
+                        // 估高为准,自洽)。
+                        let measured = ui
+                            .ctx()
+                            .data(|d| d.get_temp::<f32>(editor_id.with(("live-render-h", index))))
+                            .unwrap_or(placeholder);
+                        if above_fold {
+                            estimate_drift += placeholder - measured;
+                        }
+                        // 锁定浏览的跳转滚动(与真实渲染臂同一落地):目标块在
+                        // 屏外同样要滚到位 —— 占位矩形就是它此刻的几何,滚动
+                        // 下一帧把它带进视口后即转真实渲染,落点随实测校正。
+                        if live.browse_locked {
+                            if let Some((block, _)) = live.pending_caret {
+                                if block == index {
+                                    live.pending_caret = None;
+                                    live.caret_follow = false;
+                                    ui.scroll_to_rect(rect, None);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if !live.browse_only && live.active == Some(index) {
                         let char_len = live.block_char_len(editor, index);
                         let lines = block_text.lines().count().max(1);
@@ -1160,6 +1266,12 @@ pub fn ui(
                             egui::pos2(ui.min_rect().left(), top),
                             egui::pos2(ui.min_rect().right(), bottom.max(top + 1.0)),
                         );
+                        // 真实渲染块的实测高(#111 B 估高剔除的记账半边):下一帧
+                        // 本块若滚出视口被估高占位替换,占位与实测的差值按它
+                        // 补偿滚动偏移(见循环头剔除臂的 `estimate_drift`)。
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(editor_id.with(("live-render-h", index)), rect.height())
+                        });
                         // D2 落地(P3):浏览态的跳转在本块画完后只做「滚到
                         // 目标块」—— 块是富渲染,没有可落的光标,不切活动、
                         // 不抢焦点,pending 即刻消费。块循环每帧遍历全部块
@@ -1220,6 +1332,20 @@ pub fn ui(
                             .unwrap_or_else(|| live.block_char_len(editor, index));
                             activate = Some((index, local));
                         }
+                    }
+                }
+                // 滚动锚定收尾(#111 B):视口上方的估高占位若比上一帧实测
+                // (或上一帧占位)更高/更矮,下方内容会整体位移 —— 同向修正
+                // 偏移让视口内容钉在原地。下方块的差值只影响内容总高(滚动
+                // 条长度),不修。必须发生在 ScrollArea end() 之前才对下一帧
+                // 生效;egui 0.36 的 State::load/store 都是 persisted data,
+                // 读写一致。
+                if estimate_drift.abs() > f32::EPSILON {
+                    if let Some(mut state) =
+                        egui::scroll_area::State::load(ui.ctx(), scroll_state_id)
+                    {
+                        state.offset.y += estimate_drift;
+                        state.store(ui.ctx(), scroll_state_id);
                     }
                 }
             });
@@ -1543,6 +1669,10 @@ fn galley_mark_rects(galley: &egui::Galley, char_range: Range<usize>) -> Vec<egu
     }
     rects
 }
+
+#[cfg(test)]
+#[path = "live/live_offscreen_tests.rs"]
+mod live_offscreen_tests;
 
 #[cfg(test)]
 mod tests {
