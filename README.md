@@ -71,6 +71,25 @@
 - **brew 拿不到新版本时**:cask 版本由发布流水线自动跟版(发版后回填;凭据未配置时由 tap 侧每小时任务兜底),可能有短暂延迟。急用可直接从 [Releases](https://github.com/ailater/LaterMd/releases/latest) 下载 macOS universal2 dmg 安装(资产名以 Release 页为准),拖入 `/Applications/` 后按上条执行一次 `xattr` 即可。
 - Windows 无签名直下会触发 SmartScreen,点「更多信息 → 仍要运行」,不视为缺陷。
 
+### 关联 .md 文件(双击直接打开)
+
+安装后 LaterMD 支持双击 `.md` / `.markdown` 直接打开,也可以从命令行开:`latermd 路径/文件.md`。已在运行时再双击会**开进当前窗口的新标签**,不另起进程。
+
+安装包只把 LaterMD **加进候选列表,不抢默认打开程序**(避免顶掉你原有的编辑器)。要设为默认:
+
+| 平台 | 操作 |
+|---|---|
+| Windows | 安装向导里勾「Associate .md and .markdown files with LaterMD」;要改默认,到「设置 → 应用 → 默认应用」里选 LaterMD |
+| macOS | Finder 里选中 `.md` → 右键「打开方式 → 其它 → 全部更改… → 选 LaterMD」 |
+| Linux | `xdg-mime default latermd.desktop text/markdown`,或在文件管理器里右键 → 打开方式 → 其它应用 → 设为默认 |
+
+命令行:
+
+```bash
+latermd ~/notes/todo.md     # 打开单个文件
+latermd ~/notes/*.md        # 多个文件各开一个标签
+```
+
 ## 平台支持
 
 | 平台 | 支持 | 图形后端 |

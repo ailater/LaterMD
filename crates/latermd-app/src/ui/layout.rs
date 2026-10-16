@@ -25,6 +25,17 @@ impl LaterMdApp {
     /// 与 [`Self::draw`] 同理:本模块测试与 `ui::quick_open` 的无头帧
     /// (reduce→draw 完整顺序)同用。
     pub(crate) fn reduce(&mut self, ctx: &egui::Context) {
+        // 单实例转发:第二个进程启动时把路径送到本进程,在归约里翻成
+        // `FileSelected` —— 与文件树点击、拖入、启动参数四条入口共用
+        // `open_path`,同一条语义(同路径激活已有标签而非再开一个)。
+        //
+        // 取件必须排在解构之前:`instance` 是 App 自己的字段,不进
+        // `state`/`outbox` 那组借用。
+        if let Some(primary) = self.instance.as_mut() {
+            for path in primary.take_incoming() {
+                self.outbox.push(Message::FileSelected(path));
+            }
+        }
         // 只做状态归约,严格禁止在此绘制任何 UI(docs/adr-005 §2.3)。
         let LaterMdApp {
             state,
@@ -2257,6 +2268,22 @@ impl eframe::App for LaterMdApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
     }
+
+    // 刻意**不**实现 `App::on_exit` 来拆单实例 IPC,只靠
+    // `LaterMdApp::drop` → `instance::Primary::drop`(删锁 + 叫醒 accept 线程)。
+    //
+    // 原因:`on_exit` 的签名按 glow feature 分两种
+    // (`fn(&mut self)` / `fn(&mut self, Option<&glow::Context>)`,
+    // eframe/src/epi.rs:221-228),而本仓 `vendor/egui_markdown/Cargo.toml`
+    // 的 dev-dependency 开了 `eframe/glow` —— **feature 统一**会让
+    // 「只编 latermd-app」与「编整个 workspace」得到不同签名,任何
+    // `#[cfg(feature = "glow")]` 的实现都只在其中一种下对(本轮实测:
+    // `-p latermd-app` 要 1 参、`--workspace` 要 2 参)。零新增 vendor
+    // 依赖去解一个「删锁早几十毫秒」的优化不划算。
+    //
+    // 时序上 `Drop` 也够:eframe 退出时先 `save` 后 `on_exit`,App 随即
+    // 被 drop,锁在同一毫秒内删除。真正要紧的是「锁残留到下次启动」,
+    // 那由 `try_claim` 的僵尸锁回收兜底(实测有测试)。
 }
 
 #[cfg(test)]
@@ -2264,6 +2291,79 @@ mod tests {
     use super::*;
     use crate::state;
     use std::path::{Path, PathBuf};
+
+    /// 单实例转发接线的**端到端守门**:真进程级 IPC(锁文件 + 回环
+    /// socket)+ 真 App + 真 `reduce` 帧 + 真文件。
+    ///
+    /// 这条守的是 `reduce` 开头那圈「收件 → `FileSelected`」。此前它是
+    /// 恒绿的:变异验证过 —— 把那圈删掉,全测试仍1067 passed(转发到的
+    /// 路径根本没人开成标签,而没有任何测试察觉)。
+    ///
+    /// 之所以要用**真的第二个进程路径**而不是往 channel 里塞消息:
+    /// channel 是本模块私有的,测试若直接构造就绕过了「第二进程真的
+    /// 连上了吗」这一段 —— 那正是最可能坏的地方(端口写错、锁竞争、
+    /// 帧编解码错)。
+    #[test]
+    fn forwarded_paths_from_a_second_launch_open_as_tabs() {
+        let vault = std::env::temp_dir().join(format!(
+            "latermd-fwd-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&vault);
+        std::fs::create_dir_all(&vault).expect("建临时目录");
+        let note = vault.join("forwarded.md");
+        std::fs::write(&note, "# 转发来的\n").expect("写临时笔记");
+
+        // ① 主实例 = 生产认领路径(真锁 + 真监听)
+        let primary = match crate::instance::try_claim(Vec::new(), Some(vault.as_path())) {
+            crate::instance::Claim::Primary(primary) => *primary,
+            crate::instance::Claim::HandedOff => panic!("首次认领不该交接"),
+        };
+
+        // ② 第二实例带路径启动 → 真转发后自行退出
+        assert!(
+            matches!(
+                crate::instance::try_claim(vec![note.clone()], Some(vault.as_path())),
+                crate::instance::Claim::HandedOff
+            ),
+            "带路径的第二启动应交接给已有实例"
+        );
+
+        // ③ 主实例跑真帧:转发来的路径必须变成标签
+        let ctx = egui::Context::default();
+        let mut app = LaterMdApp {
+            instance: Some(primary),
+            ..LaterMdApp::default()
+        };
+        let baseline = app.state.tabs.tabs.len();
+        // 多跑几帧:socket 送达与帧到达之间有真实延迟,单帧会偶发空转。
+        for _ in 0..200 {
+            ctx.run_ui(RawInput::default(), |ui| app.reduce(ui.ctx()))
+                .drop_without_applying_deltas();
+            if app.state.tabs.tabs.len() > baseline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            app.state.tabs.tabs.len(),
+            baseline + 1,
+            "转发来的路径应在 reduce 里开成新标签(此前该接线无测试覆盖)"
+        );
+        assert_eq!(
+            app.state.tabs.current().document.path.as_deref(),
+            Some(note.as_path()),
+            "且成为当前标签"
+        );
+        assert_eq!(
+            app.state.tabs.current().editor.text(),
+            "# 转发来的\n",
+            "内容要真读进缓冲"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
 
     #[test]
     fn search_replace_dialog_buttons_send_confirmation_messages() {

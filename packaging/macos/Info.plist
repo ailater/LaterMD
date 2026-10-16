@@ -42,5 +42,51 @@
   <string>AppIcon</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <!--
+    文件关联(2026-10-16)。**缺这一整段时LaterMD 在 Finder 的
+    「打开方式」列表里根本不出现** —— 前面的 IconFile 缺失只是图标
+    变毛坯,这段缺失是应用不存在于文件关联链路,症状与「没装上」一样。
+    单实例能力(cli.rs + instance.rs)保证双击开进已有窗口。
+
+    CFBundleDocumentTypes + LSItemContentTypes 两组都要写:
+    - 后者是 UTI(14.0 起的现代口径),声明认得什么类型;
+    - 前者声明「这类文件打开时该找谁」,缺了它 LaunchServices 根本
+      不来找本应用。两组**互补**,只写一组都不生效。
+
+    LSHandlerRank = Alternate 而非 Owner:只声明「我能编辑这类文件」,
+    不抢现有用户的默认选择(与 AGENTS.md §5 的无签名/不抢默认值路线
+    一致,也避免把用户已有的 MarkText 之类默认打开程序顶掉)。用户要设
+    默认时,Finder「显示简介 → 打开方式 → 全部更改」里自选。
+
+    扩展名与 latermd_search::MARKDOWN_EXTENSIONS 同源(仅 md/markdown),
+    与 Linux .desktop / Windows 注册表三处一致。
+  -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Markdown 文档</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>md</string>
+        <string>markdown</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>net.daringfireball.markdown</string>
+        <string>public.plain-text</string>
+      </array>
+    </dict>
+  </array>
+  <key>LSItemContentTypes</key>
+  <array>
+    <!-- 系统自带 Markdown UTI,不加则系统无法按类型匹配到本应用 -->
+    <string>net.daringfireball.markdown</string>
+    <string>public.plain-text</string>
+  </array>
 </dict>
 </plist>
