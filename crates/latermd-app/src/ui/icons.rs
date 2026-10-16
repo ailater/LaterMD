@@ -62,6 +62,9 @@ pub enum Icon {
     Minimize,
     /// 最大化:方框。
     Maximize,
+    /// 关右栏:外框 + 右侧实心条(左栏用既有 `Sidebar` 镜像)。
+    /// 三态视图把它恢复为「对照列开/关」按钮的图标。
+    PanelRight,
     /// 还原:前后错位的两个方框(后框只画上、右两边)。
     Restore,
     /// 关闭:叉。
@@ -155,6 +158,7 @@ const ALL_ICONS: &[Icon] = &[
     Icon::Settings,
     Icon::Reset,
     Icon::Undo,
+    Icon::PanelRight,
     Icon::Zen,
     Icon::Hamburger,
     Icon::Minimize,
@@ -473,6 +477,10 @@ impl Icon {
             Self::Zen => {
                 ring((0.0, 0.0), 0.30);
                 dot((0.0, 0.0), 0.09);
+            }
+            Self::PanelRight => {
+                frame((-0.44, -0.36), (0.44, 0.36));
+                fill((0.24, -0.36), (0.44, 0.36));
             }
             Self::Minimize => {
                 seg((-0.30, 0.0), (0.30, 0.0));

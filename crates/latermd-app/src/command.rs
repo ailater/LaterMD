@@ -118,6 +118,9 @@ pub enum Command {
     /// Cmd/Ctrl+/(与主流编辑器的「切换注释」同键位,工作台里没有注释语义)。
     /// 命令 id 沿用两态时代的 `toggle_live_preview`(keymap.json 零迁移)。
     ToggleLivePreview,
+    /// 对照列开合(三态视图):非分栏 ⇄ 分栏。标题栏 PanelRight 按钮与
+    /// `Cmd/Ctrl+Alt+R`(P4 退役 ToggleRightPreview 后空出的旧键位)两个入口。
+    ToggleCompare,
     // —— 格式(docs/ui-shell-redesign.md §6.3,左侧即工具条顺序)——
     /// 加粗。Ctrl/Cmd+B — 这里兑现了 command.rs 原先「Ctrl+B 留给将来的
     /// 加粗」的注释,ToggleSidebar 因此早在当初就避开了 Ctrl+B。
@@ -213,7 +216,7 @@ impl Command {
     ///
     /// 顺序 = UI 上的自然归属:文件 → 视图 → AI → 标签 → 格式按工具条分组
     /// 从左到右。
-    pub const ALL: [Command; 43] = [
+    pub const ALL: [Command; 44] = [
         Self::New,
         Self::Open,
         Self::QuickOpen,
@@ -230,6 +233,7 @@ impl Command {
         Self::TabClose,
         Self::TabRestore,
         Self::ToggleLivePreview,
+        Self::ToggleCompare,
         Self::FormatBold,
         Self::FormatItalic,
         Self::FormatStrike,
@@ -316,6 +320,7 @@ impl Command {
             Self::ToggleTheme
             | Self::ToggleSidebar
             | Self::ToggleLivePreview
+            | Self::ToggleCompare
             | Self::ToggleZen
             | Self::TypewriterToggle
             | Self::FocusModeToggle
@@ -346,6 +351,7 @@ impl Command {
             Self::TabClose => "tab_close",
             Self::TabRestore => "tab_restore",
             Self::ToggleLivePreview => "toggle_live_preview",
+            Self::ToggleCompare => "toggle_compare",
             Self::FormatBold => "format_bold",
             Self::FormatItalic => "format_italic",
             Self::FormatStrike => "format_strike",
@@ -396,6 +402,7 @@ impl Command {
             Self::TabRestore => "恢复关闭的标签",
             // 标签列宽固定(SETTINGS_LABEL_W),写长了会撑破快捷键页的两列对齐
             Self::ToggleLivePreview => "切换视图",
+            Self::ToggleCompare => "对照列",
             Self::FormatBold => FormatAction::Bold.label(),
             Self::FormatItalic => FormatAction::Italic.label(),
             Self::FormatStrike => FormatAction::Strike.label(),
@@ -549,6 +556,11 @@ impl Command {
             Self::InsertToc => {
                 egui::KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, egui::Key::C)
             }
+            // 对照列开合(三态视图):Cmd/Ctrl+Alt+R —— P4 退役
+            // ToggleRightPreview 后空出的键位,肌肉记忆延续到同一块屏幕区域。
+            Self::ToggleCompare => {
+                egui::KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, egui::Key::R)
+            }
             Self::ToggleZen => egui::KeyboardShortcut::new(Modifiers::NONE, egui::Key::F11),
             // 打字机模式(#64 M1):Ctrl/Cmd+Alt+W。出厂表整条 Shortcut 无
             // 占用者;与 Ctrl/Cmd+W(关标签)只差一个 Alt,消费顺序按修饰键
@@ -612,6 +624,7 @@ impl Command {
             Self::AiMockStream | Self::AiCommitMessage | Self::AiSummary => Icon::Ai,
             Self::TabNext | Self::TabClose | Self::TabRestore => Icon::Files,
             Self::ToggleLivePreview => Icon::Zen,
+            Self::ToggleCompare => Icon::PanelRight,
             Self::FormatBold
             | Self::FormatItalic
             | Self::FormatStrike
@@ -667,6 +680,7 @@ impl Command {
             Self::ImageInsert => Message::ImageDialogOpened,
             Self::EmojiPicker => Message::EmojiPickerToggle(true),
             Self::ToggleLivePreview => Message::ToggleLivePreview,
+            Self::ToggleCompare => Message::CompareColumnToggled,
             Self::TabNext => Message::TabNext,
             Self::TabClose => Message::TabCloseActive,
             Self::TabRestore => Message::TabRestore,
@@ -1465,7 +1479,7 @@ mod tests {
     /// 实现更新。
     #[test]
     fn all_commands_listed_exactly_once() {
-        assert_eq!(Command::ALL.len(), 43);
+        assert_eq!(Command::ALL.len(), 44);
         let mut ids: Vec<_> = Command::ALL.iter().map(|cmd| cmd.id()).collect();
         ids.sort_unstable();
         ids.dedup();

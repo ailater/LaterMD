@@ -29,6 +29,8 @@ pub const CORNER_T: f32 = 12.0;
 pub enum TitleButton {
     /// 关闭/打开左栏(翻转侧边栏可见性)。
     PanelLeft,
+    /// 关闭/打开对照列(三态视图:非分栏 ⇄ 分栏)。
+    PanelRight,
     Zen,
     /// 设置:左键开默认页,右键四页直达(原 M2 左栏底段设置行迁来)。
     Settings,
@@ -41,8 +43,9 @@ pub enum TitleButton {
 }
 
 /// 标题按钮的绘制顺序(= 命中矩形从左到右的顺序)。
-pub const TITLE_BUTTONS: [TitleButton; 6] = [
+pub const TITLE_BUTTONS: [TitleButton; 7] = [
     TitleButton::PanelLeft,
+    TitleButton::PanelRight,
     TitleButton::Zen,
     TitleButton::Settings,
     TitleButton::Minimize,
@@ -50,11 +53,16 @@ pub const TITLE_BUTTONS: [TitleButton; 6] = [
     TitleButton::Close,
 ];
 
+// 与 [`crate::ui::tokens::TITLE_BUTTON_N`] 的同步靠这条编译期断言钉死
+// (P4 删右栏键时 tokens 侧没跟上,靠运行期才暴露;不再靠自觉)。
+const _: () = assert!(TITLE_BUTTONS.len() == crate::ui::tokens::TITLE_BUTTON_N);
+
 /// 按钮图标;最大化态的 [`TitleButton::Maximize`] 画还原图标
 /// (条件与 `ctx.input(|i| i.viewport().maximized)` 的取值一一对应)。
 pub fn icon_of(button: TitleButton, maximized: bool) -> Icon {
     match button {
         TitleButton::PanelLeft => Icon::Sidebar,
+        TitleButton::PanelRight => Icon::PanelRight,
         TitleButton::Zen => Icon::Zen,
         TitleButton::Settings => Icon::Settings,
         TitleButton::Minimize => Icon::Minimize,
@@ -66,9 +74,9 @@ pub fn icon_of(button: TitleButton, maximized: bool) -> Icon {
 
 /// 七个按钮的命中矩形:`WINDOW_BTN` 整块从标题栏右缘连续向左排,垂直
 /// 居中,无间隙(VS Code / Chrome 同款)。绘制与测试共用本函数。
-pub fn button_rects(bar: Rect) -> [Rect; 6] {
+pub fn button_rects(bar: Rect) -> [Rect; 7] {
     let top = bar.center().y - crate::ui::tokens::WINDOW_BTN.y / 2.0;
-    let mut rects = [Rect::NOTHING; 6];
+    let mut rects = [Rect::NOTHING; 7];
     for (i, rect) in rects.iter_mut().enumerate() {
         let left = bar.right() - (TITLE_BUTTONS.len() - i) as f32 * crate::ui::tokens::WINDOW_BTN.x;
         *rect = Rect::from_min_size(Pos2::new(left, top), crate::ui::tokens::WINDOW_BTN);
@@ -375,6 +383,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
         command_box(ui, &ctx, state, command_box_rect(bar), outbox);
     }
     let toggle_shortcut = shortcut_of(state, &ctx, Command::ToggleSidebar);
+    let compare_shortcut = shortcut_of(state, &ctx, Command::ToggleCompare);
     let zen_shortcut = shortcut_of(state, &ctx, Command::ToggleZen);
     for (button, rect) in TITLE_BUTTONS.into_iter().zip(rects) {
         window_button(
@@ -384,8 +393,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
             rect,
             maximized,
             state.layout.left,
+            state.render_mode == crate::live::RenderMode::Split,
             state.layout.zen,
             toggle_shortcut.as_deref(),
+            compare_shortcut.as_deref(),
             zen_shortcut.as_deref(),
             outbox,
         );
@@ -535,8 +546,10 @@ fn window_button(
     rect: Rect,
     maximized: bool,
     sidebar_open: bool,
+    compare_open: bool,
     zen_open: bool,
     toggle_shortcut: Option<&str>,
+    compare_shortcut: Option<&str>,
     zen_shortcut: Option<&str>,
     outbox: &mut Vec<Message>,
 ) {
@@ -578,6 +591,17 @@ fn window_button(
                 None => action.to_owned(),
             })
         }
+        TitleButton::PanelRight => {
+            let action = if compare_open {
+                "关闭对照列"
+            } else {
+                "打开对照列"
+            };
+            response.on_hover_text(match compare_shortcut {
+                Some(shortcut) => format!("{action}({shortcut})"),
+                None => action.to_owned(),
+            })
+        }
         // 与 `PanelLeft` 同款:键位文案取自 keymap(用户可改),不硬编码 F11。
         TitleButton::Zen => {
             let action = if zen_open {
@@ -613,6 +637,7 @@ fn window_button(
     };
     match button {
         TitleButton::PanelLeft if response.clicked() => outbox.push(Message::SidebarToggled),
+        TitleButton::PanelRight if response.clicked() => outbox.push(Message::CompareColumnToggled),
         TitleButton::Zen if response.clicked() => outbox.push(Message::ZenToggled),
         TitleButton::Settings if response.clicked() => {
             outbox.push(Message::SettingsOpened(SettingsTab::Appearance));
@@ -782,8 +807,8 @@ mod tests {
             assert_eq!((rect.width(), rect.height()), (btn.x, btn.y));
             assert_eq!(
                 rect.right(),
-                bar.right() - (5 - i) as f32 * btn.x,
-                "第 {i} 个按钮右缘(6 键,P4 起无右栏键)"
+                bar.right() - (6 - i) as f32 * btn.x,
+                "第 {i} 个按钮右缘(7 键,三态视图恢复对照列键)"
             );
             assert_eq!(rect.center().y, bar.center().y, "垂直居中");
             if i > 0 {
@@ -793,8 +818,8 @@ mod tests {
                 );
             }
         }
-        assert_eq!(rects[5].right(), bar.right(), "关闭键贴右缘");
-        assert_eq!(rects[0].left(), bar.right() - 6.0 * btn.x, "左起第一个");
+        assert_eq!(rects[6].right(), bar.right(), "关闭键贴右缘");
+        assert_eq!(rects[0].left(), bar.right() - 7.0 * btn.x, "左起第一个");
         // 齿轮在最小化左侧(2026-09-27 用户指令:设置入口挪标题栏右端)
         let settings = TITLE_BUTTONS
             .iter()
@@ -933,25 +958,33 @@ mod tests {
 
         press(0, &mut state, &mut outbox); // 关闭左栏 → 消息
         assert_eq!(outbox, vec![Message::SidebarToggled]);
-        // 禅定键(M4 实装):与左栏那颗同为「布局入口」——产消息而非视口
-        // 命令。区别在于进/出的快照怎么存怎么还原由 `LayoutSettings` 自己
-        // 裁决,本模块连左栏当前是什么状态都不必知道。
-        let commands = press(1, &mut state, &mut outbox);
+        // 对照列键(三态视图恢复):Source ⇄ Split 的开关入口,产消息而非
+        // 视口命令。
+        press(1, &mut state, &mut outbox);
+        assert_eq!(
+            outbox,
+            vec![Message::SidebarToggled, Message::CompareColumnToggled]
+        );
+        // 禅定键(M4 实装):与左/右两栏那两颗同为「布局入口」——产消息而非
+        // 视口命令。区别在于进/出的快照怎么存怎么还原由 `LayoutSettings` 自己
+        // 裁决,本模块连面板当前是什么状态都不必知道。
+        let commands = press(2, &mut state, &mut outbox);
         assert!(commands.is_empty(), "禅定键不发视口命令");
         // 齿轮(2026-09-27 迁自左栏底段设置行):左键开默认页,不发视口命令
-        let commands = press(2, &mut state, &mut outbox);
+        let commands = press(3, &mut state, &mut outbox);
         assert!(commands.is_empty(), "齿轮不发视口命令");
         assert_eq!(
             outbox,
             vec![
                 Message::SidebarToggled,
+                Message::CompareColumnToggled,
                 Message::ZenToggled,
                 Message::SettingsOpened(crate::settings::SettingsTab::Appearance)
             ]
         );
-        assert!(press(3, &mut state, &mut outbox).contains(&ViewportCommand::Minimized(true)));
-        assert!(press(4, &mut state, &mut outbox).contains(&ViewportCommand::Maximized(true)));
-        assert!(press(5, &mut state, &mut outbox).contains(&ViewportCommand::Close));
+        assert!(press(4, &mut state, &mut outbox).contains(&ViewportCommand::Minimized(true)));
+        assert!(press(5, &mut state, &mut outbox).contains(&ViewportCommand::Maximized(true)));
+        assert!(press(6, &mut state, &mut outbox).contains(&ViewportCommand::Close));
     }
 
     /// 八个边缘命令区:命中即发对应方向的 BeginResize。
@@ -1081,8 +1114,8 @@ mod tests {
         assert!(!shows_command_box(below));
     }
 
-    /// 无头跑命令箱:点 Live 段发 ToggleLivePreview,搜索框输入落到
-    /// 变化发 SearchQueryChanged。
+    /// 无头跑命令箱:点 Live 段发 `SetRenderMode(Live)`(三段直达),搜索框
+    /// 输入落到变化发 SearchQueryChanged。
     #[test]
     fn titlebar_view_switch_and_search_are_wired() {
         let ctx = egui::Context::default();
@@ -1121,8 +1154,8 @@ mod tests {
         frame_fn(&mut state, &mut outbox, vec![click(live_center, true)]);
         frame_fn(&mut state, &mut outbox, vec![click(live_center, false)]);
         assert!(
-            outbox.contains(&Message::ToggleLivePreview),
-            "点 Live 段应发 ToggleLivePreview,实际 {outbox:?}"
+            outbox.contains(&Message::SetRenderMode(crate::live::RenderMode::Live)),
+            "点 Live 段应发 SetRenderMode(Live),实际 {outbox:?}"
         );
 
         // 打字进搜索胶囊:先把焦点给 TextEdit(点它),再 Event::Text
