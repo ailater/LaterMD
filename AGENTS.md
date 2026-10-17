@@ -21,14 +21,21 @@
 | GUI | **egui + eframe** | **0.36.2** | 五个子 crate 同步发版，无版本错配 |
 | 渲染层 | **vendored egui_markdown**（membrane-io） | HEAD + 升级到 0.36.2 | `vendor/` 目录，非 crates.io 依赖；变更登记见 [vendor/README.md](vendor/README.md) |
 | Markdown 解析 | **pulldown-cmark** | 0.13.4 | 唯一解析器 |
-| 序列化回 MD | `pulldown-cmark-to-cmark` | 22.0.1 | Live Preview 与 AI 回写刚需 |
+| 序列化回 MD | `pulldown-cmark-to-cmark` | 22.0.1 | Live Preview 与 AI 回写刚需；**已选型、尚未引入** |
 | 语法高亮 | `syntect` | 5.3.0 | vendored 层已集成 |
 | 文本缓冲 | `ropey` | 1.6.1 | 编辑器缓冲 |
-| Git | `git2` | 0.21.0 | vendored-libgit2 + vendored-openssl |
-| 文件对话框 / 监听 | `rfd` / `notify` | 0.17.2 / 8.2.0 | — |
-| 异步运行时 | `tokio` | 1.53.1 | — |
-| 打包编排 | **`axodotdev/cargo-dist`** | 0.33.0 | 不是已归档的 `astral-sh/cargo-dist` |
+| Git | `git2` | 0.21.0 | 只开 `vendored-libgit2`，**不启用 openssl**：P2 不做 remote（fetch/push/pull），传输层用不上，锁内无 `openssl*` |
+| 文件对话框 | `rfd` | 0.17.2 | — |
+| 文件监听 | `notify` | 8.2.0 | **已选型、尚未引入**（ADR-004 已定，依赖树里现在没有它） |
+| 异步运行时 | **不引入 `tokio`** | — | LLM 流式走 std 线程 + mpsc；与 tokio 分道的原因见 ADR-004 的 2026-09-25 修订行 |
+| 打包编排 | **`axodotdev/cargo-dist`** | 0.33.0 | 不是已归档的 `astral-sh/cargo-dist`；版本出自 `dist-workspace.toml` |
 | 工具链 | **rustc 1.98.0** | 钉死 | 见 §4 |
+
+> **上表的版本以 `Cargo.lock` 为准**（2026-10-17 逐项复核过：`egui`/`eframe`/
+> `epaint`/`egui-wgpu`/`egui_extras` 均 0.36.2、`syntect` 5.3.0、`ropey` 1.6.1、
+> `git2` 0.21.0、`rfd` 0.17.2、`image` 0.25.10、`krilla` 0.8.2）。
+> 标「尚未引入」的是**已选型但按增量依赖原则还没落地**的项 —— 别当成现状
+> 依赖去 `use`；`cargo-dist` 是 CI 编排工具，不进 `Cargo.lock`。
 
 ### 已否决，不要再翻案
 
