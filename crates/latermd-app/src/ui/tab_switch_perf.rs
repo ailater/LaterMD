@@ -177,10 +177,39 @@ fn app_frame(app: &mut LaterMdApp, ctx: &egui::Context) -> Duration {
     start.elapsed()
 }
 
+/// 生产完整帧(**归约 + 绘制**,与 `eframe::App::update` 同序)。
+///
+/// [F] 必须用这一条:[D]/[E] 只量绘制(`app_frame`),而本轮省下的那一笔
+/// 是**归约侧**的闸门(`end_of_logic` 写 `PreviewState::outline_shown`)——
+/// 只跑绘制的话闸门永远是 `PreviewState::new` 留下的初值,量出来的两组
+/// 数字没有差别(曾因此误判「优化没效果」)。
+fn app_frame_full(app: &mut LaterMdApp, ctx: &egui::Context) -> Duration {
+    let start = Instant::now();
+    ctx.run_ui(
+        RawInput {
+            screen_rect: Some(screen()),
+            ..Default::default()
+        },
+        |ui| {
+            app.reduce(ui.ctx());
+            app.draw(ui);
+        },
+    )
+    .drop_without_applying_deltas();
+    start.elapsed()
+}
+
 /// 连跑 `frames` 帧不计时(预热:字体图集、面板/控件持久状态)。
 fn warmup_frames(app: &mut LaterMdApp, ctx: &egui::Context, frames: usize) {
     for _ in 0..frames {
         app_frame(app, ctx);
+    }
+}
+
+/// [`warmup_frames`] 的「归约 + 绘制」版,配 [`app_frame_full`] 用。
+fn warmup_frames_full(app: &mut LaterMdApp, ctx: &egui::Context, frames: usize) {
+    for _ in 0..frames {
+        app_frame_full(app, ctx);
     }
 }
 
@@ -456,6 +485,74 @@ fn tab_switch_finding_report() {
         fmt_us(back_first),
         back_first.as_secs_f64() / steady_a.as_secs_f64(),
     );
+}
+
+/// [F] 击键路径取证:修订号前进那一帧比稳态帧贵多少。
+///
+/// 与 [D] 的切换帧互补 —— 切换是「一次性」成本,击键是**持续**成本:打字
+/// 期间每一帧都要付。三档口径分开记:
+/// * `稳态帧`:文本没变(`LiveState::sync` / `PreviewState::rebuild` 都被
+///   修订号守卫挡住,只剩渲染);
+/// * `击键帧`:插入一个字符后的那一帧(守卫放行 → `blocks` 全篇 parse +
+///   `outline` 全篇扫描 + 文本 widget 整篇 layout);
+/// * `增量`:两者之差,即「打一个字多付的」。
+///
+/// 跑法同 [D](计时口径 = release)。
+#[test]
+#[ignore = "取证报告;跑法:cargo test -p latermd-app --release typing_finding -- --test-threads=1 --ignored --nocapture"]
+fn typing_finding_report() {
+    for lines in [2_000usize, 20_000] {
+        for mode in [
+            crate::live::RenderMode::Source,
+            crate::live::RenderMode::Live,
+        ] {
+            // 侧栏停在文件树 = 大纲没有消费者(闸门关);停在大纲页 = 有消费者
+            // (闸门开,击键必须重扫)。两者之差就是 `PreviewState::sync_outline`
+            // 省下的那一笔。
+            for view in [
+                crate::state::SidebarTab::Files,
+                crate::state::SidebarTab::Outline,
+            ] {
+                let doc = sample_doc(11, lines);
+                let mut app = LaterMdApp::default();
+                let ctx = egui::Context::default();
+                let index = app.state.tabs.open_tab(None, &doc);
+                app.state.apply(Message::TabActivate(index));
+                app.state.render_mode = mode;
+                app.state.layout.left_view = view;
+                warmup_frames_full(&mut app, &ctx, 3);
+
+                let steady = {
+                    let mut samples = Vec::new();
+                    for _ in 0..5 {
+                        samples.push(app_frame_full(&mut app, &ctx));
+                    }
+                    median(samples)
+                };
+                // 连续 5 次击键:每次都推进修订号,守卫都放行。插入本身(rope
+                // splice + 镜像 splice)单列,不混进帧的账。
+                let mut typed = Vec::new();
+                let mut splice = Vec::new();
+                for _ in 0..5 {
+                    let tab = app.state.tabs.current_mut();
+                    let at = tab.editor.len_chars();
+                    let t = Instant::now();
+                    tab.editor.insert_chars(at, "字");
+                    splice.push(t.elapsed());
+                    typed.push(app_frame_full(&mut app, &ctx));
+                }
+                let typed = median(typed);
+                println!(
+                "[F] {lines} 行 / {mode:?} / 侧栏 {view:?} ({:.0} KB):稳态 {} 击键帧 {} 增量 {} (插入本身 {})",
+                doc.len() as f64 / 1024.0,
+                fmt_us(steady),
+                fmt_us(typed),
+                fmt_us(typed.saturating_sub(steady)),
+                fmt_us(median(splice)),
+            );
+            }
+        }
+    }
 }
 
 /// 完整文档(无残缺构造)上 `heal` 必须是恒等零拷贝(`Cow::Borrowed`):

@@ -708,19 +708,21 @@ pub fn ui(
                 // 累计,ScrollArea 收尾后按顶部/底部位置补偿滚动偏移。见
                 // [`estimate_drift`] 的逐条说明。
                 let mut estimate_drift: f32 = 0.0;
+                // 块间距的两个输入**一帧内是常量**:全局 MarkdownStyle 与编辑
+                // 器字号。原先每块各读一次(`global_style` 还要 clone 槽位里的
+                // Arc)—— 634KB 文档 6000+ 块就是上万次 `ctx.data` 读 + Id
+                // hash,而屏外块走的是估高臂,那点距离根本没人看。提到循环
+                // 外一次读齐后,`typing_finding_report` 的 Live 档(634KB)
+                // 稳态帧 3.85ms → 3.59ms、击键帧 10.72ms → 10.50ms。
+                let gap_style = egui_markdown_style::global_style(ui.ctx());
+                let gap_font_size = crate::theme::editor_font_size(ui.ctx());
                 for index in 0..block_count {
                     let range = live.blocks[index].clone();
                     // 块文本直接借用共享缓冲；渲染缓存持有改写结果，稳态帧不再复制整块。
                     let block_text = BlockBuffer::slice(editor.text(), &range);
                     let kind = block_kind(block_text);
                     if let Some(prev) = prev_kind {
-                        let style = egui_markdown_style::global_style(ui.ctx());
-                        ui.add_space(block_gap(
-                            &style,
-                            crate::theme::editor_font_size(ui.ctx()),
-                            prev,
-                            kind,
-                        ));
+                        ui.add_space(block_gap(&gap_style, gap_font_size, prev, kind));
                     }
                     prev_kind = Some(kind);
                     // 视口外块估高剔除(#111 B,decisions-pending 备选 B 的落地):
@@ -1499,10 +1501,9 @@ pub fn ui(
         outbox,
     );
 
-    // 快照同步(与源码模式同一条规则:仅修订号前进时重建)
-    if preview.synced_rev != editor.revision() {
-        preview.rebuild(editor);
-    }
+    // 快照同步(与源码模式同一条规则:仅修订号前进时重建;大纲那一半另有
+    // 「侧栏是否正在显示」的闸门,见 `PreviewState::sync_outline`)
+    preview.sync_outline(editor);
     active_response
         .unwrap_or_else(|| panel.allocate_response(egui::vec2(0.0, 0.0), egui::Sense::click()))
 }

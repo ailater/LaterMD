@@ -479,4 +479,48 @@ mod tests {
             "其余行号保持 noninteractive 色"
         );
     }
+
+    /// 光标行的换算钉在**深行**上(第 9 行):只测第 3 行的话,一个「数错一行」
+    /// 或「干脆取块序」的实现也能混过去。
+    ///
+    /// 这条同时是本轮性能改动的**行为守门**:`ui::editor` 里「字符偏移 →
+    /// 行号」原是从 0 逐字符扫到光标数换行(O(光标位置),634KB 文档上约
+    /// 0.29ms/帧,光标在文末即最坏值),现走 rope 的 `line_col`。换算法可以,
+    /// 换算出来的行号不能变。
+    ///
+    /// 偏移硬编码:文档 12 行,每行「第N行\n」4 个字符,第 9 行首 = 8 × 4
+    /// = **32**(不照抄任何一个函数的输出)。
+    #[test]
+    fn cursor_line_resolves_deep_line() {
+        let text: String = (1..=12).map(|line| format!("第{line}行\n")).collect();
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new(&text);
+        const LINE_NINE_START: usize = 32;
+        let _ = frame_shapes(
+            &ctx,
+            &mut editor,
+            0.0,
+            Some((LINE_NINE_START, LINE_NINE_START)),
+            Vec::new(),
+        );
+        let found = digits(&frame_shapes(&ctx, &mut editor, 0.1, None, Vec::new()));
+        let accent = crate::theme::shell_tokens(true).accent;
+
+        assert!(
+            found.iter().any(|(l, _, c)| l == "9" && *c == accent),
+            "光标落在第 9 行:accent 色的行号必须是 9(实到 {:?})",
+            found
+                .iter()
+                .filter(|(_, _, c)| *c == accent)
+                .map(|(l, _, _)| l.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            found
+                .iter()
+                .filter(|(l, _, _)| l != "9")
+                .all(|(_, _, c)| *c != accent),
+            "其余行号保持 noninteractive 色"
+        );
+    }
 }
