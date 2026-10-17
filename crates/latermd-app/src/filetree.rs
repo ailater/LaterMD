@@ -1139,4 +1139,66 @@ mod wikilink_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// `list_children` 的耗时构成基准(2026-10-17)。
+    ///
+    /// **结论(实测,别再凭静态分析翻案)**：这一项的成本大头是**遍历**
+    /// (readdir + stat),不是排序 —— 2000 子项 3.3ms 里排序只占约 0.31ms
+    /// (9%)。曾按「每次比较 2 次 `to_lowercase()` 分配、500 子项 ≈9000 次
+    /// 堆分配」把排序器改成预计算小写键,实测 **0.92×(反而略慢)**:
+    /// `drain` + 两次 `collect` 的搬移开销吃掉了省下的分配。故未采纳。
+    ///
+    /// 要动它就动遍历本身(文件树与搜索一样是 IO 密集),别再动比较器。
+    ///
+    /// 目录由外部脚本造好(不在测试里造几千个文件):`/tmp/perf-data/tree500`
+    /// 与 `tree2000`,各 250/1000 个子目录 + 250/1000 个 md。缺失即跳过 ——
+    /// CI 上没有这些目录,本基准也不该进 CI。
+    #[ignore = "基准:依赖 /tmp/perf-data 下的大目录,仅测量时跑"]
+    #[test]
+    fn bench_list_children_sorting() {
+        for (label, dir) in [
+            ("500 子项", "/tmp/perf-data/tree500"),
+            ("2000 子项", "/tmp/perf-data/tree2000"),
+        ] {
+            let path = std::path::Path::new(dir);
+            if !path.is_dir() {
+                println!("  skip {label}({dir} 不存在)");
+                continue;
+            }
+            let mut samples = Vec::new();
+            for _ in 0..5 {
+                let started = std::time::Instant::now();
+                let children = list_children(path, MAX_CHILDREN);
+                samples.push(started.elapsed());
+                // 两条都该被截断到上限:排序发生在 truncate 之前,故 2000
+                // 子项那一档量的是**全量排序**的代价,不是 500 项的。
+                assert_eq!(children.entries.len(), MAX_CHILDREN, "{label} 截断到上限");
+            }
+            samples.sort_unstable();
+            println!(
+                "  list_children {label:<10} 中位 {:>10?}  截断 {}/{}",
+                samples[samples.len() / 2],
+                MAX_CHILDREN,
+                if label.starts_with("500") { 500 } else { 2000 }
+            );
+        }
+
+        // 排序单独计时,与遍历分离:让「排序占多少」永远有个数,别再靠
+        // 「看起来有 9000 次分配」去猜。
+        let mut sample: Vec<TreeEntry> = (0..2000)
+            .map(|i| TreeEntry {
+                path: std::path::PathBuf::from(format!("d{i}")),
+                name: format!("目录_{i:04}_Note"),
+                is_dir: true,
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        sample.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        println!("  纯排序 2000 条目(与遍历无关): {:?}", started.elapsed());
+    }
 }

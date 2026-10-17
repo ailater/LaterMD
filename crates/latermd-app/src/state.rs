@@ -1073,7 +1073,7 @@ pub enum Message {
     GitFileHistoryRequested(PathBuf),
     /// 刷新 Git 页(顶部刷新按钮 / 展开「存储库」分区触发):立即重读
     /// 未提交改动、提交历史与文件历史(文件历史按当前文档同步,见
-    /// [`GitPanelState::sync_file_history`])。
+    /// [`GitPanelState::history_target`])。
     GitRefreshRequested,
     /// 保存 MCP 配置(设置页 MCP 页「保存」):归一化 → 落 `mcp.json` → 按
     /// 开关起停后台服务(**默认关闭**,开了才监听回环端口)。
@@ -1548,15 +1548,35 @@ impl State {
     /// 文档没换不动(显式查询不被轮询顶掉),换了文档跟随加载。
     pub fn refresh_git(&mut self) {
         let root = self.file_tree.root.clone();
-        self.git.refresh(root.as_deref());
-        let doc_rel = self
-            .tabs
+        let doc_rel = self.current_doc_relative();
+        self.git.refresh(root.as_deref(), doc_rel);
+    }
+
+    /// 异步发起一次 Git 刷新(**3 秒节流轮询专用**):IO 进后台线程,本帧
+    /// 立即返回。实测一轮 12ms、带文件历史 86ms,同步跑就是每 3 秒掉
+    /// 1–5 帧;结果由 [`Self::poll_git`] 在归约末尾收。
+    ///
+    /// 文件历史的跟随策略与同步路径同源([`GitPanelState::history_target`]):
+    /// 记账留在 UI 线程,加载随其他 IO 一起进后台。
+    pub fn start_git_refresh(&mut self) {
+        let root = self.file_tree.root.clone();
+        let doc_rel = self.current_doc_relative();
+        self.git.start_refresh(root.as_deref(), doc_rel);
+    }
+
+    /// 归约末尾收一次后台 Git 结果(非阻塞)。
+    pub fn poll_git(&mut self) {
+        self.git.poll_refresh();
+    }
+
+    /// 当前文档相对仓库根的路径(文件历史跟随的对象)。
+    fn current_doc_relative(&self) -> Option<String> {
+        self.tabs
             .current()
             .document
             .path
             .clone()
-            .and_then(|doc| self.git.relative_path(&doc));
-        self.git.sync_file_history(doc_rel);
+            .and_then(|doc| self.git.relative_path(&doc))
     }
 
     /// 回滚成功后的编辑器一致性(`Message::GitCheckoutConfirmed` 的归约
@@ -3318,6 +3338,9 @@ impl State {
     pub fn end_of_logic(&mut self) {
         let dirty = self.tabs.current().editor.is_dirty();
         self.tabs.current_mut().document.dirty = dirty;
+        // 后台 Git 刷新收口(与反向链接同款:帧末非阻塞收一次,迟到结果
+        // 按代际号丢弃)。没有在途刷新时本次是空转的一次原子读。
+        self.poll_git();
         // 自动保存帧末归约(#18):停顿/切出判定 + 落 draft。时刻参数化,
         // 单测注入不真等 30s。
         self.autosave_pass(std::time::Instant::now());

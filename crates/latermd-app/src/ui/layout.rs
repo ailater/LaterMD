@@ -14,6 +14,14 @@ use eframe::egui;
 /// 去抖的同款空转教训,见本模块空转回归测试)。
 const AUTOSAVE_WRITE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// 后台 Git 刷新在途期间的要帧间隔 —— 只为给结果到达留几帧。
+///
+/// 不是满帧空转(那会把整个应用推到 60fps):后台线程干的是本地 IO,
+/// 实测一轮 12ms / 86ms,50ms 一探足以在结果到达后几帧内收到,收完即
+/// 回到 `REFRESH_INTERVAL` 的长间隔。与 `AUTOSAVE_WRITE_RETRY` 同款：
+/// 过期到点必须钳制,否则在途期会把窗口推成满帧速率。
+const GIT_REFRESH_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// 只读对照列(三态视图右栏)的面板 id:宽度持久化、分隔线定位、分隔线
 /// hover 判定三处共用同一个名字(故收成常量,不与 `"preview"` 这个已被
 /// P4 退役的旧名复用 —— 旧 layout.json 里还躺着 `right`/`right_width`)。
@@ -289,15 +297,25 @@ impl LaterMdApp {
         }
         // Git 状态轮询:有文件树根且尚未降级才轮询(无根无事可刷;非 git
         // 目录零轮询——重探由换根/切 Git 页触发,egui 得以收敛到深度空闲,
-        // 这正是 search 去抖测试守护的不变量)。到点即刷(同步毫秒级,见
-        // `git_panel` 模块文档),并在到点前要一帧(空闲不来帧,轮询依赖
-        // 显式 repaint)。
+        // 这正是 search 去抖测试守护的不变量)。
+        //
+        // 到点**异步**发起:实测一轮 12ms、带文件历史 86ms,同步跑会每 3
+        // 秒掉 1–5 帧。结果由 `end_of_logic` 的 `poll_git` 收。
         if state.file_tree.root.is_some() && state.git.error.is_none() {
-            if state.git.due() {
-                state.refresh_git();
+            if state.git.due() && !state.git.refreshing {
+                state.start_git_refresh();
             }
             if state.git.error.is_none() {
-                ctx.request_repaint_after(state.git.until_refresh());
+                ctx.request_repaint_after(
+                    // 在途期间要几帧来收结果:结果到了却没帧可用,面板会
+                    // 一直显示旧快照。50ms 一探,收完即回到 `refresh_due`
+                    // 的长间隔,最终仍收敛到深度空闲。
+                    if state.git.refreshing {
+                        GIT_REFRESH_POLL
+                    } else {
+                        state.git.until_refresh()
+                    },
+                );
             }
         }
         // AI 流式的重绘驱动:chunk 到达即要在下一帧收流归约,预览才跟得上
@@ -4632,6 +4650,20 @@ mod tests {
         );
         assert_eq!(app.state.search.status, crate::search::SearchStatus::Idle);
 
+        // 同一个「有文件树根」的条件也会顺带发起一次 Git 后台刷新,它在途
+        // 期间按 50ms 要帧(见下方 GIT_REFRESH_POLL)。本测试只量**搜索**
+        // 去抖的排程,先跑到那次刷新收口 —— 临时目录不是仓库,收口即降级、
+        // 轮询停止,此后 Git 侧不再有任何要帧。Git 自己的排程由
+        // git_poll_starts_background_refresh_when_due_with_root 专测守着;
+        // 少了这段,本测试会在 CI 上随机撞见在途的 50ms(实测 1/3 概率红)。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.state.git.error.is_none() {
+            assert!(std::time::Instant::now() < deadline, "Git 后台刷新未收口");
+            ctx.run_ui(RawInput::default(), |ui| app.reduce(ui.ctx()))
+                .drop_without_applying_deltas();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
         // 帧 2-4:due 已清、无搜索在途。egui 视口自带约两帧 settle(实测
         // 帧 2 仍有一次 0ns,帧 3 起 MAX),关键在收敛到 MAX——修复前
         // 过期 due 使每帧输出都是 0ns(request_repaint 即 ZERO),满帧空转。
@@ -5195,10 +5227,27 @@ mod tests {
         dir
     }
 
-    /// Git 轮询在归约侧到点即刷:有根 + due 过期的一帧 reduce 后改动列表
-    /// 就位;无根时到点也不刷(不空转)。
+    /// 轮询到后台结果到位。小仓库 IO 是微秒级,这里只是把「结果终会到」
+    /// 变成可断言的事实;超时报错而非静默放过。
+    fn settle_git(app: &mut LaterMdApp, ctx: &egui::Context) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.state.git.refreshing {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "后台刷新超时未交回结果"
+            );
+            ctx.run_ui(RawInput::default(), |ui| app.reduce(ui.ctx()))
+                .drop_without_applying_deltas();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// Git 轮询在归约侧到点即**发起**刷新,但**不等** IO:到点的一帧 reduce
+    /// 后只是「在途、状态未动」,改动列表由后续帧收回结果后才就位。
+    /// 这是「UI 线程不做 git 读写」的可断言形式 —— 若退化成同步刷新,
+    /// 第一帧就能看到条目,这条测试立刻红。
     #[test]
-    fn git_poll_refreshes_when_due_with_root() {
+    fn git_poll_starts_background_refresh_when_due_with_root() {
         let dir = dirty_repo("git-poll");
         let mut app = LaterMdApp::default();
         app.state.file_tree.root = Some(dir.clone());
@@ -5207,16 +5256,29 @@ mod tests {
         let ctx = egui::Context::default();
         let output = ctx.run_ui(RawInput::default(), |ui| app.reduce(ui.ctx()));
         output.drop_without_applying_deltas();
-        assert_eq!(app.state.git.entries.len(), 1, "到点帧已刷新");
-        assert!(!app.state.git.due(), "刷新顺延了下一周期");
+        assert!(app.state.git.refreshing, "到点帧发起后台刷新");
+        assert_eq!(app.state.git.entries.len(), 0, "发起帧不阻塞等 IO");
+        assert!(!app.state.git.due(), "周期顺延,在途期间不重复发起");
 
-        // 无根 + 到点:不刷(无根不轮询)
+        // 结果由后续帧的 `poll_git` 收回(egui 空闲不来帧,靠
+        // `request_repaint_after(50ms)` 拿到收口帧)
+        settle_git(&mut app, &ctx);
+        assert_eq!(app.state.git.entries.len(), 1, "结果到位后条目就位");
+        assert_eq!(
+            app.state.git.badge_for(&dir.join("a.md")),
+            Some(latermd_git::StatusKind::Modified)
+        );
+        assert_eq!(app.state.git.commits.len(), 1);
+        assert!(!app.state.git.due(), "入库后仍是顺延的周期");
+
+        // 无根 + 到点:不发起(无根不轮询)
         let mut rootless = LaterMdApp::default();
         rootless.state.git.refresh_due =
             std::time::Instant::now() - std::time::Duration::from_millis(1);
         let output = ctx.run_ui(RawInput::default(), |ui| rootless.reduce(ui.ctx()));
         output.drop_without_applying_deltas();
         assert_eq!(rootless.state.git.entries.len(), 0);
+        assert!(!rootless.state.git.refreshing, "无根不发起");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
