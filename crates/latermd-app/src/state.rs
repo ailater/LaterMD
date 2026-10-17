@@ -216,6 +216,18 @@ pub struct PreviewState {
     pub synced_rev: u64,
     /// 文档大纲,与 `text` 同一次重建产出,`span` 直接索引该文本。
     pub outline: Vec<OutlineItem>,
+    /// `outline` 对应的修订号;`None` = 尚未算过。
+    ///
+    /// 与 [`Self::synced_rev`] **分开记**:大纲在「不显示」期间会被跳过若干
+    /// 次修订(见 [`Self::sync_outline`]),只有一个同步位就认不出「切出来
+    /// 时它已经旧了」,会一直拿旧大纲糊弄读者。
+    pub(crate) outline_rev: Option<u64>,
+    /// 侧栏大纲页**此刻是否正在显示**;由 `end_of_logic` 每帧写入。
+    ///
+    /// 初值 `true` 是给既有语义兜底:`PreviewState::new` 是「整篇换入」,
+    /// 那时算一次大纲正是应有之义(换入后大纲必然要重扫)。测试里直接走
+    /// `new`/`rebuild` 的路径也靠它保持「大纲随编辑同帧重算」的既有断言。
+    pub(crate) outline_shown: bool,
     //
     // P5(live-unify)瘦身:`rendered` 与四层渲染映射(`offset_map` /
     // `highlight_map` / `emoji_map` / `task_map`)、`scroll_target` 已删。
@@ -245,12 +257,45 @@ impl PreviewState {
             #[cfg(test)]
             text: text.to_owned(),
             synced_rev: editor.revision(),
+            outline_rev: Some(editor.revision()),
+            outline_shown: true,
         }
     }
 
     /// 修订号前进后重建快照;空闲帧不得调用(会白白重解析全文)。
     pub fn rebuild(&mut self, editor: &EditorBuffer) {
         *self = Self::new(editor);
+    }
+
+    /// **击键路径**的快照同步(每帧一次,与 `rebuild` 的区别只在要不要重扫
+    /// 标题):大纲**只在其正在显示时**跟着修订号重算。
+    ///
+    /// 实测依据(release,两处互相印证):
+    /// * 独立探针量 `latermd_md::outline` 本身:200KB 1.21ms、1MB 6.89ms,
+    ///   线性外推 634KB ≈ **4.3ms**;
+    /// * `ui::tab_switch_perf::typing_finding_report` 量整帧:634KB 击键帧
+    ///   在「侧栏停文件树」与「侧栏停大纲页」两档下差 **5.5ms**(Source
+    ///   5.61 / 11.12ms,Live 10.50 / 15.70ms)。
+    ///
+    /// 而侧栏停在文件树 / 搜索 / Git 时这份结果**没有任何消费者** —— 敲
+    /// 一个字扫一篇纯属白付。
+    ///
+    /// 不显示期间**不推进** `outline_rev`:同步位一推进就再没人知道大纲旧
+    /// 了。留着旧值,大纲被切出来的那一帧由这里的比对补算(可见性由
+    /// `end_of_logic` 每帧写入,补算最晚晚一帧,用户感知不到)。
+    pub fn sync_outline(&mut self, editor: &EditorBuffer) {
+        let rev = editor.revision();
+        if self.synced_rev != rev {
+            self.synced_rev = rev;
+            #[cfg(test)]
+            {
+                self.text = editor.text().to_owned();
+            }
+        }
+        if self.outline_shown && self.outline_rev != Some(rev) {
+            self.outline = latermd_md::outline(editor.text());
+            self.outline_rev = Some(rev);
+        }
     }
 }
 
@@ -3344,6 +3389,16 @@ impl State {
         // 自动保存帧末归约(#18):停顿/切出判定 + 落 draft。时刻参数化,
         // 单测注入不真等 30s。
         self.autosave_pass(std::time::Instant::now());
+        // 大纲的重建闸门(击键路径的实测账,见
+        // [`PreviewState::sync_outline`]):只有侧栏**正在显示大纲页**时才让
+        // 标题扫描跟着修订号跑。禅定档没有侧栏,同样不算。
+        //
+        // 写在帧末归约里是因为可见性归 `layout` 管,而 `sync_outline` 的调用
+        // 点在 `ui::editor` / `live::ui`(绘制侧)—— 绘制前的这一帧写入,当帧
+        // 绘制即可见,不晚一帧。
+        let outline_shown =
+            self.layout.left && !self.layout.zen && self.layout.left_view == SidebarTab::Outline;
+        self.tabs.current_mut().preview.outline_shown = outline_shown;
         // 文件树懒加载落点:根 + 展开中目录的子项缓存补齐(键缺席才 IO)。
         self.file_tree.ensure_loaded();
         // 搜索结果收流:非阻塞收空 channel(重绘驱动见 `ui::layout::reduce`)。
@@ -4834,6 +4889,107 @@ mod tests {
         assert_eq!(outline[0].text, "LaterMD");
         assert_eq!(outline[1].text, "常用元素");
         assert!(state.tabs.current().preview.text[outline[1].span.clone()].contains("## 常用元素"));
+    }
+
+    // —— 大纲的重建闸门(击键路径的性能守卫)——
+    //
+    // 判据取「读者看得见的东西」(大纲里有没有刚敲进去的那个标题),不取
+    // 内部同步位 —— 同步位跟着实现走,实现改了判据就跟着改,守不住。
+
+    /// 加一段新标题到文末的公共动作:推进修订号,并把当帧的快照同步跑完
+    /// (与 `ui::editor` / `live::ui` 帧末那一行同款)。
+    fn append_heading_and_sync(state: &mut State, heading: &str) {
+        let tab = state.tabs.current_mut();
+        let at = tab.editor.len_chars();
+        tab.editor
+            .insert_chars(at, &format!("\n\n{heading} 后加的标题\n"));
+        tab.preview.sync_outline(&tab.editor);
+    }
+
+    fn outline_has(state: &State, text: &str) -> bool {
+        state
+            .tabs
+            .current()
+            .preview
+            .outline
+            .iter()
+            .any(|item| item.text.contains(text))
+    }
+
+    /// 侧栏**正在显示大纲页**时,敲进去的新标题当帧就出现在大纲里
+    /// (既有语义:大纲随编辑同帧重算)。
+    #[test]
+    fn outline_rescans_on_edit_while_shown() {
+        let mut state = State::default();
+        state.layout.left = true;
+        state.layout.left_view = SidebarTab::Outline;
+        state.end_of_logic();
+        assert!(
+            state.tabs.current().preview.outline_shown,
+            "闸门由 end_of_logic 打开"
+        );
+
+        append_heading_and_sync(&mut state, "#");
+        assert!(
+            outline_has(&state, "后加的标题"),
+            "显示中的大纲必须跟着编辑走"
+        );
+    }
+
+    /// 侧栏停在**别的页**时,击键不付那次全篇标题扫描 —— 634KB 文档上
+    /// `latermd_md::outline` 约 4.3ms(独立探针,线性外推),此刻还没有
+    /// 消费者。
+    #[test]
+    fn outline_skips_rescan_while_sidebar_shows_other_tab() {
+        let mut state = State::default();
+        state.layout.left = true;
+        state.layout.left_view = SidebarTab::Files;
+        state.end_of_logic();
+        assert!(
+            !state.tabs.current().preview.outline_shown,
+            "闸门由 end_of_logic 关上"
+        );
+
+        append_heading_and_sync(&mut state, "#");
+        assert!(
+            !outline_has(&state, "后加的标题"),
+            "不显示时不重扫:敲一个字不必扫一篇"
+        );
+
+        // 切回大纲页:下一帧补算,读者看到的是新大纲
+        state.layout.left_view = SidebarTab::Outline;
+        state.end_of_logic();
+        let tab = state.tabs.current_mut();
+        tab.preview.sync_outline(&tab.editor);
+        assert!(
+            outline_has(&state, "后加的标题"),
+            "切回大纲页必须补上跳过期间的改动"
+        );
+    }
+
+    /// 侧栏整个收起时同样不扫(没有面板在显示大纲)。
+    #[test]
+    fn outline_skips_rescan_while_sidebar_collapsed() {
+        let mut state = State::default();
+        state.layout.left = false;
+        state.layout.left_view = SidebarTab::Outline;
+        state.end_of_logic();
+
+        append_heading_and_sync(&mut state, "#");
+        assert!(!outline_has(&state, "后加的标题"), "侧栏收起也不重扫");
+    }
+
+    /// 禅定档没有侧栏,同样不算。
+    #[test]
+    fn outline_skips_rescan_in_zen() {
+        let mut state = State::default();
+        state.layout.left = true;
+        state.layout.left_view = SidebarTab::Outline;
+        state.layout.zen = true;
+        state.end_of_logic();
+
+        append_heading_and_sync(&mut state, "#");
+        assert!(!outline_has(&state, "后加的标题"), "禅定档不重扫");
     }
 
     // —— 任务列表 checkbox 回写(#63)——

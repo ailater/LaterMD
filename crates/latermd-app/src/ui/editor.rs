@@ -359,14 +359,15 @@ pub fn ui(
             // 行首 visual row,光标行 accent 高亮(光标读持久化 state,与
             // 大纲回填同源;换行计数走 galley 自带的全文本)。
             let cursor_line = output.state.cursor.char_range().map(|range| {
-                output
-                    .galley
-                    .job
-                    .text
-                    .chars()
-                    .take(range.primary.index.0)
-                    .filter(|c| *c == '\n')
-                    .count()
+                // 换行计数走 rope 的 O(log n) 行索引,不再从 0 逐字符扫到
+                // 光标 —— 那段扫描是 O(光标位置),光标在文末即 O(全篇);
+                // 独立探针实测这份扫描 634KB 上 0.29ms/帧(200KB 0.094ms、
+                // 1MB 0.471ms,线性),光标在场时每帧都要付。与状态栏的
+                // 行列同一口径(`EditorBuffer::line_col`,1 起)。
+                editor
+                    .line_col(editor.char_to_byte(range.primary.index.0))
+                    .0
+                    - 1
             });
             gutter::paint(ui, &output, slot, cursor_line);
             paint_find_marks(ui, &output, find_marks);
@@ -790,10 +791,10 @@ pub fn ui(
     }
 
     // 快照只在修订号前进时重建(文本 + 大纲同源);这是"避免每帧重解析"
-    // 的第一层,vendored 层的 text hash 缓存是第二层。
-    if preview.synced_rev != editor.revision() {
-        preview.rebuild(editor);
-    }
+    // 的第一层,vendored 层的 text hash 缓存是第二层。大纲那一半还多一道
+    // 「侧栏是否正在显示」的闸门 —— 不显示时敲一个字不必扫一篇标题
+    // (实测依据见 `PreviewState::sync_outline`)。
+    preview.sync_outline(editor);
 
     // 光标位置回填(大纲「当前小节」高亮用):主光标的字符偏移按当前缓冲
     // 换成字节。读持久化的 cursor 而非 output.cursor_range —— 后者在失焦
