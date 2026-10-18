@@ -604,14 +604,31 @@ impl LaterMdApp {
                     tab.live_right.active = None;
                     // 跟随一次:源码侧光标移动才下滚动目标(落在目标的帧消费
                     // 后即清),此后右栏保留自己的滚动位置供自由翻阅。
+                    // 滚轮锚点优先于光标跟随:源码列滚轮滚动帧写下的「鼠标行
+                    // 锚点」在这里消费一次即清 —— 连续滚轮逐帧重下锚,把锚点
+                    // 所在块顶对齐到指针的视口相对高度(anchor_align_y),两侧
+                    // 同一行等高呈现;滚轮一停不再写入,右栏恢复自由翻阅。
+                    // 锚点不写 followed_byte(只记忆光标侧的最后一次),两条
+                    // 路径互不拽扯;光标跟随分支入口处显式清对齐意图,防一次
+                    // 残留劫持普通跳转的落点。
                     let cursor_byte = tab.cursor.byte;
-                    if tab.live_right.followed_byte != cursor_byte {
-                        tab.live_right.followed_byte = cursor_byte;
-                        if let Some(byte) = cursor_byte {
-                            tab.live_right.sync(&tab.editor, Some(byte));
-                            if let Some(block) = tab.live_right.block_containing(byte) {
-                                tab.live_right.pending_caret = Some((block, 0));
-                                tab.live_right.caret_follow = true;
+                    if let Some((byte, rel_y)) = tab.live_right.mouse_anchor.take() {
+                        tab.live_right.sync(&tab.editor, Some(byte));
+                        if let Some(block) = tab.live_right.block_containing(byte) {
+                            tab.live_right.pending_caret = Some((block, 0));
+                            tab.live_right.caret_follow = true;
+                            tab.live_right.anchor_align_y = Some(rel_y);
+                        }
+                    } else {
+                        tab.live_right.anchor_align_y = None;
+                        if tab.live_right.followed_byte != cursor_byte {
+                            tab.live_right.followed_byte = cursor_byte;
+                            if let Some(byte) = cursor_byte {
+                                tab.live_right.sync(&tab.editor, Some(byte));
+                                if let Some(block) = tab.live_right.block_containing(byte) {
+                                    tab.live_right.pending_caret = Some((block, 0));
+                                    tab.live_right.caret_follow = true;
+                                }
                             }
                         }
                     }
@@ -882,6 +899,8 @@ impl LaterMdApp {
                     &state.keymap,
                     outbox,
                     find_marks,
+                    // Split 对照列的滚轮锚点出参(仅源码分支写,见 editor::ui 文档)。
+                    &mut tab.live_right.mouse_anchor,
                 );
                 // 命中回填沿用编辑器的选区/滚动通道,但不能终止查找框的连续输入。
                 if keep_find_focus {
@@ -8082,6 +8101,103 @@ mod tests {
             out.textures_delta.clear();
         }
         (ctx, app)
+    }
+
+    /// 滚轮锚点端到端(Split 对照列同步滚动):指针悬在源码文本区滚轮
+    /// 滚动一帧,下一帧对照列把锚点块滚进视口。光标字节全程未动 ——
+    /// 跟随的是**鼠标所在行**,不是光标;右栏滚动探针(帧末写入)给正证。
+    #[test]
+    fn split_wheel_scroll_anchors_compare_column_to_pointer_line() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let (ctx, mut app) = compare_only_app(screen, false);
+        // 长文档:指针压在视口下沿附近时,其所在段落远在右栏首屏之外
+        app.state
+            .tabs
+            .current_mut()
+            .editor
+            .load(&"Paragraph body line.\n\n".repeat(160));
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+        }
+        // 指针落点用右栏探针的**屏幕空间**视口反推编辑器区域(TextEdit
+        // 响应矩形是内容坐标,直接乘系数会把指针送出窗外):对照列左缘
+        // 再往左 300px 就是源码列文本区,y 取视口下沿附近(锚出行足够深)。
+        let right_id = crate::ui::editor::tab_right_editor_id(app.state.tabs.current().id);
+        let probe = ctx
+            .data(|d| {
+                d.get_temp::<crate::live::LiveScrollProbe>(crate::live::scroll_probe_id(right_id))
+            })
+            .expect("布局帧写了右栏滚动探针");
+        let pointer_pos = egui::pos2(
+            probe.viewport.left() - 300.0,
+            probe.viewport.top() + probe.viewport.height() * 0.8,
+        );
+        let wheel_frame = |app: &mut LaterMdApp, pointer: bool| {
+            let mut events = Vec::new();
+            if pointer {
+                events.push(egui::Event::PointerMoved(pointer_pos));
+            }
+            events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -3.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            });
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+        };
+        let plain_frame = |app: &mut LaterMdApp| {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+        };
+        // 连续 5 帧滚轮(真实滚动的形态):左栏逐帧加深,锚点逐帧重写,
+        // 对照列滞后一帧逐帧追。单 tick 从滚动 0 起步时锚点段落还在右栏
+        // 首屏内,对齐差值会被 offset 下界钳成 0 —— 真实使用里连滚几帧
+        // 后锚点块必落到视口之外,这正是本测试要复现的形态。
+        wheel_frame(&mut app, true);
+        for _ in 0..4 {
+            wheel_frame(&mut app, false);
+        }
+        // 消费帧:对照列帧头取走最后一枚锚点并落地对齐
+        plain_frame(&mut app);
+
+        let tab = app.state.tabs.current();
+        let right_id = crate::ui::editor::tab_right_editor_id(tab.id);
+        let probe = ctx
+            .data(|d| {
+                d.get_temp::<crate::live::LiveScrollProbe>(crate::live::scroll_probe_id(right_id))
+            })
+            .expect("右栏帧末写了滚动探针");
+        assert!(
+            probe.content_height > probe.viewport.height(),
+            "内容高于视口:{probe:?}"
+        );
+        assert!(probe.offset > 0.0, "对照列滚到锚点块附近:{probe:?}");
+        assert!(
+            tab.live_right.pending_caret.is_none() && tab.live_right.anchor_align_y.is_none(),
+            "锚点意图同帧消费即清"
+        );
+        assert_eq!(tab.cursor.byte, None, "光标全程未动,跟随的是鼠标行");
     }
 
     /// 空闲态就要看得见一条界 —— 这是分隔线的全部要点。

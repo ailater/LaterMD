@@ -155,6 +155,19 @@ pub struct LiveState {
     /// 右栏保留自己的滚动位置供自由翻阅(用户翻对照列不该被主列拽回)。
     /// `None` = 还没跟随过(或文档刚换入)。
     pub(crate) followed_byte: Option<usize>,
+    /// 只读对照列专用:源码列滚轮滚动帧写下的「鼠标行锚点」——(指针所
+    /// 在行的源码字节, 指针在源码视口里的相对高度)。`ui::editor` 在滚轮
+    /// 帧写入,`ui::layout` 的对照列帧头**消费一次即清**:连续滚轮逐帧
+    /// 重下锚,滚轮一停右栏保留自己的滚动位置供自由翻阅。锚点不写
+    /// `followed_byte`(那里只记忆光标侧的最后一次),两条跟随
+    /// 路径互不拽扯。
+    pub(crate) mouse_anchor: Option<(usize, f32)>,
+    /// 一次 pending_caret 落地的**对齐意图**:Some(视口相对高度) = 目标块
+    /// 顶落到该高度(滚轮锚点的「两侧同一行等高呈现」);None = 现状最小
+    /// 滚动(`scroll_to_rect(rect, None)`,光标跟随/大纲跳转同款)。与
+    /// pending_caret 同帧置位、同帧消费;光标跟随路径入口处显式清,
+    /// 防残留的旧意图劫持一次普通跳转。
+    pub(crate) anchor_align_y: Option<f32>,
     /// 富渲染块链接改写的块级缓存(#63;#65 M2 起高亮层并入同一条缓存):
     /// 块序号 → (源码指纹, 改写后块文本, 高亮层映射, 任务层映射)。
     /// 修订号前进时保留未变化块的条目，只让源码指纹变化的块重新改写，
@@ -371,6 +384,8 @@ impl LiveState {
         self.drag_anchor = None;
         self.caret_follow = false;
         self.followed_byte = None;
+        self.mouse_anchor = None;
+        self.anchor_align_y = None;
         self.rich_cache.clear();
         self.block_hashes.clear();
     }
@@ -501,8 +516,30 @@ fn emoji_probe_id(editor_id: egui::Id) -> egui::Id {
     egui::Id::new("latermd-live-emoji-rects").with(editor_id)
 }
 
+/// 锁定浏览的跳转落地(屏外占位臂与真实渲染臂共用):无对齐意图时最小
+/// 滚动(大纲跳转/光标跟随的现状);带 `anchor_align_y` 意图时块顶对齐
+/// 到指针在源码视口里的相对高度(滚轮锚点的「两侧同一行等高呈现」),
+/// 块比视口高时钳回顶对齐 —— 块内的行级定位要走富渲染逆穿,不在本路径
+/// 的能力面。egui 相对增量的符号:queue 后被取负应用(`offset -= queued`),
+/// 正 = 向上滚;目标差为负表示块在目标位置下方,需向下滚把它抬上来。
+fn locked_jump_landing(ui: &egui::Ui, live: &mut LiveState, rect: egui::Rect) {
+    match live.anchor_align_y.take() {
+        Some(rel) => {
+            let clip = ui.clip_rect();
+            let rel = rel.clamp(0.0, (clip.height() - rect.height()).max(0.0));
+            let delta = clip.top() + rel - rect.top();
+            ui.scroll_with_delta_animation(
+                egui::vec2(0.0, delta),
+                egui::style::ScrollAnimation::none(),
+            );
+        }
+        None => ui.scroll_to_rect(rect, None),
+    }
+}
+
 /// 滚动探针的 data 键(P3,与预览 scroll_probe_id 同款,按编辑器 id 分标签)。
-fn scroll_probe_id(editor_id: egui::Id) -> egui::Id {
+/// `pub(crate)`:布局层测试读右栏对照列的探针断言滚轮锚点落地。
+pub(crate) fn scroll_probe_id(editor_id: egui::Id) -> egui::Id {
     egui::Id::new("latermd-live-scroll").with(editor_id)
 }
 
@@ -510,10 +547,10 @@ fn scroll_probe_id(editor_id: egui::Id) -> egui::Id {
 /// 生产只写不读,字段读取都活在 `cfg(test)`,非测试构建豁免 dead_code。
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(not(test), allow(dead_code))]
-struct LiveScrollProbe {
-    offset: f32,
-    viewport: egui::Rect,
-    content_height: f32,
+pub(crate) struct LiveScrollProbe {
+    pub(crate) offset: f32,
+    pub(crate) viewport: egui::Rect,
+    pub(crate) content_height: f32,
 }
 
 /// 绘制 Live Preview:非活动块富渲染(点击即进入编辑),活动块源码编辑。
@@ -819,7 +856,7 @@ pub fn ui(
                                 if block == index {
                                     live.pending_caret = None;
                                     live.caret_follow = false;
-                                    ui.scroll_to_rect(rect, None);
+                                    locked_jump_landing(ui, live, rect);
                                 }
                             }
                         }
@@ -1292,7 +1329,7 @@ pub fn ui(
                                 if block == index {
                                     live.pending_caret = None;
                                     live.caret_follow = false;
-                                    ui.scroll_to_rect(rect, None);
+                                    locked_jump_landing(ui, live, rect);
                                 }
                             }
                         }
@@ -5861,6 +5898,93 @@ mod tests {
             live_open.active,
             Some(live_open.block_containing(target_byte).unwrap()),
             "未锁定时跳转仍落块进编辑:{live_open:?}"
+        );
+    }
+
+    /// 滚轮锚点的对齐落地(Split 对照列同步滚动的数学钉子):同一目标块
+    /// 只差 `anchor_align_y`,视口相对高度相差 100 → 落定后的滚动偏移恰差
+    /// 100;顶对齐(rel=0)比无意图的最小滚动走得更远(块已在视口内时
+    /// 最小滚动为 0)。目标块选**首屏内**:块真实渲染、无估高漂移,断言
+    /// 得以钉到亚像素。每次 run 换全新 Context —— ScrollArea 偏移是按
+    /// editor id 持久化的,共用 Context 会把上一轮的落点带进下一轮。
+    /// 意图同帧消费即清,不残留到后续帧。
+    #[test]
+    fn locked_jump_landing_aligns_block_top_to_anchor_rel() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let text = "段落甲,这一段只是填充正文。\n\n".repeat(40);
+        let target_block = 3;
+
+        let run = |rel: Option<f32>| -> (LiveState, f32) {
+            let ctx = egui::Context::default();
+            let mut editor = EditorBuffer::new(&text);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState::default();
+            live.sync(&editor, None);
+            live.browse_only = true;
+            live.browse_enabled = false;
+            live.browse_locked = true;
+            live.pending_caret = Some((target_block, 0));
+            live.caret_follow = true;
+            live.anchor_align_y = rel;
+            let mut selection = None;
+            let mut outbox = Vec::new();
+            let id = egui::Id::new("live-anchor-align");
+            let mut probe = None;
+            for _ in 0..3 {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |panel| {
+                        super::ui(
+                            panel,
+                            &mut editor,
+                            &mut preview,
+                            &AiState::default(),
+                            &mut cursor,
+                            &mut selection,
+                            &mut live,
+                            id,
+                            false,
+                            false,
+                            None,
+                            false,
+                            &crate::keymap::Keymap::builtin(),
+                            &mut outbox,
+                        );
+                    },
+                );
+                output.drop_without_applying_deltas();
+                probe = Some(
+                    ctx.data(|d| d.get_temp::<LiveScrollProbe>(super::scroll_probe_id(id)))
+                        .expect("帧末写了滚动探针"),
+                );
+            }
+            assert!(
+                live.pending_caret.is_none() && live.anchor_align_y.is_none(),
+                "意图同帧消费即清:{live:?}"
+            );
+            (live, probe.unwrap().offset)
+        };
+
+        let (live_a, offset_rel0) = run(Some(0.0));
+        assert!(live_a.active.is_none(), "锁定浏览不进编辑");
+        let (_, offset_rel100) = run(Some(100.0));
+        let (_, offset_none) = run(None);
+
+        assert!(
+            offset_rel0 > 100.0,
+            "顶对齐真的滚了(目标块不在文档顶):{offset_rel0}"
+        );
+        assert!(
+            (offset_rel0 - offset_rel100 - 100.0).abs() < 0.5,
+            "rel 差 100 → 偏移恰差 100:{offset_rel0} vs {offset_rel100}"
+        );
+        assert!(
+            offset_none.abs() < 0.5,
+            "块已在视口内时最小滚动不动:{offset_none}"
         );
     }
 
