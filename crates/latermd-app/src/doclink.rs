@@ -579,4 +579,17 @@ mod tests {
         assert_eq!(start("没有的标题"), None);
         assert_eq!(find_anchor(text, "  "), None, "空锚点不匹配");
     }
+
+    /// 含行内代码的标题按合并后的全文取 slug 命中(与 TOC/导出 HTML 同
+    /// 源口径;拆条时代这条链接在应用内永远解析不到)。
+    #[test]
+    fn find_anchor_heading_with_inline_code() {
+        let text = "# 标题含 `code` 内联\n\n正文\n";
+        let span = find_anchor(text, "标题含-code-内联").expect("全文 slug 命中");
+        assert!(text[span].starts_with("# 标题含"));
+        // 手抄标题原文(忽略行内代码记号)也能命中
+        assert!(find_anchor(text, "标题含 code 内联").is_some());
+        // 旧的拆条片段 slug 不再产出
+        assert_eq!(find_anchor(text, "标题含"), None);
+    }
 }

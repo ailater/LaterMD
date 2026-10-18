@@ -43,20 +43,11 @@ impl MarkdownDoc {
     /// 提取标题大纲。
     ///
     /// 只遍历顶层 token,不深入表格单元格;凡 [`Token::Text`] 的样式带 heading
-    /// 层级即产出一条。同一标题行含内联格式时会拆成多条,廉价版大纲可接受。
+    /// 层级即产出一条。同一标题行被内联格式(行内代码/链接)拆出的多个
+    /// token 片段按行合并回一条,口径与导出 HTML 的标题 id 同源(共享
+    /// 实现见下方私有 `outline_from`)。
     pub fn outline(&self) -> Vec<OutlineItem> {
-        self.tokens
-            .iter()
-            .zip(&self.spans)
-            .filter_map(|(token, span)| match token {
-                Token::Text { text, style } => style.heading.map(|level| OutlineItem {
-                    level,
-                    text: text.to_string(),
-                    span: span.clone(),
-                }),
-                _ => None,
-            })
-            .collect()
+        outline_from(&self.tokens, &self.spans)
     }
 }
 
@@ -67,18 +58,106 @@ impl MarkdownDoc {
 /// 条;已持有 [`MarkdownDoc`] 的离线场景用方法形态即可。
 pub fn outline(text: &str) -> Vec<OutlineItem> {
     let md = egui_markdown::parser::parse(text);
-    md.tokens
-        .iter()
-        .zip(&md.spans)
-        .filter_map(|(token, span)| match token {
-            Token::Text { text, style } => style.heading.map(|level| OutlineItem {
-                level,
-                text: text.to_string(),
-                span: span.clone(),
-            }),
-            _ => None,
-        })
-        .collect()
+    outline_from(&md.tokens, &md.spans)
+}
+
+/// 顶层 token 流 → 标题大纲(两条 [`outline`] 通道的共享实现)。
+///
+/// vendored 解析器把标题行的内联结构切成多个顶层 token:`Event::Code` 的
+/// 样式被重置为纯 `inline_code`(`heading: None`),把 `# 标题含 \`code\`
+/// 内联` 切成「标题含 」「code」「 内联」三段;链接则整体成一条
+/// [`Token::Link`](heading 字段保留)。逐条直取会让一条标题裂成多条、
+/// 文本各剩片段,TOC 与应用内锚点随之和导出 HTML 的标题 id(导出侧按
+/// 事件流把 Text+Code 拼回全文再取 slug,见 latermd-export
+/// `attach_heading_ids`)对不上。
+///
+/// 合并口径:标题正文片段([`Token::Text`] 带 heading)接续或新开一条
+/// **未闭合 run**;run 内的行内代码片段并入当前条(归属只能靠 run 判定,
+/// 样式里没有 heading);标题内的链接文本并入([`Token::Link`] 自带
+/// heading,链接开头的标题由它起 run)。**换行 token 关闭 run** ——
+/// vendored 解析器在每个标题前都插入换行(`ensure_double_newline`),段落
+/// 里的行内代码因此绝不会被误吸。标题以行内代码**开头**时正文片段之前
+/// 没有可开的 run,向前回吸同行的行内代码/链接片段(回吸同样必停在换行
+/// 或非内联 token 上)。`span` 取各片段的并集;图片的 alt 不进文本(与
+/// 导出标题纯文本口径一致)。
+fn outline_from(tokens: &[Token<'_>], spans: &[Range<usize>]) -> Vec<OutlineItem> {
+    let mut items: Vec<OutlineItem> = Vec::new();
+    // 未闭合标题 run 在 `items` 里的下标;None = 当前不在任何标题行内。
+    let mut open: Option<usize> = None;
+    for (position, (token, span)) in tokens.iter().zip(spans).enumerate() {
+        let extend =
+            |items: &mut Vec<OutlineItem>, index: usize, text: &str, span: &Range<usize>| {
+                items[index].text.push_str(text);
+                items[index].span.end = items[index].span.end.max(span.end);
+            };
+        match token {
+            Token::Text { text, style } if style.heading.is_some() => {
+                let level = style.heading.unwrap();
+                match open {
+                    Some(index) if items[index].level == level => {
+                        extend(&mut items, index, text, span)
+                    }
+                    _ => {
+                        let mut item = OutlineItem {
+                            level,
+                            text: text.to_string(),
+                            span: span.clone(),
+                        };
+                        // 行首片段是内联代码(`# \`init\` 脚本`):向前回吸
+                        // 同一标题行内、位于正文之前的行内代码/链接文本。
+                        let mut back = position;
+                        while back > 0 {
+                            back -= 1;
+                            match &tokens[back] {
+                                Token::Text { text: prev, style }
+                                    if style.inline_code && style.heading.is_none() =>
+                                {
+                                    item.text.insert_str(0, prev);
+                                    item.span.start = spans[back].start;
+                                }
+                                Token::Link {
+                                    text: prev,
+                                    heading: Some(prev_level),
+                                    ..
+                                } if *prev_level == level => {
+                                    item.text.insert_str(0, prev);
+                                    item.span.start = spans[back].start;
+                                }
+                                _ => break,
+                            }
+                        }
+                        items.push(item);
+                        open = Some(items.len() - 1);
+                    }
+                }
+            }
+            Token::Text { text, style } if style.inline_code && open.is_some() => {
+                extend(&mut items, open.unwrap(), text, span)
+            }
+            Token::Link {
+                text,
+                heading: Some(level),
+                ..
+            } => {
+                match open {
+                    Some(index) if items[index].level == *level => {
+                        extend(&mut items, index, text, span)
+                    }
+                    _ => {
+                        // 标题以链接开头(`# [甲](x) 乙`):链接即 run 起点。
+                        items.push(OutlineItem {
+                            level: *level,
+                            text: text.to_string(),
+                            span: span.clone(),
+                        });
+                        open = Some(items.len() - 1);
+                    }
+                }
+            }
+            _ => open = None,
+        }
+    }
+    items
 }
 
 /// 把文档切成**块**(P3 Live Preview 的骨架):返回每个块的源码字节区间。
@@ -1355,8 +1434,8 @@ impl Slugger {
 ///   (提示属 UI,消费方拿空串自行决定);
 /// - 显示文本转义 `[`/`]`/`\`,含字面方括号的标题不拆坏链接语法。
 ///
-/// 已知边界:标题纯文本来自 [`outline`] 通道,含内联格式的标题行会被
-/// vendored 解析器拆成多条(既有廉价口径),TOC 条目随之拆条;纯 emoji
+/// 标题纯文本来自 [`outline`] 通道:含内联格式的标题行已按行合并成一条,
+/// 锚点与导出 HTML 的标题 id 同源(同一份全文取 slug)。纯 emoji
 /// 标题 slug 为空,产出的链接是合法语法 `(#)`——点击无效但文本合法。
 pub fn generate_toc(items: &[OutlineItem]) -> String {
     let Some(base) = items
@@ -2483,6 +2562,44 @@ mod tests {
     }
 
     #[test]
+    fn outline_merges_inline_code_in_heading() {
+        let src = "# 标题含 `code` 内联\n\n正文 `x` 段落。\n\n## 下一个\n";
+        let items = outline(src);
+        // 一条标题,段落里的行内代码不被误吸
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].level, 1);
+        assert_eq!(items[0].text, "标题含 code 内联");
+        assert_eq!(items[1].level, 2);
+        assert_eq!(items[1].text, "下一个");
+        // span 覆盖标题行原文(spans 连续铺盖,与单 token 标题同口径:
+        // 起点含 `# ` 标记),点击跳转与节定位用
+        assert_eq!(&src[items[0].span.clone()], "# 标题含 `code` 内联");
+    }
+
+    #[test]
+    fn outline_heading_leading_inline_code() {
+        let src = "# `init` 脚本说明\n";
+        let items = outline(src);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "init 脚本说明");
+        assert_eq!(&src[items[0].span.clone()], "# `init` 脚本说明");
+    }
+
+    #[test]
+    fn outline_heading_link_text_joined() {
+        let src = "# [甲](https://example.com) 乙\n\n正文\n";
+        let items = outline(src);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "甲 乙");
+    }
+
+    #[test]
+    fn outline_method_matches_free_fn_with_inline_code() {
+        let src = "# 标题含 `code` 内联\n\n## `init` 脚本\n";
+        assert_eq!(parse(src).outline(), outline(src));
+    }
+
+    #[test]
     fn outline_chinese_headings() {
         let src = "# 架构设计\n\n正文段落。\n\n## 中文二级标题\n";
         let doc = parse(src);
@@ -3136,11 +3253,11 @@ mod tests {
     fn generate_toc_feeds_from_real_outline_channel() {
         let src = "# 后来的指南\n\n正文。\n\n## 中文 标题\n\n### 🚀 Launch\n\n## **粗**体标题\n\n#### 太深\n";
         let toc = generate_toc(&outline(src));
-        // 内联标题 `## **粗**体标题` 被解析器拆成「粗」「体标题」两条
-        // (outline 既有口径),TOC 忠实呈现拆条结果
+        // 内联标题 `## **粗**体标题` 被解析器拆成「粗」「体标题」两段,
+        // outline 按行合并回一条(与导出 HTML 标题 id 同源口径)
         assert_eq!(
             toc,
-            "- [后来的指南](#后来的指南)\n  - [中文 标题](#中文-标题)\n    - [🚀 Launch](#-launch)\n  - [粗](#粗)\n  - [体标题](#体标题)\n"
+            "- [后来的指南](#后来的指南)\n  - [中文 标题](#中文-标题)\n    - [🚀 Launch](#-launch)\n  - [粗体标题](#粗体标题)\n"
         );
     }
 
@@ -3156,6 +3273,18 @@ mod tests {
     }
 
     // —— TOC_BLOCK / TOC_REGION_SPAN(#66 M2 插入与整块替换的识别口径)——
+
+    /// 含行内代码的标题只产一条 TOC 条目,锚点 slug 取全文(与导出 HTML
+    /// 标题 id 同源,`inline_code_in_heading_joins_title` 是导出侧的对照)。
+    #[test]
+    fn generate_toc_inline_code_heading_is_one_entry() {
+        let src = "# 标题含 `code` 内联\n\n## 子节\n";
+        let toc = generate_toc(&outline(src));
+        assert_eq!(
+            toc,
+            "- [标题含 code 内联](#标题含-code-内联)\n  - [子节](#子节)\n"
+        );
+    }
 
     /// `toc_block` 包住 `generate_toc` 产出,且被 `toc_region_span` 原样
     /// 识别回来 —— 写入与识别同一事实源(模块文档的构造性一致断言)。
