@@ -198,6 +198,11 @@ pub struct CursorChannel<'a> {
 /// `base_dir` / `heal` 只被 Live 分支消费(live-unify-plan P1):前者锚定
 /// 相对图片的 `file://` 改写(未落盘为 None),后者仅在 AI 流式写入本标签
 /// 时为 true(残缺 markdown 补闭合)。源码模式两者无用。
+///
+/// `mouse_anchor` 是 Split 对照列同步滚动的**出参**(消费侧在 `ui::layout`
+/// 的对照列帧头):仅源码分支生效,指针悬在源码列视口内滚轮滚动的帧,把
+/// 指针所在行的源码字节与指针的视口相对高度写进去,那边下一帧消费一次
+/// 即清。非 Split 模式恒不写。
 // 参数各自属于 State 的不同字段,打包成结构会造出人为聚合;同款豁免
 // 先例见 settings.rs `dialog`。
 #[allow(clippy::too_many_arguments)]
@@ -218,6 +223,7 @@ pub fn ui(
     keymap: &crate::keymap::Keymap,
     outbox: &mut Vec<Message>,
     find_marks: &[std::ops::Range<usize>],
+    mouse_anchor: &mut Option<(usize, f32)>,
 ) -> egui::Response {
     let CursorChannel {
         cursor,
@@ -624,6 +630,36 @@ pub fn ui(
         });
     let output = scrolled.inner;
 
+    // 滚轮锚点(Split 对照列同步滚动,见 `mouse_anchor` 参数文档):几何
+    // 解算在 [`wheel_anchor_at`](纯函数,测试钉口径)。悬停判定用 ScrollArea
+    // 的**屏幕空间**视口(inner_rect)—— TextEdit 的响应矩形/text_clip_rect
+    // 是随 offset 平移的布局坐标,拿它含屏幕指针会把判定整个送错坐标系
+    // (2026-10-18 实测:指针永远"不在"clip 里)。视口含行号槽与 minimap
+    // 窄条:窄条的悬停滚轮转发照旧发生,锚点按指针所在行取,语义自洽。
+    // `dragged_id` 判据与 minimap 截获同款 —— 拖拽进行中不锚,滚轮归当前
+    // 拖拽。滚轮停了这里不再写,对照列消费一次即清,右栏恢复自由翻阅。
+    if mode == RenderMode::Split
+        && panel.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::MouseWheel { .. }))
+        })
+        && panel.ctx().dragged_id().is_none()
+        && panel
+            .input(|input| input.pointer.latest_pos())
+            .is_some_and(|pos| scrolled.inner_rect.contains(pos))
+    {
+        let pos = panel.input(|input| input.pointer.latest_pos()).unwrap();
+        *mouse_anchor = Some(wheel_anchor_at(
+            pos,
+            &output.galley,
+            output.galley_pos,
+            scrolled.inner_rect.top(),
+            editor,
+        ));
+    }
+
     // 打字机接管判定(#64 M1):本帧偏移动了、且不是打字机自己落的地、
     // 也不是编辑/导航帧、也不在落地动画宽限内 —— 即用户主动滚动(滚轮/
     // 滚动条/内容拖拽/minimap 跳转),记一次 Override 暂停跟随。编辑帧
@@ -953,6 +989,23 @@ fn write_selection(
     panel.ctx().memory_mut(|mem| mem.request_focus(*id));
 }
 
+/// 滚轮锚点的几何解算(纯函数,测试钉口径):指针屏幕位 → (指针所在行
+/// 内的源码字节, 指针在视口里的相对高度)。软换行的视觉行由 galley 解算
+/// (每行高不同,不能拿行高乘除);`cursor_from_pos` 对上下越界自动钳到
+/// 文首/文末。x 只影响行内列(块归属按字节定位,不敏感)。`galley_pos`
+/// 是随 offset 平移的屏幕空间布局坐标(ScrollArea 的内容布局原点 =
+/// 视口顶 − offset),与指针同域,直接相减即得 galley 局部位。
+fn wheel_anchor_at(
+    pos: egui::Pos2,
+    galley: &egui::Galley,
+    galley_pos: egui::Pos2,
+    viewport_top: f32,
+    editor: &EditorBuffer,
+) -> (usize, f32) {
+    let ccursor = galley.cursor_from_pos(pos - galley_pos);
+    (editor.char_to_byte(ccursor.index.0), pos.y - viewport_top)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,6 +1035,71 @@ mod tests {
             cursor,
         )
         .0
+    }
+
+    /// 滚轮锚点几何解算的口径钉子:指针落在第 2 行 → 该行行首的源码字节,
+    /// rel = 指针相对视口顶的高度;软换行后的第 2 视觉行解算为行内字节
+    /// (galley 按视觉行命中,不按逻辑行);上下越界钳到文首/文末。
+    #[test]
+    fn wheel_anchor_maps_pointer_row_to_byte_and_rel() {
+        let ctx = egui::Context::default();
+        // 字体在首帧之后才可用(egui 的初始化时机)
+        let warm = ctx.run_ui(RawInput::default(), |_| {});
+        warm.drop_without_applying_deltas();
+        let line1 = "第一行文本";
+        let line2 = "第二行文本";
+        let text = format!("{line1}\n{line2}\n");
+        let galley = ctx.fonts_mut(|fonts| {
+            let mut job = egui::text::LayoutJob {
+                text: text.clone(),
+                ..egui::text::LayoutJob::default()
+            };
+            job.sections.push(egui::text::LayoutSection {
+                leading_space: 0.0,
+                byte_range: egui::text::ByteIndex(0)..egui::text::ByteIndex(text.len()),
+                format: egui::TextFormat::simple(
+                    egui::FontId::monospace(14.0),
+                    egui::Color32::WHITE,
+                ),
+            });
+            fonts.layout_job(job)
+        });
+        let editor = EditorBuffer::new(&text);
+        let galley_pos = egui::pos2(10.0, 100.0);
+        let viewport_top = 100.0;
+
+        // 第 2 行(逻辑)的字符偏移与字节偏移
+        let line2_chars = line1.chars().count() + 1;
+        let line2_byte = line1.len() + 1;
+        let row2 = galley.pos_from_cursor(egui::text::CCursor::new(line2_chars));
+
+        // 命中第 2 行行中:x 随便给,行内列不影响块归属断言的行首字节?
+        // 不 —— cursor_from_pos 的 index 含列。给行首 x(列 0)钉住行首。
+        let pos = egui::pos2(
+            galley_pos.x + row2.left() + 1.0,
+            galley_pos.y + row2.center().y,
+        );
+        let (byte, rel) = wheel_anchor_at(pos, &galley, galley_pos, viewport_top, &editor);
+        assert_eq!(byte, line2_byte, "指针行 → 该行行首字节");
+        assert!((rel - (galley_pos.y + row2.center().y - viewport_top)).abs() < 0.5);
+
+        // 越界钳位:视口上方 → 文首;视口下方 → 文末(末行行首前的最后字节)
+        let (byte_top, _) = wheel_anchor_at(
+            egui::pos2(galley_pos.x, viewport_top - 50.0),
+            &galley,
+            galley_pos,
+            viewport_top,
+            &editor,
+        );
+        assert_eq!(byte_top, 0);
+        let (byte_end, _) = wheel_anchor_at(
+            egui::pos2(galley_pos.x, viewport_top + 9999.0),
+            &galley,
+            galley_pos,
+            viewport_top,
+            &editor,
+        );
+        assert_eq!(byte_end, text.len(), "文末钳位落在全部字符之后");
     }
 
     /// 同 [`frame`],额外把 §6.4 的两个槽位交给调用方。八条实参里五条是
@@ -1130,6 +1248,7 @@ mod tests {
                         &crate::keymap::Keymap::builtin(),
                         outbox,
                         &[],
+                        &mut None,
                     )
                     .id,
                 );

@@ -1068,6 +1068,7 @@ mod tests {
                     &crate::keymap::Keymap::builtin(),
                     &mut Vec::new(),
                     &[],
+                    &mut None,
                 );
             },
         );
@@ -2760,6 +2761,7 @@ mod tests {
                     &crate::keymap::Keymap::builtin(),
                     &mut Vec::new(),
                     &[],
+                    &mut None,
                 );
             },
         );

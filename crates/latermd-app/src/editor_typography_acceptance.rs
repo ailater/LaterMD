@@ -755,6 +755,7 @@ fn gutter_digits_stay_aligned_under_line_spacing_projection() {
                 &crate::keymap::Keymap::builtin(),
                 &mut Vec::new(),
                 &[],
+                &mut None,
             );
         },
     );
