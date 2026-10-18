@@ -304,6 +304,13 @@ fn draw_body(
     workbench: bool,
     outbox: &mut Vec<Message>,
 ) {
+    if matches!(*active_tab, SidebarTab::Git) {
+        // Git 的三个分区各自拥有滚动区;再包一层 nav-body 会把固定分区
+        // 高度当成外层内容高度,在底部制造一个多余的滚动条。
+        git_panel(panel, git, outbox);
+        return;
+    }
+
     egui::ScrollArea::vertical()
         .id_salt("nav-body")
         .auto_shrink([false, false])
@@ -312,7 +319,7 @@ fn draw_body(
             SidebarTab::Files => files_panel(ui, file_tree, current_file, git, workbench, outbox),
             SidebarTab::Search => search_panel(ui, search, file_tree.root.as_deref(), outbox),
             SidebarTab::Outline => outline_panel(ui, outline, outbox),
-            SidebarTab::Git => git_panel(ui, git, outbox),
+            SidebarTab::Git => unreachable!("Git is rendered outside nav-body"),
             SidebarTab::Backlinks => backlinks_panel(
                 ui,
                 backlinks,
@@ -1790,7 +1797,7 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
     // 三分区默认高度:视口高度三等分(用户没拖过时各分 1/3;拖过的分区
     // 用持久值,不吃这个默认)。
     let third = git_section_third_default(panel);
-    let changes_height = git_section_height(panel, "changes", third);
+    let [changes_height, repo_height, file_history_height] = git_section_heights(panel, third);
     let changes_section = egui::CollapsingHeader::new(format!("更改({})", git.entries.len()))
         .id_salt("git-changes")
         .default_open(true)
@@ -1826,7 +1833,6 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
         true,
     )
     .is_open();
-    let repo_height = git_section_height(panel, "repository", third);
     let repo_section = git_repo_section(panel, git, |ui| {
         egui::ScrollArea::vertical()
             .id_salt("git-log-scroll")
@@ -1843,7 +1849,6 @@ fn git_panel(panel: &mut egui::Ui, git: &GitPanelState, outbox: &mut Vec<Message
 
     panel.add_space(tokens::gap::XS);
     let file_count = git.file_history.as_ref().map_or(0, |h| h.commits.len());
-    let file_history_height = git_section_height(panel, "file-history", third);
     let file_section = egui::CollapsingHeader::new(format!("文件历史({file_count})"))
         .id_salt("git-file-history")
         .default_open(true)
@@ -1863,6 +1868,9 @@ const GIT_SECTION_MIN_H: f32 = 72.0;
 const GIT_SECTION_MAX_H: f32 = 520.0;
 /// 拖拽带的命中高度(可见分割线只有 1px,居中)。
 const GIT_SECTION_HANDLE_H: f32 = 7.0;
+/// 折叠标题和嵌套 ScrollArea 的布局会额外产生少量像素,不能让这部分
+/// 误差把外层 `nav-body` 撑出滚动条。
+const GIT_SECTION_LAYOUT_SAFETY_H: f32 = 12.0;
 
 /// 三分区的**默认**高度:以当前 Git body 的可用高度扣除固定装饰后
 /// 三等分。这里不能使用 `clip_rect()`——Git 页位于外层 `nav-body`
@@ -1870,12 +1878,28 @@ const GIT_SECTION_HANDLE_H: f32 = 7.0;
 /// `Ui` 的 `available_height()`。顶部工具行已经在调用本函数前布局完成,
 /// 因此这里只扣除三枚折叠头、三条拖拽带及其间距。用户没拖过的分区都
 /// 吃这个值(窗口高度变了跟着重算);拖过的分区用自己的持久值,与三等分无关。
-fn git_section_third_default(panel: &egui::Ui) -> f32 {
+fn git_section_layout_budget(panel: &egui::Ui) -> f32 {
     let spacing = panel.spacing();
-    let chrome = 3.0
-        * (spacing.interact_size.y + GIT_SECTION_HANDLE_H + 2.0 * spacing.item_spacing.y)
+    let chrome = GIT_SECTION_LAYOUT_SAFETY_H
+        + 3.0 * (spacing.interact_size.y + GIT_SECTION_HANDLE_H + 2.0 * spacing.item_spacing.y)
         + 3.0 * (tokens::gap::XS + spacing.item_spacing.y);
-    ((panel.available_height() - chrome) / 3.0).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
+    (panel.available_height() - chrome).max(0.0)
+}
+
+fn git_section_third_default(panel: &egui::Ui) -> f32 {
+    (git_section_layout_budget(panel) / 3.0).clamp(GIT_SECTION_MIN_H, GIT_SECTION_MAX_H)
+}
+
+fn git_section_heights(panel: &egui::Ui, default: f32) -> [f32; 3] {
+    let names = ["changes", "repository", "file-history"];
+    let mut heights = names.map(|name| git_section_height(panel, name, default));
+    let budget = git_section_layout_budget(panel);
+    let total = heights.iter().sum::<f32>();
+    if total > budget && total > 0.0 {
+        let scale = budget / total;
+        heights.iter_mut().for_each(|height| *height *= scale);
+    }
+    heights
 }
 
 fn git_section_height(panel: &egui::Ui, name: &str, default: f32) -> f32 {
