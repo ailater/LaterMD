@@ -27,6 +27,17 @@ const GIT_REFRESH_POLL: std::time::Duration = std::time::Duration::from_millis(5
 /// P4 退役的旧名复用 —— 旧 layout.json 里还躺着 `right`/`right_width`)。
 pub(crate) const COMPARE_PANEL_ID: &str = "compare-column";
 
+/// 对照列**正文** Ui 的绝对 id(2026-10-19 进场动画改「向右滑」)。
+///
+/// 正文有两条绘制路径:进场在 `draw` 的 ⑤'(中央编辑区之后,自带 clip),
+/// 退场在 ④ 的面板 Ui 内(egui 原生滑出)。两条路径的父 id 链不同,
+/// 而 `ScrollArea` 的滚动偏移按 `make_persistent_id` 派生并存进 egui
+/// memory —— 若顺着父链派生,切档那一帧 id 变化,右栏滚动位置就被重置。
+/// 显式钉死绝对 id 后,正文内一切 widget 的 id 与「在哪条路径画」无关,
+/// 来回切不丢位置。取值刻意区别于 `COMPARE_PANEL_ID`,免得与面板自身
+/// 注册的 widget 撞 id。
+const COMPARE_BODY_ID: &str = "compare-body";
+
 impl LaterMdApp {
     /// `logic` 帧的全部归约逻辑。单独成函数是因为 [`eframe::Frame`] 的字段
     /// 是 `pub(crate)`,测试里造不出来;归约本身不碰 frame。`pub(crate)`
@@ -542,6 +553,33 @@ impl LaterMdApp {
         // 状态源。完全收起时 egui 只画右缘一根细把手(旧口径同款),
         // `add_contents` 不再执行。
         let mut compare_open = split;
+        // **进场动画不走 egui 的收展通道**(2026-10-19 坤哥:「切换分栏时改成
+        // 向右滑动,而不是现在的从边上进来」)。那条通道的实现是把面板**向
+        // 固定边(右缘)平移**并按可见部分裁剪(`panel.rs` `slide_distance`/
+        // `visible_outer_rect`),所以**只可能**得到「从屏幕右缘飞进来」。
+        //
+        // 改法是自己驱动一条独立动画 `enter-slide`,并在进场期间把 egui 的
+        // 收展比例**钉死在展开端点**:`animation_time = 0` 时
+        // `animate_bool` 的 `elapsed / 0` 必非有限值 ⇒ 落 `end` 分支,面板
+        // 第一帧即满宽(编辑区当帧收窄);位移、裁剪与正文绘制全在 ⑤'(中央
+        // 编辑区**之后**,否则盖不住编辑区)。
+        let enter_frac = ui
+            .ctx()
+            .animate_bool_responsive(egui::Id::new(COMPARE_PANEL_ID).with("enter-slide"), split);
+        if split && enter_frac < 1.0 {
+            ui.ctx().animate_bool_with_time(
+                egui::Id::new(COMPARE_PANEL_ID).with("animation"),
+                true,
+                0.0,
+            );
+        }
+        // 正文浮层的横向裁剪下界(侧栏右缘):进场时列要盖过编辑区左半,
+        // 但不该盖到侧栏上。
+        let compare_clip_left = ui.available_rect_before_wrap().left();
+        // 槽位矩形交给 ⑤' 画正文时用。**必须取未平移的 outer_rect**:
+        // 退场期间 egui 刻意不落盘 PanelState(`is_animating` 守卫),
+        // 留存下来的正是拖动前的满宽槽位 —— 正是我们要的基准。
+        let mut compare_slot: Option<egui::Rect> = None;
         if !git_diff_workspace {
             let preview_max = (ui.available_width() - crate::ui::workbench::EDITOR_MIN_W)
                 .clamp(tokens::PREVIEW_MIN_W, 880.0);
@@ -582,92 +620,34 @@ impl LaterMdApp {
                         .stroke(egui::Stroke::NONE),
                 )
                 .show_collapsible(ui, &mut compare_open, |ui| {
-                    // egui 0.36 的侧栏面板按**内容 min_rect** 定实际宽度
-                    // (`Frame::show` 的 rect 跟随内容收缩),而下面的固定矩形
-                    // 子 Ui 是隔离 ScrollArea 撑高坑的必需品,其 min_rect
-                    // **不会**传播回帧内容层 —— 不显式撑满,面板会缩到
-                    // `size_range` 下限并被 `remember_panel_width` 持久化,
-                    // 松手帧又按内容宽存回,拖动等于无效(2026-10-15 坤哥
-                    // 实测「宽度拉不动」;无头探针:撑满=420,不撑=260)。
-                    ui.set_min_width(ui.available_rect_before_wrap().width());
-                    // 列头在滚动区外固定(旧「对照预览」口径,P4 曾随右栏
-                    // 整删;2026-10-16 恢复)。三态下右栏是 Live 富渲染的
-                    // 只读对照,不再是旧「预览」,故标题叫「对照」。
-                    crate::ui::workbench::pane_heading(ui, "对照", "只读");
-                    let LaterMdApp { state, outbox, .. } = self;
-                    let tab = state.tabs.current_mut();
-                    // 只读:浏览 + 硬锁(点击/跳转都不进编辑、不抢焦点)。
-                    // 每帧置位,与禅定的临时浏览同款手法 —— 不写回 State。
-                    tab.live_right.browse_only = true;
-                    tab.live_right.browse_enabled = false;
-                    tab.live_right.browse_locked = true;
-                    tab.live_right.active = None;
-                    // 跟随一次:源码侧光标移动才下滚动目标(落在目标的帧消费
-                    // 后即清),此后右栏保留自己的滚动位置供自由翻阅。
-                    // 滚轮锚点优先于光标跟随:源码列滚轮滚动帧写下的「鼠标行
-                    // 锚点」在这里消费一次即清 —— 连续滚轮逐帧重下锚,把锚点
-                    // 所在块顶对齐到指针的视口相对高度(anchor_align_y),两侧
-                    // 同一行等高呈现;滚轮一停不再写入,右栏恢复自由翻阅。
-                    // 锚点不写 followed_byte(只记忆光标侧的最后一次),两条
-                    // 路径互不拽扯;光标跟随分支入口处显式清对齐意图,防一次
-                    // 残留劫持普通跳转的落点。
-                    let cursor_byte = tab.cursor.byte;
-                    if let Some((byte, rel_y)) = tab.live_right.mouse_anchor.take() {
-                        tab.live_right.sync(&tab.editor, Some(byte));
-                        if let Some(block) = tab.live_right.block_containing(byte) {
-                            tab.live_right.pending_caret = Some((block, 0));
-                            tab.live_right.caret_follow = true;
-                            tab.live_right.anchor_align_y = Some(rel_y);
-                        }
-                    } else {
-                        tab.live_right.anchor_align_y = None;
-                        if tab.live_right.followed_byte != cursor_byte {
-                            tab.live_right.followed_byte = cursor_byte;
-                            if let Some(byte) = cursor_byte {
-                                tab.live_right.sync(&tab.editor, Some(byte));
-                                if let Some(block) = tab.live_right.block_containing(byte) {
-                                    tab.live_right.pending_caret = Some((block, 0));
-                                    tab.live_right.caret_follow = true;
-                                }
-                            }
-                        }
+                    // **两向都要撑满**:面板实际矩形由**内容的 min_rect** 定
+                    // (`Frame::show` 的 rect 跟随内容收缩)。正文在退场
+                    // 路径才画,进场面板里是空的 —— 不显式撑满,槽位高度会
+                    // 塌成内容高度(无头探针:空面板实测 36px 高,而窗口
+                    // 高度是 840),正文按该矩形定位就会整块错位。
+                    let avail = ui.available_rect_before_wrap();
+                    ui.set_min_width(avail.width());
+                    ui.expand_to_include_y(avail.max.y);
+                    // **进场(分栏)的正文不在这里画**(2026-10-19 坤哥:「切换
+                    // 分栏时改成窗口向右滑动,而不是现在的从边上进来」)。
+                    // 本 Ui 的 clip 被 egui 钉在槽位上(`panel.rs`
+                    // `set_clip_rect(visible_outer_rect)`),而进场要的正是
+                    // 「列盖在编辑区上向右推进」—— 画在这里必被裁掉左半截,
+                    // 退化回「从边上进来」。进场的正文在 ⑤'(中央编辑区之后)
+                    // 单独画一遍。
+                    //
+                    // **退场仍在这里画**:那条路径坤哥明确「不动」,而
+                    // egui 的滑出动画(`slide_distance` + 可见部分 clip)正是
+                    // 现状观感。两条路径按 `split` 互斥,任一帧只画一次。
+                    if !split {
+                        compare_column_body(ui, self);
                     }
-                    let base_dir = tab
-                        .document
-                        .path
-                        .as_deref()
-                        .and_then(std::path::Path::parent);
-                    let heal = state.ai.is_streaming() && state.ai_active_tab == Some(tab.id);
-                    // 固定矩形子 Ui:`live::ui` 的 ScrollArea(auto_shrink false)
-                    // 会把父 Ui 的 max_rect 往下撑,Panel 内必须隔离(禅定正文
-                    // 同款,P3 实测出来的坑)。
-                    let body_rect = ui.available_rect_before_wrap();
-                    let mut body = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(body_rect)
-                            .layout(egui::Layout::top_down(egui::Align::Min)),
-                    );
-                    // 只读列不回写共享的 cursor / selection:用局部占位接住,
-                    // 否则会和源码侧抢这两个每帧镜像的槽。
-                    let mut cursor_placeholder = crate::state::OutlineCursor::default();
-                    let mut selection_placeholder = None;
-                    crate::live::ui(
-                        &mut body,
-                        &mut tab.editor,
-                        &mut tab.preview,
-                        &state.ai,
-                        &mut cursor_placeholder,
-                        &mut selection_placeholder,
-                        &mut tab.live_right,
-                        crate::ui::editor::tab_right_editor_id(tab.id),
-                        false,
-                        false,
-                        base_dir,
-                        heal,
-                        &state.keymap,
-                        outbox,
-                    );
                 });
+            // 槽位矩形交给 ⑤' 画正文时用。**必须取未平移的 outer_rect**:
+            // 退场期间 egui 刻意不落盘 PanelState(`is_animating` 守卫),
+            // 留存下来的正是拖动前的满宽槽位 —— 正是我们要的基准。
+            compare_slot = egui::PanelState::load(ui.ctx(), egui::Id::new(COMPARE_PANEL_ID))
+                .map(|p| p.outer_rect);
             // egui 在拖拽收起/把手拖开/双击边缘时翻转工作 bool;收敛回
             // `render_mode`(Split ⇄ 非 Split 与该 toggle 同一映射)。
             if compare_open != split {
@@ -934,6 +914,55 @@ impl LaterMdApp {
         if state.goto.open {
             if let Some(rect) = source_rect {
                 draw_goto_overlay(ui.ctx(), rect, &mut state.goto, outbox);
+            }
+        }
+
+        // ⑤' 对照列正文:面板(④)只占位,正文在这里画第二遍。
+        //
+        // **为什么必须在中央编辑区之后**:进场要的观感是「列整块盖在编辑区
+        // 上,由左向右推进到槽位」。而 ④ 的 Ui 被 egui 把 clip 钉在槽位上
+        // (`panel.rs` `set_clip_rect(visible_outer_rect)`),画在 ④ 会被裁掉
+        // 左半截,退化回「从边上进来」。这里用根层另开一个子 Ui,clip 由
+        // 本函数自己给,才盖得住编辑区。
+        //
+        // 退场(非 Split)走 egui 原生滑出,正文仍由 ④ 的面板 Ui 画(`split`
+        // 为假时那边才调 `compare_column_body`)—— 坤哥 2026-10-19 明确
+        // 「进场改、退场不动」,故退场**刻意**保留现状实现,这里只在
+        // `split` 为真时接管。
+        if split {
+            if let Some(slot) = compare_slot {
+                let dx = -(1.0 - enter_frac) * slot.width();
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(slot.left() + dx, slot.top()),
+                    egui::pos2(slot.right() + dx, slot.bottom()),
+                );
+                let clip = egui::Rect::from_min_max(
+                    egui::pos2(compare_clip_left, slot.top()),
+                    egui::pos2(slot.right(), slot.bottom()),
+                );
+                if clip.intersects(rect) {
+                    // `new_child` 而非 `scope_builder`:后者会
+                    // `advance_cursor_after_rect` 推进根 Ui 游标,而游标
+                    // 已被全部 panel 推进过,再推会顶歪后面的
+                    // `edge_resize_zones`(它按游标 `allocate_rect`)。
+                    let mut holder = ui.new_child(
+                        egui::UiBuilder::new()
+                            .layer_id(ui.layer_id())
+                            .max_rect(rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    holder.set_clip_rect(clip);
+                    // 背景必须跟着正文一起走,否则列会「透明」地压在编辑
+                    // 区上。色值与 ④ 的 Panel Frame 同源。
+                    egui::Frame::default()
+                        .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
+                        .fill(crate::theme::shell(ui).content)
+                        .stroke(egui::Stroke::NONE)
+                        .show(&mut holder, |ui| {
+                            ui.expand_to_include_rect(ui.max_rect());
+                            compare_column_body(ui, self);
+                        });
+                }
             }
         }
 
@@ -1394,6 +1423,114 @@ impl LaterMdApp {
             crate::ui::titlebar::edge_resize_zones(ui);
         }
     }
+}
+
+/// 对照列正文:列头 + 只读 Live 富渲染 + 跟随/滚轮锚点逻辑。
+///
+/// **两条绘制路径共用这一份实现**(2026-10-19 进场动画改「向右滑」),
+/// 调用点按 `split` 互斥,任一帧只画一次:
+/// - **进场**(分栏):调用点在 [`LaterMdApp::draw`] 的 ⑤' —— 中央编辑区
+///   之后。egui 的 `Panel` 把子 Ui 的 clip 钉死在槽位上,画在 ④ 会被裁掉
+///   左半截、只能得到「从屏幕右缘飞进来」;⑤' 自己给 clip,列才能盖在
+///   编辑区上向右推进。
+/// - **退场**:调用点仍在 ④ 的 `show_collapsible` 闭包里,走 egui 原生
+///   滑出(坤哥明确「退场不动」)。此时 egui 在 `0 < how < 1` 期间照常执行
+///   `add_contents`,位置与裁剪都由它接管。
+///
+/// 抽成自由函数而非两处复制:右栏的只读硬锁、跟随一次、滚轮锚点这些
+/// 每帧置位的状态(`tab.live_right.*`)必须逐字一致,复制两份必然漂移。
+///
+/// **正文的最外层 Ui 用绝对 id `compare-body`**:进场走 ⑤'、退场走 ④ 的
+/// 面板 Ui,两条路径的父 id 链完全不同,若让 `ScrollArea` 顺着父链派生
+/// id(`make_persistent_id`),切档瞬间 id 就变了 —— 右栏滚动位置会被
+/// 丢掉重置(egui 的滚动偏移按 id 存在 memory 里)。这里显式钉死 id,
+/// 使正文内一切 widget(含 ScrollArea、锚点)的 id 与**在哪条路径画**
+/// 无关,进/退场来回切不丢位置。
+fn compare_column_body(ui: &mut egui::Ui, app: &mut LaterMdApp) {
+    // 绝对 id 子 Ui:见函数文档「为什么」。`scope_builder` 会推进父 Ui 的
+    // 游标(`advance_cursor_after_rect`),而根 Ui 的游标已被全部 panel
+    // 推进过 —— 再推会把后面 `edge_resize_zones` 的 `allocate_rect`
+    // 顶到别处。故用 `new_child`:它建子 Ui 但**不动**父游标。
+    let mut root = ui.new_child(
+        egui::UiBuilder::new()
+            .id(egui::Id::new(COMPARE_BODY_ID))
+            .max_rect(ui.max_rect()),
+    );
+    let ui = &mut root;
+    // 列头在滚动区外固定(旧「对照预览」口径,P4 曾随右栏整删;2026-10-16
+    // 恢复)。三态下右栏是 Live 富渲染的只读对照,不再是旧「预览」,故标题
+    // 叫「对照」。
+    crate::ui::workbench::pane_heading(ui, "对照", "只读");
+    let LaterMdApp { state, outbox, .. } = app;
+    let tab = state.tabs.current_mut();
+    // 只读:浏览 + 硬锁(点击/跳转都不进编辑、不抢焦点)。
+    // 每帧置位,与禅定的临时浏览同款手法 —— 不写回 State。
+    tab.live_right.browse_only = true;
+    tab.live_right.browse_enabled = false;
+    tab.live_right.browse_locked = true;
+    tab.live_right.active = None;
+    // 跟随一次:源码侧光标移动才下滚动目标(落在目标的帧消费后即清),
+    // 此后右栏保留自己的滚动位置供自由翻阅。滚轮锚点优先于光标跟随:
+    // 源码列滚轮滚动帧写下的「鼠标行锚点」在这里消费一次即清 —— 连续滚轮
+    // 逐帧重下锚,把锚点所在块顶对齐到指针的视口相对高度(anchor_align_y),
+    // 两侧同一行等高呈现;滚轮一停不再写入,右栏恢复自由翻阅。锚点不写
+    // followed_byte(只记忆光标侧的最后一次),两条路径互不拽扯;光标跟随
+    // 分支入口处显式清对齐意图,防一次残留劫持普通跳转的落点。
+    let cursor_byte = tab.cursor.byte;
+    if let Some((byte, rel_y)) = tab.live_right.mouse_anchor.take() {
+        tab.live_right.sync(&tab.editor, Some(byte));
+        if let Some(block) = tab.live_right.block_containing(byte) {
+            tab.live_right.pending_caret = Some((block, 0));
+            tab.live_right.caret_follow = true;
+            tab.live_right.anchor_align_y = Some(rel_y);
+        }
+    } else {
+        tab.live_right.anchor_align_y = None;
+        if tab.live_right.followed_byte != cursor_byte {
+            tab.live_right.followed_byte = cursor_byte;
+            if let Some(byte) = cursor_byte {
+                tab.live_right.sync(&tab.editor, Some(byte));
+                if let Some(block) = tab.live_right.block_containing(byte) {
+                    tab.live_right.pending_caret = Some((block, 0));
+                    tab.live_right.caret_follow = true;
+                }
+            }
+        }
+    }
+    let base_dir = tab
+        .document
+        .path
+        .as_deref()
+        .and_then(std::path::Path::parent);
+    let heal = state.ai.is_streaming() && state.ai_active_tab == Some(tab.id);
+    // 固定矩形子 Ui:`live::ui` 的 ScrollArea(auto_shrink false)会把父 Ui 的
+    // max_rect 往下撑,必须隔离(禅定正文同款,P3 实测出来的坑)。
+    let body_rect = ui.available_rect_before_wrap();
+    let mut body = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(body_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    // 只读列不回写共享的 cursor / selection:用局部占位接住,否则会和源码侧
+    // 抢这两个每帧镜像的槽。
+    let mut cursor_placeholder = crate::state::OutlineCursor::default();
+    let mut selection_placeholder = None;
+    crate::live::ui(
+        &mut body,
+        &mut tab.editor,
+        &mut tab.preview,
+        &state.ai,
+        &mut cursor_placeholder,
+        &mut selection_placeholder,
+        &mut tab.live_right,
+        crate::ui::editor::tab_right_editor_id(tab.id),
+        false,
+        false,
+        base_dir,
+        heal,
+        &state.keymap,
+        outbox,
+    );
 }
 
 /// 禅定模式的「退出禅定」浮层(§7)。返回其矩形供测试定位。
@@ -8561,6 +8698,142 @@ mod tests {
         assert!(
             moved >= 4,
             "5 步拖动里应至少 4 步看到线在动,实得 {moved} 步(xs={xs:?},起点 {start_x:.1})"
+        );
+    }
+
+    /// 切到分栏时对照列必须**向右滑入**,而不是从屏幕右缘飞进来
+    /// (2026-10-19 坤哥:「切换分栏的时候改成窗口向右滑动,而不是现在的
+    /// 从边上进来」)。
+    ///
+    /// **判据取「读者看得见的列左缘」**,不取内部动画值 `enter_frac` ——
+    /// 后者跟着实现走,实现改了判据就跟着改,守不住。观测通道是对照列
+    /// 背景的填充矩形(`Shape::Rect`,高度 > 400 的那一条竖带)。
+    ///
+    /// 三条断言各自独立于实现:
+    /// 1. **首帧列已在槽位左边**(左缘 < 槽位左缘):旧实现首帧贴着屏幕
+    ///    右缘(列左缘 == 槽位左缘),这条直接红;「盖着推」的语义也正是
+    ///    「列此刻还压在编辑区上」。
+    /// 2. **左缘逐帧右移**(单调不减):向右滑的物理含义。
+    /// 3. **落位后与槽位对齐**:动画收敛到槽位,不漂移。
+    ///
+    /// 退场方向另有 `compare_column_slides_closed_over_frames` 守着。
+    #[test]
+    fn compare_column_slides_right_into_place_on_enter() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let ctx = egui::Context::default();
+        ctx.set_visuals(egui::Visuals::light());
+        let mut app = LaterMdApp {
+            frameless: true,
+            ..Default::default()
+        };
+        app.state.layout.left = false;
+        // 从源码档起步,空跑到布局稳定(同 `compare_only_app` 的理由:
+        // 本组只量几何,不装字体,免得 CI 无 CJK 字体时 `.expect` 齐红)。
+        app.state.render_mode = crate::live::RenderMode::Source;
+        for _ in 0..3 {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+        }
+        // **不预读槽位**:源码档下面板是完全收起态,egui 在
+        // `show_collapsible` 里 `how_expanded == 0.0` 时提前 return
+        // (`panel.rs` 459),压根不写 `PanelState` —— 拿它当前值当槽位是
+        // 读不到东西的。槽位改由动画收敛后自然得出(见 ③)。
+
+        // 走真实归约:源码 → 写作 → 分栏(循环档序 源码 → 写作 → 分栏)。
+        app.state.apply(Message::ToggleLivePreview);
+        app.state.apply(Message::ToggleLivePreview);
+        assert_eq!(
+            app.state.render_mode,
+            crate::live::RenderMode::Split,
+            "前置:两次切换应到分栏档"
+        );
+
+        // 对照列背景竖带:够高、宽落在面板档位区间(编辑区/窗口底都是全宽,
+        // 落不进这个带宽)。取最靠右的一条 —— 动画期间列压在编辑区上,
+        // 窗口右侧还留着编辑区底色,但那条是全宽,已被带宽过滤掉。
+        // 竖带收集:动画期间同帧有三条够高的填充矩形 —— 编辑区(全宽,靠左)、
+        // **移动中的对照列**(本次要观察的)、面板自身画的槽位底色(不动)。
+        // 三者靠**宽度**区分:编辑区/窗口底是全宽(≥ 700),两条列带都落在
+        // 面板档位区间(260..=880 的默认 420)。
+        //
+        // 取「**非全宽竖带里最靠左的那条**」—— 即移动中的列。不能用
+        // `max_by`:面板画的槽位底色恒在槽位左缘,`max_by` 永远选中它,
+        // 判据就退化成「有没有画槽位」,对动画方向完全不敏感(实测踩过)。
+        let column_left = |out: &egui::FullOutput| -> Option<f32> {
+            out.shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(r)
+                        if r.rect.height() > 400.0
+                            && r.fill != egui::Color32::TRANSPARENT
+                            && (260.0..700.0).contains(&r.rect.width()) =>
+                    {
+                        Some(r.rect.left())
+                    }
+                    _ => None,
+                })
+                .min_by(|a, b| a.total_cmp(b))
+        };
+        let frame = |app: &mut LaterMdApp| -> egui::FullOutput {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+            out
+        };
+
+        // ① 首帧:列必须还在**屏幕右缘之外一侧**,即尚未落位、整块压在
+        // 编辑区上。旧观感首帧贴着槽位(= 屏幕右缘),这条直接红。
+        let first = column_left(&frame(&mut app)).expect("切到分栏后首帧应能看到对照列");
+        let slot_left = egui::PanelState::load(&ctx, egui::Id::new(COMPARE_PANEL_ID))
+            .map(|p| p.outer_rect.left())
+            .expect("切到分栏后 egui 应已建立 PanelState");
+        assert!(
+            first < slot_left - 1.0,
+            "首帧列应尚未落位、压在编辑区上(左缘 < 槽位左缘 {slot_left:.1}),\
+             实得 {first:.1} —— 这就是「从边上进来」的旧观感"
+        );
+
+        // ② 逐帧向右滑,③ 最终与槽位对齐。动画约 0.15s,无头帧按
+        // `stable_dt` 推进,数十帧内收敛。
+        let mut left = first;
+        let mut moved = 0;
+        let mut landed = false;
+        for _ in 0..60 {
+            let now = match column_left(&frame(&mut app)) {
+                Some(x) => x,
+                None => {
+                    landed = true;
+                    break;
+                }
+            };
+            assert!(
+                now >= left - 0.5,
+                "列左缘应单调向右推进(向右滑),却从 {left:.1} 退到 {now:.1}"
+            );
+            if now > left + 0.5 {
+                moved += 1;
+            }
+            if (now - slot_left).abs() <= 1.0 {
+                landed = true;
+                break;
+            }
+            left = now;
+        }
+        assert!(moved >= 4, "应至少 4 帧看到列在向右移动,实得 {moved} 帧");
+        assert!(
+            landed,
+            "60 帧内应滑到位(槽位左缘 {slot_left:.1}),停在 {left:.1}"
         );
     }
 
