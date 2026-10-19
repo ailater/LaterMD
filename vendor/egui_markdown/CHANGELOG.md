@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `row_rect_at_pos`: the screen-space rect of the painted text row containing a position, a
+  sibling of `char_index_at_pos` that shares its galley walk and row-selection rule (a position
+  on the seam between two rows resolves to the lower one). Intended for live-preview hosts that
+  anchor the scroll offset to the clicked row when a block switches between rendered and source
+  forms, so the line under the pointer stays put across the form change. Returns `None` under
+  the same conditions as `char_index_at_pos`.
 - `MarkdownLabel::estimated_height`: the estimated laid-out height of the label's content at the
   current wrap width, computed by a structural walk over the parsed tokens (per-glyph advance
   sums, per-line fence segments, construct heights) instead of shaping. Intended for hosts that
