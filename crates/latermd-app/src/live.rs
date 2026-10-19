@@ -633,11 +633,18 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
         let scale = style.heading.scales[(hashes.min(6) - 1).min(5)];
         let scaled = font_size * scale;
         let heading_lh = body_line_height(&style, scaled);
-        // ATX 前缀:弱色淡化,正文小字;行高用标题行盒,行内不劈行
-        let mut marker_format = egui::TextFormat::simple(
-            egui::FontId::new(font_size, body_family.clone()),
-            ui.visuals().weak_text_color(),
+        // ATX 前缀:幽灵语法(Obsidian/MarkText 观感)—— 与标题**同字号**,
+        // 文本色约 43% 透明度。weak 色正文小字太暗太小,用户看不见 #、
+        // 以为前缀不可编辑(#159);升到标题字号后既是明显的可编辑语法,
+        // 点击目标也够大。行高用标题行盒,行内不劈行。
+        let ghost = egui::Color32::from_rgba_unmultiplied(
+            text_color.r(),
+            text_color.g(),
+            text_color.b(),
+            110,
         );
+        let mut marker_format =
+            egui::TextFormat::simple(egui::FontId::new(scaled, body_family.clone()), ghost);
         marker_format.line_height = Some(heading_lh);
         job.sections.push(section(0..marker_len, marker_format));
         // 标题文字:vendored 同式 —— bold 族(已注册时)+ 字号缩放 +
@@ -5093,6 +5100,98 @@ mod tests {
                 .any(|(t, _)| matches!(t.as_str(), "H1" | "H2" | "代码" | "引用" | "表格")),
             "普通段落无类型徽标"
         );
+    }
+
+    /// ATX 前缀可见且可编辑(#159):①前缀段是幽灵色(文本色低透明度,
+    /// 不是弱色小字);②光标放块首敲 `#`,标题升 H2 —— 文本真实改写,
+    /// 徽标跟成 H2。改级别 = 直接编辑前缀,不需要额外交互。
+    #[test]
+    fn live_heading_marker_ghost_visible_and_level_editable() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("# 标题甲乙丙\n\n正文段。\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(0),
+            ..LiveState::default()
+        };
+        let id = egui::Id::new("live-marker-edit").with(("live-block", 0));
+        let mut st = egui::widgets::text_edit::TextEditState::default();
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(0),
+        )));
+        st.store(&ctx, id);
+        ctx.memory_mut(|mem| mem.request_focus(id));
+        let mut frame = |time: f64, events: Vec<egui::Event>| {
+            let mut outbox = Vec::new();
+            let mut selection = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |panel| {
+                    super::ui(
+                        panel,
+                        &mut editor,
+                        &mut preview,
+                        &AiState::default(),
+                        &mut cursor,
+                        &mut selection,
+                        &mut live,
+                        egui::Id::new("live-marker-edit"),
+                        false,
+                        false,
+                        None,
+                        false,
+                        &crate::keymap::Keymap::builtin(),
+                        &mut outbox,
+                    );
+                },
+            );
+            let texts: Vec<(String, egui::Color32)> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(t) => Some((
+                        t.galley.text().to_owned(),
+                        t.galley
+                            .job
+                            .sections
+                            .first()
+                            .map(|s| s.format.color)
+                            .unwrap_or_default(),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            output.drop_without_applying_deltas();
+            texts
+        };
+
+        // 稳态:标题编辑视图渲染,前缀段为幽灵色(低透明度文本色)
+        let _ = frame(0.0, Vec::new());
+        let texts = frame(0.1, Vec::new());
+        let marker_color = texts
+            .iter()
+            .find(|(t, _)| t.starts_with('#'))
+            .map(|(_, color)| *color)
+            .expect("标题编辑视图含 # 前缀");
+        assert!(
+            (60..200).contains(&marker_color.a()),
+            "前缀是幽灵色(文本色降透明度),不是弱色实心/全文色:{marker_color:?}"
+        );
+
+        // 块首敲 #:升 H2 —— 文本真实改写,徽标跟成 H2
+        let _ = frame(0.2, vec![egui::Event::Text("#".into())]);
+        let texts = frame(0.3, Vec::new());
+        // 编辑视图文本以 "## " 开头 = 源码真实改写(galley 文本即编辑缓冲切片)
+        assert!(
+            texts.iter().any(|(t, _)| t.starts_with("## 标题甲乙丙")),
+            "块首敲 # 真实改写源码:编辑视图应含 ## 前缀"
+        );
+        assert!(texts.iter().any(|(t, _)| t == "H2"), "徽标跟随级别变成 H2");
     }
 
     /// 大纲跳转消费:Live 模式下 jump_to(与源码模式同一入口、同一时序
