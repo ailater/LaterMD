@@ -553,20 +553,32 @@ impl LaterMdApp {
         // 状态源。完全收起时 egui 只画右缘一根细把手(旧口径同款),
         // `add_contents` 不再执行。
         let mut compare_open = split;
-        // **进场动画不走 egui 的收展通道**(2026-10-19 坤哥:「切换分栏时改成
-        // 向右滑动,而不是现在的从边上进来」)。那条通道的实现是把面板**向
-        // 固定边(右缘)平移**并按可见部分裁剪(`panel.rs` `slide_distance`/
-        // `visible_outer_rect`),所以**只可能**得到「从屏幕右缘飞进来」。
+        // **进场动画分两条通道**(2026-10-19 坤哥:「切换分栏时改成向右滑动」
+        // +「源码模式从右往左是之前的模式,别改」):
         //
-        // 改法是自己驱动一条独立动画 `enter-slide`,并在进场期间把 egui 的
+        // - `写作 → 分栏`:自己驱动 `enter-slide`,列整块盖在编辑区上向右
+        //   推进到槽位。
+        // - `源码 → 分栏`:**走 egui 原生的从右缘向左进入**,即本 PR 之前的
+        //   观感,一个字都不改。
+        //
+        // 两条通道的**起点视觉完全一样**(编辑区都是满宽的源码 TextEdit),
+        // 单看当前 `render_mode` 分不出来 —— 故来源由归约记在
+        // `state.split_enter_from`(见该字段文档)。
+        //
+        // 向右滑那条必须绕开 egui 的收展通道:它的实现是把面板**向固定边
+        // (右缘)平移**并按可见部分裁剪(`panel.rs` `slide_distance`/
+        // `visible_outer_rect`),所以**只可能**得到「从屏幕右缘飞进来」。
+        // 绕法是自己驱动一条独立动画 `enter-slide`,并在进场期间把 egui 的
         // 收展比例**钉死在展开端点**:`animation_time = 0` 时
         // `animate_bool` 的 `elapsed / 0` 必非有限值 ⇒ 落 `end` 分支,面板
         // 第一帧即满宽(编辑区当帧收窄);位移、裁剪与正文绘制全在 ⑤'(中央
         // 编辑区**之后**,否则盖不住编辑区)。
-        let enter_frac = ui
-            .ctx()
-            .animate_bool_responsive(egui::Id::new(COMPARE_PANEL_ID).with("enter-slide"), split);
-        if split && enter_frac < 1.0 {
+        let slide_right = split && self.state.split_enter_from == crate::live::RenderMode::Live;
+        let enter_frac = ui.ctx().animate_bool_responsive(
+            egui::Id::new(COMPARE_PANEL_ID).with("enter-slide"),
+            slide_right,
+        );
+        if slide_right && enter_frac < 1.0 {
             ui.ctx().animate_bool_with_time(
                 egui::Id::new(COMPARE_PANEL_ID).with("animation"),
                 true,
@@ -628,18 +640,19 @@ impl LaterMdApp {
                     let avail = ui.available_rect_before_wrap();
                     ui.set_min_width(avail.width());
                     ui.expand_to_include_y(avail.max.y);
-                    // **进场(分栏)的正文不在这里画**(2026-10-19 坤哥:「切换
-                    // 分栏时改成窗口向右滑动,而不是现在的从边上进来」)。
-                    // 本 Ui 的 clip 被 egui 钉在槽位上(`panel.rs`
-                    // `set_clip_rect(visible_outer_rect)`),而进场要的正是
-                    // 「列盖在编辑区上向右推进」—— 画在这里必被裁掉左半截,
-                    // 退化回「从边上进来」。进场的正文在 ⑤'(中央编辑区之后)
-                    // 单独画一遍。
+                    // **「写作 → 分栏」的正文不在这里画**(2026-10-19 坤哥:
+                    // 「切换分栏时改成窗口向右滑动」)。本 Ui 的 clip 被 egui
+                    // 钉在槽位上(`panel.rs` `set_clip_rect(visible_outer_rect)`),
+                    // 而那条通道要的正是「列盖在编辑区上向右推进」—— 画在这里
+                    // 必被裁掉左半截,退化回「从边上进来」。它的正文在 ⑤'
+                    // (中央编辑区之后)单独画一遍。
                     //
-                    // **退场仍在这里画**:那条路径坤哥明确「不动」,而
-                    // egui 的滑出动画(`slide_distance` + 可见部分 clip)正是
-                    // 现状观感。两条路径按 `split` 互斥,任一帧只画一次。
-                    if !split {
+                    // **其余全部在这里画**:「源码 → 分栏」要保留 egui 原生的
+                    // 从右缘进入(坤哥同轮:「源码模式从右往左是之前的模式」),
+                    // 以及退场 —— 后者坤哥明确「不动」,而 egui 的滑出动画
+                    // (`slide_distance` + 可见部分 clip)正是现状观感。
+                    // 三者按 `slide_right` 互斥,任一帧只画一次。
+                    if !slide_right {
                         compare_column_body(ui, self);
                     }
                 });
@@ -917,19 +930,18 @@ impl LaterMdApp {
             }
         }
 
-        // ⑤' 对照列正文:面板(④)只占位,正文在这里画第二遍。
+        // ⑤' 对照列正文:面板(④)只占位,正文在这里画第二遍。**只服务
+        // 「写作 → 分栏」那一条**(见 ④ 的 `slide_right` 文档)。
         //
-        // **为什么必须在中央编辑区之后**:进场要的观感是「列整块盖在编辑区
-        // 上,由左向右推进到槽位」。而 ④ 的 Ui 被 egui 把 clip 钉在槽位上
+        // **为什么必须在中央编辑区之后**:那条通道要的观感是「列整块盖在
+        // 编辑区上,由左向右推进到槽位」。而 ④ 的 Ui 被 egui 把 clip 钉在槽位上
         // (`panel.rs` `set_clip_rect(visible_outer_rect)`),画在 ④ 会被裁掉
         // 左半截,退化回「从边上进来」。这里用根层另开一个子 Ui,clip 由
         // 本函数自己给,才盖得住编辑区。
         //
-        // 退场(非 Split)走 egui 原生滑出,正文仍由 ④ 的面板 Ui 画(`split`
-        // 为假时那边才调 `compare_column_body`)—— 坤哥 2026-10-19 明确
-        // 「进场改、退场不动」,故退场**刻意**保留现状实现,这里只在
-        // `split` 为真时接管。
-        if split {
+        // 「源码 → 分栏」与退场都走 egui 原生滑入/滑出,正文由 ④ 的面板 Ui
+        // 画(那边 `!slide_right` 时才调 `compare_column_body`)。
+        if slide_right {
             if let Some(slot) = compare_slot {
                 let dx = -(1.0 - enter_frac) * slot.width();
                 let rect = egui::Rect::from_min_max(
@@ -8834,6 +8846,135 @@ mod tests {
         assert!(
             landed,
             "60 帧内应滑到位(槽位左缘 {slot_left:.1}),停在 {left:.1}"
+        );
+    }
+
+    /// 从**源码档**切到分栏时,对照列必须保留**旧观感**(从屏幕右缘向左
+    /// 进入),不能跟着写作档一起改成向右滑
+    /// (2026-10-19 坤哥:「源码模式从右往左,是之前的模式,别改」)。
+    ///
+    /// 与 `compare_column_slides_right_into_place_on_enter` 是**一对镜像
+    /// 判据**:那条守「写作 → 分栏」向右滑(列**压盖**编辑区推进),本条守
+    /// 「源码 → 分栏」从右缘进(列**待在窗口外**推进)。两条同时绿,才说明
+    /// 分栏动画**按来源分流**真的成立 —— 只写一条的话,把 `slide_right`
+    /// 写成恒真或恒假都还有一条是绿的。
+    ///
+    /// **判据取纯屏幕几何「列右缘相对窗口右缘的位置」**,既不取内部动画值,
+    /// 也不读 `PanelState`:后者在进场首帧存的是**动画起点**(实测与列同位),
+    /// 拿它当「最终槽位」会把两条判据混成同一个数,失去区分力。
+    ///
+    /// 1. **首帧列右缘超出窗口右缘**(整块还在屏幕外):旧观感的定义特征。
+    ///    「向右滑」首帧列已压在编辑区上、右缘 == 窗口右缘,这条直接红。
+    /// 2. **逐帧单调向左**:从右往左进的物理含义。
+    /// 3. **落位时列右缘 == 窗口右缘**(右缘贴齐,不漂移)。
+    ///
+    /// 源码档切分栏走标题栏三段开关的**直达**语义(`SetRenderMode`),不是
+    /// 循环档序 —— 循环是 源码 → 写作 → 分栏,那样进场的来源会是写作档。
+    #[test]
+    fn compare_column_enters_from_right_edge_when_switching_from_source() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let screen_right = screen.right();
+        let ctx = egui::Context::default();
+        ctx.set_visuals(egui::Visuals::light());
+        let mut app = LaterMdApp {
+            frameless: true,
+            ..Default::default()
+        };
+        app.state.layout.left = false;
+        app.state.render_mode = crate::live::RenderMode::Source;
+        for _ in 0..3 {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+        }
+        // 三段开关的直达语义:源码档直接点到分栏段。
+        app.state
+            .apply(Message::SetRenderMode(crate::live::RenderMode::Split));
+        assert_eq!(
+            app.state.render_mode,
+            crate::live::RenderMode::Split,
+            "前置:直达应到分栏档"
+        );
+        assert_eq!(
+            app.state.split_enter_from,
+            crate::live::RenderMode::Source,
+            "前置:本次进场来源应是源码档(决定走旧观感通道)"
+        );
+
+        // 观测通道与镜像测试同款:对照列背景的填充竖带,取 (左缘, 右缘)。
+        // 旧观感期间同帧只有这一条(正文在面板内画,面板 clip 钉在可见
+        // 部分),不存在「移动列 + 槽位底色」两条并存的情形。
+        let column_span = |out: &egui::FullOutput| -> Option<(f32, f32)> {
+            out.shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(r)
+                        if r.rect.height() > 400.0
+                            && r.fill != egui::Color32::TRANSPARENT
+                            && (260.0..700.0).contains(&r.rect.width()) =>
+                    {
+                        Some((r.rect.left(), r.rect.right()))
+                    }
+                    _ => None,
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+        };
+        let frame = |app: &mut LaterMdApp| -> egui::FullOutput {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+            out
+        };
+
+        // ① 首帧整块列还在**窗口之外**(右缘超出屏幕右缘)。
+        let (first_left, first_right) =
+            column_span(&frame(&mut app)).expect("切到分栏后首帧应能看到对照列");
+        assert!(
+            first_right > screen_right + 1.0,
+            "源码档切入分栏时列应整块还在窗口右缘之外、从右往左进(右缘 > \
+             {screen_right:.1}),实得右缘 {first_right:.1}(左缘 {first_left:.1})\
+             —— 这已经是「向右滑」的观感了"
+        );
+
+        // ② 逐帧向左,③ 落位时右缘贴齐窗口右缘。
+        let mut left = first_left;
+        let mut moved = 0;
+        let mut landed = false;
+        for _ in 0..60 {
+            let (now_left, now_right) = match column_span(&frame(&mut app)) {
+                Some(x) => x,
+                None => {
+                    landed = true;
+                    break;
+                }
+            };
+            assert!(
+                now_left <= left + 0.5,
+                "列左缘应单调向左推进(从右往左进),却从 {left:.1} 退到 {now_left:.1}"
+            );
+            if now_left < left - 0.5 {
+                moved += 1;
+            }
+            if (now_right - screen_right).abs() <= 1.0 {
+                landed = true;
+                break;
+            }
+            left = now_left;
+        }
+        assert!(moved >= 4, "应至少 4 帧看到列在向左移动,实得 {moved} 帧");
+        assert!(
+            landed,
+            "60 帧内应滑到位(列右缘贴齐窗口右缘 {screen_right:.1}),停在左缘 {left:.1}"
         );
     }
 

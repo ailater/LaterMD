@@ -424,6 +424,18 @@ pub struct State {
     /// 编辑器渲染模式(P3 Live Preview 的那个标志;源码 ↔ Live 共用同一
     /// rope buffer,切换无恢复逻辑)。
     pub render_mode: RenderMode,
+    /// **本次进入分栏档是从哪一档切过来的**(2026-10-19 坤哥:「源码模式从
+    /// 右往左是之前的模式,别改」)。进场动画按它分两条通道:
+    /// `Live` → 列整块盖在编辑区上向右推进;`Source`/其他 → 走 egui 原生的
+    /// 「从右缘向左进入」。
+    ///
+    /// 为什么必须存来源而不是在 UI 侧推断:两条路径的**起点视觉完全一样**
+    /// (编辑区都是满宽的源码 TextEdit),单看当前 `render_mode` 无法区分
+    /// 「写作 → 分栏」与「源码 → 分栏」—— 而它们要的动画方向恰好相反。
+    ///
+    /// 只在 `set_render_mode` 的进场分支写一次,之后整个进场动画期间
+    /// 保持不变(动画跨帧,中途被改会让列在两个方向间抽搐)。
+    pub split_enter_from: RenderMode,
     /// 设置对话框(外观 / 快捷键 / AI / MCP / 图片 五页)。
     pub settings: SettingsState,
     /// 「关于 LaterMD」对话框(#71 M1):开关在归约,内容只读;M2
@@ -573,6 +585,11 @@ impl Default for State {
             ai_key: AiKeyState::default(),
             mcp: McpState::default(),
             render_mode: RenderMode::default(),
+            // 冷启动恢复到分栏档时初值取 `Source` ⇒ 走 egui 原生的从右缘
+            // 进入。语义上正确:「向右滑」表达的是「你刚从写作档切过来」,
+            // 而启动恢复并没有"上一档"这回事,不该播那条动画。真正的进场
+            // 由 `set_render_mode` 覆写这个值。
+            split_enter_from: RenderMode::Source,
             keymap: Keymap::builtin(),
             settings: SettingsState::default(),
             about: crate::ui::about::AboutState::default(),
@@ -3109,6 +3126,13 @@ impl State {
         }
         let entering_live = self.render_mode == RenderMode::Source && target == RenderMode::Live;
         let leaving_live = self.render_mode == RenderMode::Live && target != RenderMode::Live;
+        // 进场来源只记「切进来之前是哪一档」。分栏动画按它分通道(见
+        // `split_enter_from` 文档):写作档切入走向右滑,源码档切入保留
+        // 旧观感(从右缘向左进)。目标不是 Split 时**不写** —— 留着上一次的
+        // 值即可,真正读它的只有进场那几帧。
+        if target == RenderMode::Split {
+            self.split_enter_from = self.render_mode;
+        }
         self.render_mode = target;
         self.layout.render_mode = Some(self.render_mode);
         match self.render_mode {
