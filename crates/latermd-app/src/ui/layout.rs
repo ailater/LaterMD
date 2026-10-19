@@ -596,7 +596,7 @@ impl LaterMdApp {
                     crate::ui::workbench::pane_heading(ui, "对照", "只读");
                     let LaterMdApp { state, outbox, .. } = self;
                     let tab = state.tabs.current_mut();
-                    // 只读:浏览 + 硬锁(点击/双击/跳转都不进编辑、不抢焦点)。
+                    // 只读:浏览 + 硬锁(点击/跳转都不进编辑、不抢焦点)。
                     // 每帧置位,与禅定的临时浏览同款手法 —— 不写回 State。
                     tab.live_right.browse_only = true;
                     tab.live_right.browse_enabled = false;
@@ -1288,7 +1288,7 @@ impl LaterMdApp {
                     // 禅定正文走 Live 浏览态(P3,live-unify-plan):块级富
                     // 渲染、只读 —— 与当前 render_mode 解耦,源码模式下进
                     // 禅定同样看富渲染。浏览是**帧内临时值**:每帧强制
-                    // browse_only + 关 browse_enabled(点击/双击都不进编辑、
+                    // browse_only + 关 browse_enabled(点击不进编辑、
                     // 不抢焦点),不碰持久化的 render_mode(R3);退出禅定的
                     // 交互还原在 `State::toggle_zen`(browse_enabled 复位,
                     // 写作态由 live::ui 的既定翻转自愈)。
