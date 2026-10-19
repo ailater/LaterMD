@@ -2217,7 +2217,7 @@ impl State {
             // 退出即复位悬停导航(#57):显隐判定随布局分叉失效,残置的可见位
             // 会在重进禅定时凭空闪现一列(动画残值由绘制侧的全隐帧钉回 0)。
             self.zen_nav = ZenNavState::default();
-            // P3(live-unify):禅定帧强制过 browse_enabled=false(点击/双击
+            // P3(live-unify):禅定帧强制过 browse_enabled=false(点击
             // 都不进编辑),退出即还原浏览优先的交互语义 —— 与切入 Live 的
             // 既有口径同源。browse_only 不动:若禅定前正在写作(活动块仍在),
             // 下一帧 live::ui 的既定翻转(浏览态遇活动块即写作)自愈。
@@ -3122,7 +3122,7 @@ impl State {
                 tab.live.pending_range = None;
                 let byte = tab.cursor.byte;
                 // 从源码档切入时保留源码插入点；新打开/切换文档时
-                // cursor.byte 通常为空，仍保持浏览态，等待用户双击。
+                // cursor.byte 通常为空，仍保持浏览态，等待用户单击进编辑。
                 if entering_live {
                     if let Some(byte) = byte {
                         tab.live.browse_only = false;

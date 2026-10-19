@@ -4,8 +4,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use egui::{
-  text::LayoutJob, text_selection::LabelSelectionState, Align, Color32, Context, CursorIcon, FontId, FontSelection, Id,
-  Layout, OpenUrl, Pos2, Rect, Response, Sense, Stroke, TextWrapMode, Ui, UiBuilder, Vec2,
+  text::LayoutJob, text_selection::LabelSelectionState, vec2, Align, Color32, Context, CursorIcon, FontId,
+  FontSelection, Id, Layout, OpenUrl, Pos2, Rect, Response, Sense, Stroke, TextWrapMode, Ui, UiBuilder, Vec2,
 };
 use epaint::{
   pos2,
@@ -603,6 +603,39 @@ fn pos_to_char_index(galley: &Galley, pos: Pos2) -> usize {
     char_index += row.char_count_including_newline().0;
   }
   char_index
+}
+
+/// Screen-space rect of the painted text row containing `pos`.
+///
+/// Sibling of [`char_index_at_pos`] that returns the row's geometry instead of
+/// a character index: live-preview hosts anchor the scroll offset to the
+/// clicked row when a block switches between rendered and source forms, so the
+/// line under the pointer stays put across the form change. Row selection uses
+/// the same rule as `char_index_at_pos` (a position on the seam between two
+/// rows resolves to the lower one), and the rect spans the full galley width.
+///
+/// Returns `None` when the label was not rendered this frame or `pos` falls
+/// outside every painted text galley — the same conditions as
+/// [`char_index_at_pos`].
+pub fn row_rect_at_pos(ui: &egui::Ui, id: egui::Id, pos: Pos2) -> Option<Rect> {
+  let (frame, galleys) = ui.data(|d| d.get_temp::<(u64, Vec<HitGalley>)>(hit_galleys_id(id)))?;
+  (frame == ui.ctx().cumulative_pass_nr()).then_some(())?;
+  for hit in &galleys {
+    let bottom = hit.origin.y + hit.galley.size().y;
+    if pos.y >= hit.origin.y && pos.y <= bottom {
+      let local_y = pos.y - hit.origin.y;
+      for row in &hit.galley.rows {
+        if local_y <= row.max_y() {
+          return Some(Rect::from_min_max(
+            hit.origin + vec2(0.0, row.min_y()),
+            hit.origin + vec2(hit.galley.size().x, row.max_y()),
+          ));
+        }
+      }
+      return None;
+    }
+  }
+  None
 }
 
 /// Does token `i` start a new block within a flushed text run?

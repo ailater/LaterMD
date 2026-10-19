@@ -112,7 +112,9 @@ pub struct LiveState {
     /// 正在以源码编辑的块序号;`None` = 没有块获得焦点。
     pub active: Option<usize>,
     /// 打开文档后的浏览态。浏览态只绘制富文本，不自动抢占编辑焦点；
-    /// 左键双击块才进入写作态。
+    /// 左键单击块即进入写作态（2026-10-19 拍板，取代早期的双击门槛：
+    /// 双击进编辑与 MarkText 的「点哪编哪」手感相悖，且单击进块的
+    /// 视口锚定依赖同一入口）。
     pub browse_only: bool,
     /// 是否启用打开文档时的浏览态交互。默认关闭以保持无头测试夹具和
     /// 直接构造 LiveState 的既有语义；真实切入 Live 时由 State 打开。
@@ -168,6 +170,14 @@ pub struct LiveState {
     /// pending_caret 同帧置位、同帧消费;光标跟随路径入口处显式清,
     /// 防残留的旧意图劫持一次普通跳转。
     pub(crate) anchor_align_y: Option<f32>,
+    /// 点击进编辑的视口锚定（块切换防跳变）：(目标块, 被点击富渲染行的
+    /// 屏幕顶 y)。块从富渲染切到源码形态高度必变，视口内内容整体平移
+    /// —— 点击帧已按预测把 ScrollArea 偏移先行修正（见循环内
+    /// `pending_shift` 的产出与帧末落账），本字段承载**落地帧**的残差
+    /// 校正：实测源码光标行顶与锚点的差超过 0.5px 即做一次同帧补偿。
+    /// 与 pending_caret 同生共死：jump_to/路由覆盖 pending 时一并清空，
+    /// 落地帧消费即清；`None` = 无待校正锚点。
+    pub(crate) toggle_anchor: Option<(usize, f32)>,
     /// 富渲染块链接改写的块级缓存(#63;#65 M2 起高亮层并入同一条缓存):
     /// 块序号 → (源码指纹, 改写后块文本, 高亮层映射, 任务层映射)。
     /// 修订号前进时保留未变化块的条目，只让源码指纹变化的块重新改写，
@@ -188,7 +198,7 @@ impl LiveState {
             // 写作态块表没变但还没有活动块(首次进入 Live 模式):按光标补定位,
             // 不必等下一次编辑 —— 否则要「先敲一个字」才出现可编辑的块。
             // 浏览态没有编辑意图，不能因为源码模式遗留的光标而自动抢
-            // 出 TextEdit；进入写作只由双击或明确的程序跳转触发。
+            // 出 TextEdit；进入写作只由单击或明确的程序跳转触发。
             if self.active.is_none() && !self.browse_only {
                 self.active = cursor_byte.and_then(|byte| self.block_containing(byte));
             }
@@ -386,6 +396,7 @@ impl LiveState {
         self.followed_byte = None;
         self.mouse_anchor = None;
         self.anchor_align_y = None;
+        self.toggle_anchor = None;
         self.rich_cache.clear();
         self.block_hashes.clear();
     }
@@ -537,6 +548,45 @@ fn locked_jump_landing(ui: &egui::Ui, live: &mut LiveState, rect: egui::Rect) {
     }
 }
 
+/// 预测块源码 TextEdit 的布局几何：(外框高, 光标行顶相对块顶的 y)。
+///
+/// 与 egui TextEdit multiline 的 default_layouter 完全同参 shaping ——
+/// Monospace 字号、`extra_text_line_spacing` 行距、可用宽 − 左右内距
+/// (4+4) 的折行宽、`keep_trailing_whitespace`；外框高 = galley 高 +
+/// 上下内距 4px，光标行顶 = galley 行顶 + 上内距 2px。用于点击帧预判
+/// 「块切源码后被点击行落到哪里」，让 ScrollArea 偏移在内容重排**之前**
+/// 修正（重排发生在下一帧，偏移先行到位则重排帧不跳）；预测残差由
+/// 落地帧按实测光标行做一次校正（`LiveState::toggle_anchor`）。
+fn predict_source_layout(ui: &egui::Ui, text: &str, caret_char: usize) -> (f32, f32) {
+    let font_id = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Monospace)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::monospace(14.0));
+    let row_height = ui.fonts_mut(|f| f.row_height(&font_id));
+    let line_height = row_height + ui.spacing().extra_text_line_spacing;
+    let wrap_width = (ui.available_width() - 8.0).max(24.0);
+    let mut job =
+        egui::text::LayoutJob::simple(text.to_owned(), font_id, egui::Color32::WHITE, wrap_width);
+    job.keep_trailing_whitespace = true;
+    for section in &mut job.sections {
+        section.format.line_height = Some(line_height);
+    }
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let caret_row = galley.pos_from_cursor(egui::text::CCursor::new(caret_char));
+    let height = galley.size().y.max(line_height) + 4.0;
+    (height, caret_row.min.y + 2.0)
+}
+
+/// 块内「可见内容末尾」的块内字符偏移：块源码尾部的换行（含块间空行
+/// —— 块表规定空行归前一块）是幻影行，方向键路由把它们视作块尾边界，
+/// 光标到可见内容末尾即按一次方向键就路由到相邻块，不必先穿过 1–2 个
+/// 看不见的空行（写作模式键盘「发粘」的主因）。
+fn visible_char_len(block_text: &str) -> usize {
+    block_text.trim_end_matches('\n').chars().count()
+}
+
 /// 滚动探针的 data 键(P3,与预览 scroll_probe_id 同款,按编辑器 id 分标签)。
 /// `pub(crate)`:布局层测试读右栏对照列的探针断言滚轮锚点落地。
 pub(crate) fn scroll_probe_id(editor_id: egui::Id) -> egui::Id {
@@ -587,7 +637,7 @@ pub fn ui(
 
     // 归约侧的大纲跳转、格式动作和测试/恢复路径可以预先指定活动块；
     // 这类明确的程序动作应直接进入编辑态。普通打开文档时活动块为空，
-    // 仍保持浏览态，等待左键双击。
+    // 仍保持浏览态，等待左键单击进编辑。
     if live.browse_only && live.active.is_some() {
         live.browse_only = false;
     }
@@ -637,6 +687,9 @@ pub fn ui(
     if let Some(char_idx) = cursor.jump_to.take() {
         let byte = editor.char_to_byte(char_idx);
         if let Some(block) = live.block_containing(byte) {
+            // 跳转覆盖 pending_caret,点击锚定一并作废(它只对「点击块 →
+            // 落地」这一对帧有意义)。
+            live.toggle_anchor = None;
             if live.browse_locked {
                 live.pending_caret = Some((block, 0));
                 live.pending_range = None;
@@ -663,6 +716,12 @@ pub fn ui(
     let mut ime_restore_focus: Option<egui::Id> = None;
     let mut activate: Option<(usize, usize)> = None;
     let mut route: Option<(usize, usize)> = None;
+    // 块切换视口锚定(点击帧产出,帧末 `activate` 消费点落账):shift =
+    // 要写进 ScrollArea 偏移的补偿量;anchor = 交给落地帧做残差校正的
+    // (目标块, 点击行屏幕顶)。定义见富渲染臂 `pending_shift` 产出点与
+    // `LiveState::toggle_anchor`。
+    let mut pending_shift: Option<f32> = None;
+    let mut pending_anchor: Option<(usize, f32)> = None;
     // 选区 AI 浮标(#61 M1)的锚点素材:活动块持久选区(**文档坐标**字符
     // 区对,块内捕获时换算)与尾端光标条屏幕矩形,活动块分支内捕获、
     // ScrollArea 之后消费(命中区同层末尾注册,与源码模式同一纪律)。
@@ -674,10 +733,14 @@ pub fn ui(
     // 逐 handler 记占位区,ScrollArea 之后统一消费。
     let emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>> = Default::default();
 
-    // ScrollArea 状态键:ScrollArea 在 begin() 里以 `panel.make_persistent_id(id_salt)`
-    // 派生,内容闭包里的 `ui` 是子 Ui、id 链不同 —— 锚定读写必须用 panel 级
-    // 派生的同一个键,先在此处取好。
-    let scroll_state_id = panel.make_persistent_id(editor_id.with("live-scroll"));
+    // ScrollArea 状态键:ScrollArea 在 begin() 里以 `panel.make_persistent_id(
+    // IdSalt::new(id_salt))` 派生 —— **必须经 IdSalt 包一层**,裸 `Id` 直接进
+    // `make_persistent_id` 哈希的是 Id 本体,与 IdSalt 的哈希不同源,得到的
+    // 是另一个键(2026-10-19 实测踩过:State::load 恒 MISS,#111 B 的
+    // estimate_drift 落账因此一直静默无效)。内容闭包里的 `ui` 是子 Ui、
+    // id 链不同 —— 锚定读写必须用 panel 级派生的同一个键,先在此处取好。
+    let scroll_state_id =
+        panel.make_persistent_id(egui::IdSalt::new(editor_id.with("live-scroll")));
     let scrolled =
         egui::ScrollArea::vertical()
             // id 必须带 `editor_id`:同一文档可能被两个实例渲染(主写作列 +
@@ -697,18 +760,18 @@ pub fn ui(
                 // 不补偿。
                 if block_count == 0 {
                     if live.browse_only {
-                        // 空文档的浏览态没有可渲染块，只显示非编辑提示。双击
+                        // 空文档的浏览态没有可渲染块，只显示非编辑提示。单击
                         // 提示后下一帧才创建 TextEdit，避免打开新文档就抢焦点。
-                        // 双击同样过 browse_enabled 闸(P3):禅定强制浏览时
-                        // 双击提示不得进写作 —— 与富块的双击入口同一判定。
+                        // 单击同样过 browse_enabled 闸(P3):禅定强制浏览时
+                        // 单击提示不得进写作 —— 与富块的单击入口同一判定。
                         let response = ui.add(
                             egui::Label::new(
-                                egui::RichText::new("双击此处开始写作")
+                                egui::RichText::new("单击此处开始写作")
                                     .color(ui.visuals().weak_text_color()),
                             )
                             .sense(egui::Sense::click()),
                         );
-                        if response.double_clicked() && live.browse_enabled {
+                        if response.clicked() && live.browse_enabled {
                             live.browse_only = false;
                         }
                     } else {
@@ -863,7 +926,9 @@ pub fn ui(
                         continue;
                     }
                     if !live.browse_only && live.active == Some(index) {
-                        let char_len = live.block_char_len(editor, index);
+                        // 可见内容末尾(幻影行之前的最后一个字符位置),跨块
+                        // 路由的块尾判定边界;定义见 [`visible_char_len`]。
+                        let visible_end = visible_char_len(block_text);
                         let lines = block_text.lines().count().max(1);
                         let mut buffer = BlockBuffer {
                             buffer: editor,
@@ -881,7 +946,7 @@ pub fn ui(
                             .desired_width(f32::INFINITY)
                             .desired_rows(lines.clamp(1, 40))
                             // 与源码编辑器同样锁定焦点。活动块仍可由本模块的
-                            // 双击/单击路由显式切换，普通工具条、滚动和预览
+                            // 单击路由显式切换，普通工具条、滚动和预览
                             // 控件不会让写作插入点被 egui 无意收回。
                             .lock_focus(true);
                         // 活动块无输入框式外框(2026-10-10 mac 精修全平台化,
@@ -889,6 +954,16 @@ pub fn ui(
                         let edit = edit
                             .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)));
                         let output = edit.show(ui);
+                        // 活动块源码形态的实测高(块切换视口锚定的塌缩侧输入,
+                        // 与富渲染臂的 `live-render-h` 同款记账):下一帧本块
+                        // 塌缩回富渲染时,点击帧用「富渲染估高 − 源码实测」
+                        // 预判它对下方内容造成的位移。
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(
+                                editor_id.with(("live-src-h", index)),
+                                output.response.response.rect.height(),
+                            )
+                        });
                         // 右键菜单(context-menu-plan §3 M1):活动块与源码
                         // 编辑器同一挂点,条目表共用;块内坐标落光标见
                         // editor_menu::attach。
@@ -947,19 +1022,32 @@ pub fn ui(
                             .cursor
                             .char_range()
                             .map(|range| range.primary.index.0);
-                        // 跨块 caret 路由:块首按 ↑ 去上一块末尾;块尾按 ↓ 去下一块开头
+                        // 跨块 caret 路由:块首按 ↑/← 去上一块可见末尾;块尾
+                        // (可见内容末尾,含幻影行)按 ↓/→ 去下一块开头。四个
+                        // 方向同一语义,Shift 按住时一律不路由 —— 选区扩展
+                        // 不能跨块(选区活在单个 TextEdit 的 state 里),宁可
+                        // 原地不动也别把用户正在拉的选择打断并清空。
                         if output.response.response.has_focus() {
+                            let modifiers = ui.input(|input| input.modifiers);
+                            let routing_allowed = !modifiers.shift;
                             let at_start = caret == Some(0);
-                            let at_end = caret == Some(char_len);
-                            if ui.input(|input| input.key_pressed(egui::Key::ArrowUp))
-                                && at_start
+                            let at_end = caret.is_some_and(|caret| caret >= visible_end);
+                            let prev_end = (index > 0).then(|| {
+                                let prev = &editor.text()[live.blocks[index - 1].clone()];
+                                visible_char_len(prev)
+                            });
+                            if routing_allowed
                                 && index > 0
+                                && at_start
+                                && (ui.input(|input| input.key_pressed(egui::Key::ArrowUp))
+                                    || ui.input(|input| input.key_pressed(egui::Key::ArrowLeft)))
                             {
-                                let target = index - 1;
-                                route = Some((target, live.block_char_len(editor, target)));
-                            } else if ui.input(|input| input.key_pressed(egui::Key::ArrowDown))
-                                && at_end
+                                route = Some((index - 1, prev_end.unwrap_or(0)));
+                            } else if routing_allowed
                                 && index + 1 < block_count
+                                && at_end
+                                && (ui.input(|input| input.key_pressed(egui::Key::ArrowDown))
+                                    || ui.input(|input| input.key_pressed(egui::Key::ArrowRight)))
                             {
                                 route = Some((index + 1, 0));
                             }
@@ -1193,6 +1281,32 @@ pub fn ui(
                                     }
                                 }
                                 live.caret_follow = false;
+                                // 点击锚定的残差校正(块切换防跳变的收尾):点击
+                                // 帧的预测(源码同参 shaping + 上一活动块富渲染
+                                // 估高)与实测源码光标行顶的差通常 <1px,超出
+                                // 即把偏移再修一次 —— 本帧内容已画完,修正对
+                                // 下一帧生效,量级亚像素/一两个像素,肉眼无感。
+                                if let Some((anchor_block, anchor_top)) = live.toggle_anchor {
+                                    if anchor_block == index {
+                                        let landed_row = output
+                                            .galley
+                                            .pos_from_cursor(egui::text::CCursor::new(char_idx));
+                                        let residual =
+                                            output.galley_pos.y + landed_row.min.y - anchor_top;
+                                        if residual.abs() > 0.5 {
+                                            if let Some(mut scroll) =
+                                                egui::scroll_area::State::load(
+                                                    ui.ctx(),
+                                                    scroll_state_id,
+                                                )
+                                            {
+                                                scroll.offset.y += residual;
+                                                scroll.store(ui.ctx(), scroll_state_id);
+                                            }
+                                        }
+                                        live.toggle_anchor = None;
+                                    }
+                                }
                             }
                         }
                         if let Some(index) = follow {
@@ -1345,17 +1459,18 @@ pub fn ui(
                         // 富渲染块刚画出,帧内命中表把点击点映到渲染文本字符,
                         // 经两张改写映射逆穿回块源码字节;文本 galley 之外回退
                         // 最近子块起点,全落空(块被剔除等)保持旧行为落块尾。
-                        // 落点不滚动跟随:指针刚把视口定位到点击处。
-                        // 浏览态只响应滚动和左键双击，不因单击抢入插入模式；
-                        // 已经进入写作态后，单击其他块才切换活动编辑块。
+                        // 落点不滚动跟随:指针刚把视口定位到点击处(视口锚定
+                        // 见下方 `pending_shift` —— 高度差的补偿恰恰是为了让
+                        // 「点击处」在块切源码后钉在原地)。
+                        // 浏览态同样单击进编辑(2026-10-19 拍板,取代早期
+                        // 「双击才进写作」的门槛):点哪编哪是 MarkText 手感
+                        // 的底线,禅定锁定时整条入口被 browse_enabled 关死。
                         let edit_pos = if live.browse_only {
                             live.browse_enabled
-                                .then(|| {
-                                    clicked_for_edit(ui, rect, editor_id, true, link_intercepted)
-                                })
+                                .then(|| clicked_for_edit(ui, rect, editor_id, link_intercepted))
                                 .flatten()
                         } else {
-                            clicked_for_edit(ui, rect, editor_id, false, link_intercepted)
+                            clicked_for_edit(ui, rect, editor_id, link_intercepted)
                         };
                         if let Some(pos) = edit_pos {
                             let label_id = editor_id.with(("live-render", index));
@@ -1378,6 +1493,84 @@ pub fn ui(
                             })
                             .unwrap_or_else(|| live.block_char_len(editor, index));
                             activate = Some((index, local));
+                            // 块切换视口锚定(点击帧预测,帧末 `activate` 消费
+                            // 点落账):块从富渲染切源码高度必变,若不动偏移,
+                            // 下一帧视口内内容整体平移 —— 「点哪跳哪」。这里
+                            // 同帧凑齐四项差值,把「光标行切源码后的屏幕顶」
+                            // 预算出来,帧末写进 ScrollArea 偏移让重排帧一次
+                            // 到位:
+                            // ① 被点击渲染行的屏幕顶(`row_rect_at_pos`,锚点
+                            //    本体;点击落在文本 galley 之外时拿不到行几何,
+                            //    放弃锚定保持旧行为);
+                            // ② 本块源码形态的光标行顶与外框高(同参 shaping
+                            //    预测,见 [`predict_source_layout`]);
+                            // ③ 上一活动块(若在本块上方)塌缩富渲染的位移:
+                            //    富渲染高用估高器预测、源码高读上一帧实测
+                            //    (`live-src-h`;无实测 = 上帧不可见/刚换文档,
+                            //    放弃该项,残差交给落地帧校正)。
+                            let clicked_row_top =
+                                egui_markdown::row_rect_at_pos(ui, label_id, pos).map(|r| r.min.y);
+                            if let Some(row_top) = clicked_row_top {
+                                let (_src_h, src_caret_top) =
+                                    predict_source_layout(ui, block_text, local);
+                                let collapse_delta = match live.active {
+                                    Some(old) if old < index => {
+                                        let old_src_h = ui.ctx().data(|d| {
+                                            d.get_temp::<f32>(editor_id.with(("live-src-h", old)))
+                                        });
+                                        match old_src_h {
+                                            Some(old_src_h) if old_src_h > 0.0 => {
+                                                let old_range = live.blocks[old].clone();
+                                                let old_text =
+                                                    BlockBuffer::slice(editor.text(), &old_range);
+                                                let (old_rendered, ..) =
+                                                    live.rich_block_with_base(old, old_text, base_dir);
+                                                let dark_mode =
+                                                    matches!(ui.ctx().theme(), egui::Theme::Dark);
+                                                let old_handler = RichLinkHandler::new(
+                                                    TaskProbeDomain::Live(
+                                                        live.blocks[old].start,
+                                                    ),
+                                                    dark_mode,
+                                                    ui.visuals().text_color(),
+                                                    std::rc::Rc::clone(&emoji_rects),
+                                                )
+                                                .with_ai(
+                                                    crate::ui::rich_widgets::ai_link_color(dark_mode),
+                                                    ai,
+                                                );
+                                                // 与剔除臂占位同参的估高(+4px 内距
+                                                // 同款),与 `live-render-h` 记账口径
+                                                // 一致(见 #111 B)。
+                                                let estimate = egui_markdown::MarkdownLabel::new(
+                                                    editor_id.with(("live-render", old)),
+                                                    old_rendered.as_ref(),
+                                                )
+                                                .font(egui::FontId::new(
+                                                    crate::theme::editor_font_size(ui.ctx()),
+                                                    crate::fonts::preview_body_family(ui.ctx()),
+                                                ))
+                                                .wrap()
+                                                .overflow_wrap(egui_markdown::OverflowWrap::BreakAll)
+                                                .scroll_code_blocks(true)
+                                                .shrink_code_blocks(true)
+                                                .code_block_min_width(Some(200.0))
+                                                .heal(heal)
+                                                .defer_offscreen_highlight(true)
+                                                .link_handler(&old_handler)
+                                                .estimated_height(ui)
+                                                    + 4.0;
+                                                estimate - old_src_h
+                                            }
+                                            _ => 0.0,
+                                        }
+                                    }
+                                    _ => 0.0,
+                                };
+                                pending_shift =
+                                    Some(rect.min.y + collapse_delta + src_caret_top - row_top);
+                                pending_anchor = Some((index, row_top));
+                            }
                         }
                     }
                 }
@@ -1434,10 +1627,29 @@ pub fn ui(
         live.active = Some(index);
         live.pending_caret = Some((index, local));
         live.pending_range = None;
-        // 点击进编辑不跟随:指针刚把视口定位到点击处(decisions-pending #83)
+        // 点击进编辑不跟随:指针刚把视口定位到点击处(decisions-pending #83;
+        // 块切源码造成的高度差由下方 pending_shift 补偿,而非光标跟随)。
         live.caret_follow = false;
         live.drag_anchor = None;
     }
+    // 锚定补偿落账:点击帧预算出的位移在 ScrollArea 收尾之后写进 state
+    // —— 本帧内容已按旧偏移画完,下一帧 begin() 读到的就是修正后的偏移,
+    // 块切源码的重排帧一次到位、不闪跳。落地帧按实测光标行做残差校正
+    // (toggle_anchor 的消费点)。打字机的 last_offset 在其写回处同步加同
+    // 等量(anchor_shift_applied):这次「用户感知不到的滚动」不该被记成
+    // 一次 Override 暂停(#121 已知边界类的显式豁免,而非新增边界)。
+    let mut anchor_shift_applied = 0.0;
+    if let Some(shift) = pending_shift.take() {
+        if let Some(mut state) = egui::scroll_area::State::load(panel.ctx(), scroll_state_id) {
+            state.offset.y += shift;
+            state.store(panel.ctx(), scroll_state_id);
+        }
+        // last_offset 的位移补偿推迟到打字机块的写回处:本帧的 moved 判定
+        // 比的是两个「闭包内偏移」(锚定 store 在 ScrollArea 收尾之后,不进
+        // 本帧闭包),提前 bump 反而会让本帧凭空记一次移动。
+        anchor_shift_applied = shift;
+    }
+    live.toggle_anchor = pending_anchor.take();
 
     // 打字机接管判定(#64 M1):本帧偏移动了、且不是打字机自己落的地、
     // 也不是编辑/路由落地帧 —— 即用户主动滚动,记一次 Override 暂停。
@@ -1457,7 +1669,9 @@ pub fn ui(
         } else {
             tw.land_grace.saturating_sub(1)
         };
-        tw.last_offset = scrolled.state.offset.y;
+        // 锚定位移写进记忆基线:下一帧闭包读到的偏移已含这笔修正,基线
+        // 不同步就会把「感知不到的视口钉扎」误记成一次用户滚动。
+        tw.last_offset = scrolled.state.offset.y + anchor_shift_applied;
         tw.last_rev = Some(editor.revision());
         tw.enabled = true;
         panel
@@ -1466,6 +1680,9 @@ pub fn ui(
     }
     if let Some(route) = route.take() {
         live.browse_only = false;
+        // 键盘路由覆盖 pending_caret,点击锚定一并作废(路由有自己的
+        // caret_follow 滚动语义,两者不能抢同一次视口)。
+        live.toggle_anchor = None;
         live.active = Some(route.0);
         live.pending_caret = Some(route);
         live.pending_range = None;
@@ -1566,7 +1783,6 @@ fn clicked_for_edit(
     ui: &egui::Ui,
     rect: egui::Rect,
     editor_id: egui::Id,
-    double_click: bool,
     link_intercepted: bool,
 ) -> Option<egui::Pos2> {
     // 链接点击归链接(wikilink → 开文档、本地链接 → 应用内跳转):不连带
@@ -1575,15 +1791,7 @@ fn clicked_for_edit(
     if link_intercepted {
         return None;
     }
-    let clicked = ui.input(|input| {
-        if double_click {
-            input
-                .pointer
-                .button_double_clicked(egui::PointerButton::Primary)
-        } else {
-            input.pointer.primary_clicked()
-        }
-    });
+    let clicked = ui.input(|input| input.pointer.primary_clicked());
     if !clicked {
         return None;
     }
@@ -1817,7 +2025,7 @@ mod tests {
     }
 
     /// 浏览态同步块表时不能把源码光标复活成活动块，否则打开文档会
-    /// 立即显示 TextEdit；活动块只能由双击或明确的程序跳转设置。
+    /// 立即显示 TextEdit；活动块只能由单击或明确的程序跳转设置。
     #[test]
     fn browse_sync_does_not_activate_cursor_block() {
         let editor = EditorBuffer::new("第一段\n\n第二段\n");
@@ -1834,7 +2042,7 @@ mod tests {
     }
 
     /// 写作态连续输入空行仍属于正文编辑，不能把活动块清掉并让插入点
-    /// 消失；用户可通过双击其他块或切换模式主动结束当前块。
+    /// 消失；用户可通过单击其他块或切换模式主动结束当前块。
     #[test]
     fn writing_keeps_caret_after_blank_line() {
         let ctx = egui::Context::default();
@@ -2473,6 +2681,60 @@ mod tests {
             live.pending_caret,
             Some((0, 0)),
             "光标落第一段行首而非块尾 5:{:?}",
+            live.pending_caret
+        );
+    }
+
+    /// 浏览态**单击**即进编辑(2026-10-19 拍板,取代早期「双击才进写作」):
+    /// 打开文档后第一下点击就落在点击字形上,不再要求先双击唤醒 —— 点哪
+    /// 编哪是 MarkText 手感的底线。禅定锁定仍由 browse_enabled 关死入口
+    /// (锁定测试另在 zen 侧钉住)。
+    #[test]
+    fn browse_single_click_enters_edit_at_clicked_glyph() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("第一段\n\n第二段\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            browse_only: true,
+            browse_enabled: true,
+            ..LiveState::default()
+        };
+
+        // 浏览态首帧:无活动块,不抢焦点
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(live.active.is_none(), "浏览态首帧无活动块");
+        let (_, glyphs) = frame
+            .glyphs
+            .iter()
+            .find(|(text, _)| text.trim() == "第二段")
+            .expect("第二段已富渲染");
+        let target = glyphs[0] + egui::vec2(1.0, 0.0);
+
+        // 单击三帧(移入/按下/抬起):第二段在点击帧直接进编辑,光标落点击字形
+        for events in click_events(target) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        assert!(!live.browse_only, "单击退出浏览态");
+        assert_eq!(live.active, Some(1), "单击切入编辑态:{live:?}");
+        assert_eq!(
+            live.pending_caret,
+            Some((1, 0)),
+            "光标落点击字形(第二段首)而非块尾:{:?}",
             live.pending_caret
         );
     }
@@ -3826,7 +4088,8 @@ mod tests {
             false,
         );
 
-        // ↑ 在块首 → 路由到段落块末尾
+        // ↑ 在块首 → 路由到段落块可见末尾(幻影行之前的最后一个字符;
+        // visible_char_len 语义,方向键不再先穿过块尾的空行幻影行)
         let _ = live_scroll_frame(
             &ctx,
             egui::Id::new(SCROLL_EDITOR_ID),
@@ -3840,10 +4103,11 @@ mod tests {
             false,
         );
         assert_eq!(live.active, Some(0), "路由切换活动块:{live:?}");
+        let visible_end = super::visible_char_len(&editor.text()[live.blocks[0].clone()]);
         assert_eq!(
             live.pending_caret,
-            Some((0, live.block_char_len(&editor, 0))),
-            "交接点 = 上一块末尾"
+            Some((0, visible_end)),
+            "交接点 = 上一块可见末尾"
         );
 
         // 落地帧:光标写进块 0 持久 state + 同帧请求滚动 + 焦点转移
@@ -3860,7 +4124,7 @@ mod tests {
             false,
         );
         let caret = scroll_block_caret(&ctx, 0).expect("目标块光标已写入");
-        assert_eq!(caret, live.block_char_len(&editor, 0), "光标落在上一块末尾");
+        assert_eq!(caret, visible_end, "光标落在上一块可见末尾");
         assert!(
             ctx.memory(|mem| mem.has_focus(scroll_block_id(0))),
             "焦点随路由转到目标块"
@@ -3942,6 +4206,460 @@ mod tests {
         assert!(
             (-25.0..=625.0).contains(&y),
             "目标块光标行滚入视口(实测 y {y},视口 [0,600])"
+        );
+    }
+
+    /// 跨块路由的四个方向与 Shift 守卫(2026-10-19 写作模式去隔离):
+    /// 块首 ↑/← 去上一块**可见末尾**;可见末尾 ↓/→ **一次按键**即去下一块
+    /// 开头(块尾幻影行不再是必经站,键盘不再发粘);按住 Shift 一律不路由
+    /// —— 选区扩展不能跨块(选区活在单个 TextEdit 的 state 里),宁可原地
+    /// 不动也不打断用户正在拉的选择。
+    #[test]
+    fn live_arrow_keys_route_across_blocks_with_shift_guard() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("甲段\n\n乙段\n\n丙段\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(1),
+            ..LiveState::default()
+        };
+        let id = scroll_block_id(1);
+        let editor_id = egui::Id::new(SCROLL_EDITOR_ID);
+        let inject = |ctx: &egui::Context, caret: usize| {
+            let mut st = egui::widgets::text_edit::TextEditState::default();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(caret),
+            )));
+            st.store(ctx, id);
+            ctx.memory_mut(|mem| mem.request_focus(id));
+        };
+        let shift_key = |key: egui::Key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        };
+        let mut tick = 0.0;
+        macro_rules! frame {
+            ($events:expr) => {{
+                tick += 0.1;
+                live_scroll_frame(
+                    &ctx,
+                    editor_id,
+                    tick,
+                    $events,
+                    &mut editor,
+                    &mut preview,
+                    &mut cursor,
+                    &mut live,
+                    false,
+                    false,
+                )
+            }};
+        }
+
+        // ← 在块首 → 上一块可见末尾
+        inject(&ctx, 0);
+        let _ = frame!(Vec::new());
+        let visible_0 = super::visible_char_len(&editor.text()[live.blocks[0].clone()]);
+        assert_eq!(visible_0, 2, "甲段块的可见末尾(两个幻影换行之前)");
+        let _ = frame!(vec![arrow(egui::Key::ArrowLeft)]);
+        assert_eq!(
+            live.pending_caret,
+            Some((0, visible_0)),
+            "← 块首路由到上一块可见末尾"
+        );
+        let _ = frame!(Vec::new());
+        assert_eq!(scroll_block_caret(&ctx, 0), Some(visible_0), "落进上一块");
+
+        // → 在可见末尾 → 下一块开头(不先穿幻影行)
+        let _ = frame!(vec![arrow(egui::Key::ArrowRight)]);
+        assert_eq!(
+            live.pending_caret,
+            Some((1, 0)),
+            "→ 可见末尾路由到下一块开头"
+        );
+        let _ = frame!(Vec::new());
+        assert_eq!(scroll_block_caret(&ctx, 1), Some(0), "落进下一块");
+
+        // ↓ 在可见末尾 → 下一块开头:一次按键直达,不再「先落到幻影空行、
+        // 再按一次才出去」的粘滞
+        inject(&ctx, visible_0);
+        let _ = frame!(Vec::new());
+        let _ = frame!(vec![arrow(egui::Key::ArrowDown)]);
+        assert_eq!(
+            live.pending_caret,
+            Some((2, 0)),
+            "↓ 可见末尾路由到下一块开头"
+        );
+        let _ = frame!(Vec::new());
+        assert_eq!(scroll_block_caret(&ctx, 2), Some(0), "落进块 2");
+
+        // Shift 守卫:块首 Shift+← 不路由(选区扩展保持原状)
+        live.active = Some(1);
+        inject(&ctx, 0);
+        let _ = frame!(Vec::new());
+        // 真机序列:winit 先发 ModifiersChanged 再发按键(headless 的 Key
+        // 事件自带 modifiers 不进 input.modifiers,egui 只认前者)
+        let shift_mods = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let _ = frame!(vec![
+            egui::Event::ModifiersChanged(shift_mods),
+            shift_key(egui::Key::ArrowLeft),
+        ]);
+        assert_eq!(live.pending_caret, None, "Shift 按住时不路由");
+        assert_eq!(live.active, Some(1), "活动块原地不动");
+    }
+
+    /// 块切换视口锚定(2026-10-19 写作模式防跳变):点击富渲染块进编辑时,
+    /// 块从富渲染切到源码形态高度必变,不补偿则视口内内容整体平移 ——
+    /// 「点哪跳哪」。契约:点击帧按预测把 ScrollArea 偏移先行修正,落地帧
+    /// 按实测光标行残差校正,终态 = 源码光标行的屏幕位置钉在被点击渲染行
+    /// 的位置上。场景同时压住两个位移源:上一活动块(标题)塌缩的位移 +
+    /// 目标块自身切换的高度差;目标点取长段落的第二行,行上方的行高差给
+    /// 位移一个稳定量(单行段两个位移源会互相抵消成 ~0,测不出补偿)。
+    #[test]
+    fn live_click_anchor_keeps_clicked_row_stationary() {
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(egui::Theme::Dark, |style| {
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        });
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        // 目标段两侧用代码 fence 断开 flush:它的文本 galley 独立成形状
+        // (段落会被合并进同一 galley,形状级 rect 拿不到中间段落的行)。
+        // 点击目标 = 文档中段的「靶段」(长段落,软折多行),前后用 fence
+        // 断开 flush 让它的 galley 独立成形状。整个场景先滚轮下滚把靶段
+        // 送进视口中部再点击:文档顶是钳位边界,顶部场景里向上补偿的位移
+        // 会被 clamp 吃掉 —— 中段点击才是锚定的主战场。
+        let filler = "乙段:这一段只是填充正文,".repeat(6);
+        let target_para = "靶段:这一段只是被点击的正文,".repeat(5);
+        let mut text =
+            format!("# 标题\n\n```text\n filler \n```\n\n{filler}\n\n```text\n filler \n```\n");
+        for i in 0..10 {
+            text.push_str(&format!("\n中段{i:02},这一行只是垫开距离。\n"));
+        }
+        text.push_str(&format!(
+            "\n```text\n filler \n```\n\n{target_para}\n\n```text\n filler \n```\n"
+        ));
+        for i in 0..30 {
+            text.push_str(&format!("\n尾段{i:02},这一行只是垫高内容。\n"));
+        }
+        let id = egui::Id::new("live-anchor-click");
+        let mut editor = EditorBuffer::new(&text);
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        // 活动块 = 文档头标题(源码形态):先在源头制造一次塌缩位移
+        let mut live = LiveState {
+            active: Some(0),
+            ..LiveState::default()
+        };
+        live.pending_caret = Some((0, 0));
+        let mut outbox = Vec::new();
+        let mut selection = None;
+        // 返回 (全部文本形状 rect, 滚动探针偏移, live::ui 响应矩形 = 活动
+        // 块 TextEdit 矩形, 行几何探针命中行顶)。行几何用 vendored
+        // `row_rect_at_pos` 在帧内取证 —— epaint 字形 y 是行内局部坐标,
+        // 从形状/字形反推行顶不可靠,而它正是生产锚定用的同一查询。
+        let row_probe = std::cell::Cell::new(false);
+        let probe_block = std::cell::Cell::new(0usize);
+        /// 单帧取证:文本形状 rect、滚动探针偏移、活动块 TextEdit 矩形、
+        /// 行几何探针命中行顶。
+        struct AnchorFrame {
+            texts: Vec<(String, egui::Rect)>,
+            offset: f32,
+            active_rect: Option<egui::Rect>,
+            row_top: Option<f32>,
+        }
+        let mut run = |time: f64,
+                       events: Vec<egui::Event>,
+                       editor: &mut EditorBuffer,
+                       preview: &mut PreviewState,
+                       cursor: &mut OutlineCursor,
+                       live: &mut LiveState|
+         -> AnchorFrame {
+            let mut texts = Vec::new();
+            let mut response_id = egui::Id::NULL;
+            let mut row_top = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |panel| {
+                    response_id = super::ui(
+                        panel,
+                        editor,
+                        preview,
+                        &AiState::default(),
+                        cursor,
+                        &mut selection,
+                        live,
+                        id,
+                        false,
+                        false,
+                        None,
+                        false,
+                        &crate::keymap::Keymap::builtin(),
+                        &mut outbox,
+                    )
+                    .id;
+                    if row_probe.get() {
+                        let probe_id = id.with(("live-render", probe_block.get()));
+                        if let Some(block_rect) = egui_markdown::block_span_rects(panel, probe_id)
+                            .and_then(|blocks| blocks.first().map(|b| b.rect))
+                        {
+                            // 长段落 0.75 块高落在第二视觉行内
+                            let pos = egui::pos2(
+                                block_rect.min.x + 3.0,
+                                block_rect.min.y + block_rect.height() * 0.75,
+                            );
+                            row_top = egui_markdown::row_rect_at_pos(panel, probe_id, pos)
+                                .map(|row| row.min.y);
+                        }
+                    }
+                },
+            );
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(t) = &clipped.shape {
+                    texts.push((
+                        t.galley.text().to_owned(),
+                        egui::Rect::from_min_size(t.pos, t.galley.size()),
+                    ));
+                }
+            }
+            let offset = ctx
+                .data(|d| d.get_temp::<LiveScrollProbe>(super::scroll_probe_id(id)))
+                .map(|probe| probe.offset)
+                .unwrap_or(0.0);
+            output.drop_without_applying_deltas();
+            AnchorFrame {
+                texts,
+                offset,
+                active_rect: ctx.read_response(response_id).map(|r| r.rect),
+                row_top,
+            }
+        };
+
+        // 稳态:活动块 0(标题源码)已就位,live-src-h 已记账;滚轮把靶段
+        // 送进视口中部(负 delta = 向下滚),再从它的形状矩形推出第二行的
+        // 点击点,行探针取回那一行的精确屏幕顶
+        let target_block = {
+            let _ = run(
+                0.0,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            let _ = run(
+                0.1,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            let idx = live
+                .blocks
+                .iter()
+                .position(|range| editor.text()[range.clone()].contains("靶段"))
+                .expect("靶段成块");
+            probe_block.set(idx);
+            idx
+        };
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        };
+        // 滚轮把靶段送进视口(负 delta = 向下滚),滚到中部就停:滚轮帧的
+        // 形状 rect 是上一帧几何(滚轮当帧的滚动下一帧才进布局),必须在
+        // 停稳后的空转帧里同几何取证
+        let mut settled = false;
+        for i in 0..12 {
+            let frame = run(
+                0.2 + f64::from(i) * 0.1,
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(400.0, 300.0)),
+                    wheel.clone(),
+                ],
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            if let Some(rect) = frame
+                .texts
+                .iter()
+                .find(|(t, _)| t.contains("靶段"))
+                .map(|(_, r)| *r)
+            {
+                if rect.min.y > 200.0 && rect.max.y < 420.0 {
+                    settled = true;
+                    break;
+                }
+            }
+        }
+        assert!(settled, "滚轮把靶段送进视口中部");
+        // 空转到几何稳定:块间有估高沉降(#111 B 的占位/实测交替会把内容
+        // 逐帧微移),滚动刚停时块还会漂几帧 —— 循环空转,直到靶段的形状
+        // rect 连续两帧不动,再取点击点。行探针同帧自洽取证(块左缘 +
+        // 3px、0.75 块高落在第二视觉行内),点击点用同一稳定 rect 推出。
+        let mut offset_before = 0.0;
+        let mut target = None;
+        let mut clicked_row_top = None;
+        let mut prev_min_y = f32::NAN;
+        let mut tick = 1.4;
+        for _ in 0..20 {
+            row_probe.set(true);
+            let frame = run(
+                tick,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            row_probe.set(false);
+            tick += 0.1;
+            offset_before = frame.offset;
+            let rect = frame
+                .texts
+                .iter()
+                .find(|(t, _)| t.contains("靶段"))
+                .expect("靶段独立成形状")
+                .1;
+            if frame.row_top.is_some() && (rect.min.y - prev_min_y).abs() <= 0.01 {
+                clicked_row_top = frame.row_top;
+                target = Some(egui::pos2(
+                    rect.min.x + 3.0,
+                    rect.min.y + rect.height() * 0.75,
+                ));
+                break;
+            }
+            prev_min_y = rect.min.y;
+        }
+        let target = target.expect("几何在 20 帧内稳定");
+        let clicked_row_top = clicked_row_top.expect("行探针命中被点击行");
+        assert!(
+            offset_before > 50.0,
+            "已离开文档顶,向上补偿不被钳位:{offset_before}"
+        );
+
+        // 点击三帧(移入/按下/抬起):第三帧 activate + 预测偏移落账
+        let click = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let _ = run(
+            tick,
+            vec![egui::Event::PointerMoved(target)],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        tick += 0.1;
+        let _ = run(
+            tick,
+            vec![click(target, true)],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        tick += 0.1;
+        let _ = run(
+            tick,
+            vec![click(target, false)],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        tick += 0.1;
+        assert_eq!(live.active, Some(target_block), "点击切入目标块:{live:?}");
+        assert!(
+            live.toggle_anchor.is_some(),
+            "点击行几何已捕获、锚定计划已挂载:{live:?}"
+        );
+        // 位移在点击帧末写进 ScrollArea state,落地帧的闭包才按新偏移布局
+        // —— 探针口径读落地帧
+        let offset_after_shift = run(
+            tick,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        )
+        .offset;
+        tick += 0.1;
+        assert!(
+            (offset_after_shift - offset_before).abs() > 1.0,
+            "锚定补偿真的动了偏移(前 {offset_before} 后 {offset_after_shift})"
+        );
+
+        // 残差校正帧:偏移经「预测 + 残差」两次修正后,点击字符所在的
+        // 源码行与点击行顶对齐。终态量法:TextEdit 矩形顶(帧内响应)+
+        // 该块同参 shaping 的光标行顶(与生产共用 predict_source_layout)
+        // == 被点击渲染行顶,容差 2px。
+        tick += 0.1;
+        let active_rect = run(
+            tick,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        )
+        .active_rect
+        .expect("活动块 TextEdit 响应可读");
+        // 点击字符在源码里的行顶(块内偏移 → 同参 shaping 预测的 galley
+        // 行顶),加上 TextEdit 矩形顶即它的屏幕位置;预测与生产共用同一
+        // 函数,差异只剩布局实测 vs 理论 —— 残差校正正是为此存在,终态
+        // 容差 2px。
+        let caret_char = {
+            let state = egui::widgets::text_edit::TextEditState::load(
+                &ctx,
+                id.with(("live-block", target_block)),
+            )
+            .expect("目标块 TextEdit state 已建立");
+            state.cursor.char_range().expect("落地光标").primary.index.0
+        };
+        let mut src_caret_top_rel = 0.0f32;
+        let probe_out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                let (_h, caret_top) = super::predict_source_layout(
+                    ui,
+                    &editor.text()[live.blocks[target_block].clone()],
+                    caret_char,
+                );
+                src_caret_top_rel = caret_top;
+            },
+        );
+        probe_out.drop_without_applying_deltas();
+        let caret_row_screen_top = active_rect.top() + src_caret_top_rel;
+        assert!(
+            (caret_row_screen_top - clicked_row_top).abs() <= 2.0,
+            "被点击行钉在原地:源码光标行顶 {caret_row_screen_top} vs 点击行顶 {clicked_row_top}"
         );
     }
 
