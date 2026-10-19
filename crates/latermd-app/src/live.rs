@@ -410,6 +410,24 @@ struct BlockBuffer<'a> {
     buffer: &'a mut EditorBuffer,
     /// 块在全文中的字节区间。
     range: Range<usize>,
+    /// 编辑视图的字节长(从块首起):活动块裁掉块尾的幻影空行(块间空行
+    /// 归前一块,富渲染本就忽略它们),块切源码不再凭空多出 1-2 个空行
+    /// —— 那是「点击后块展开」的主要来源。裁剪的是**前缀截断**,块内
+    /// 字符偏移在截断前后同义,编辑换算(`base + char`)零改动;全块
+    /// 字节仍被块表覆盖,不存在编辑丢字。默认取全块。
+    visible_bytes: usize,
+}
+
+impl BlockBuffer<'_> {
+    /// 全块视图(块首起整个区间)。
+    fn full(buffer: &mut EditorBuffer, range: Range<usize>) -> BlockBuffer<'_> {
+        let visible_bytes = range.end.saturating_sub(range.start);
+        BlockBuffer {
+            buffer,
+            range,
+            visible_bytes,
+        }
+    }
 }
 
 impl BlockBuffer<'_> {
@@ -433,7 +451,8 @@ impl egui::TextBuffer for BlockBuffer<'_> {
     }
 
     fn as_str(&self) -> &str {
-        Self::slice(self.buffer.text(), &self.range)
+        let end = self.range.start + self.visible_bytes.min(self.range.len());
+        Self::slice(self.buffer.text(), &(self.range.start..end))
     }
 
     fn insert_text(&mut self, text: &str, char_index: egui::text::CharIndex) -> usize {
@@ -548,15 +567,17 @@ fn locked_jump_landing(ui: &egui::Ui, live: &mut LiveState, rect: egui::Rect) {
     }
 }
 
-/// 预测块源码 TextEdit 的布局几何：(外框高, 光标行顶相对块顶的 y)。
+/// 预测活动块源码 TextEdit 的布局几何：(外框高, 光标行顶相对块顶的 y)。
 ///
 /// 与 egui TextEdit multiline 的 default_layouter 完全同参 shaping ——
-/// Monospace 字号、`extra_text_line_spacing` 行距、可用宽 − 左右内距
-/// (4+4) 的折行宽、`keep_trailing_whitespace`；外框高 = galley 高 +
-/// 上下内距 4px，光标行顶 = galley 行顶 + 上内距 2px。用于点击帧预判
-/// 「块切源码后被点击行落到哪里」，让 ScrollArea 偏移在内容重排**之前**
-/// 修正（重排发生在下一帧，偏移先行到位则重排帧不跳）；预测残差由
-/// 落地帧按实测光标行做一次校正（`LiveState::toggle_anchor`）。
+/// Monospace 字号、行盒高与活动块同源（[`body_line_height`]，见活动块
+/// 分支的 `extra_text_line_spacing` 拨动）、可用宽 − 左右内距 (4+4) 的
+/// 折行宽、`keep_trailing_whitespace`；外框高 = galley 高 + 上下内距
+/// 4px，光标行顶 = galley 行顶 + 上内距 2px。**text 须与编辑视图同文**
+/// （裁掉幻影空行的前缀，见 `BlockBuffer::visible_bytes`）。用于点击帧
+/// 预判「块切源码后被点击行落到哪里」，让 ScrollArea 偏移在内容重排
+/// **之前**修正（重排发生在下一帧，偏移先行到位则重排帧不跳）；预测
+/// 残差由落地帧按实测光标行做一次校正（`LiveState::toggle_anchor`）。
 fn predict_source_layout(ui: &egui::Ui, text: &str, caret_char: usize) -> (f32, f32) {
     let font_id = ui
         .style()
@@ -564,8 +585,10 @@ fn predict_source_layout(ui: &egui::Ui, text: &str, caret_char: usize) -> (f32, 
         .get(&egui::TextStyle::Monospace)
         .cloned()
         .unwrap_or_else(|| egui::FontId::monospace(14.0));
-    let row_height = ui.fonts_mut(|f| f.row_height(&font_id));
-    let line_height = row_height + ui.spacing().extra_text_line_spacing;
+    let line_height = body_line_height(
+        &egui_markdown_style::global_style(ui.ctx()),
+        crate::theme::editor_font_size(ui.ctx()),
+    );
     let wrap_width = (ui.available_width() - 8.0).max(24.0);
     let mut job =
         egui::text::LayoutJob::simple(text.to_owned(), font_id, egui::Color32::WHITE, wrap_width);
@@ -776,10 +799,7 @@ pub fn ui(
                         }
                     } else {
                         // 写作态使用共享缓冲，不另建镜像。
-                        let mut buffer = BlockBuffer {
-                            buffer: editor,
-                            range: 0..0,
-                        };
+                        let mut buffer = BlockBuffer::full(editor, 0..0);
                         let response_id = editor_id.with("live-empty");
                         let output = egui::TextEdit::multiline(&mut buffer)
                             .id(response_id)
@@ -929,13 +949,43 @@ pub fn ui(
                         // 可见内容末尾(幻影行之前的最后一个字符位置),跨块
                         // 路由的块尾判定边界;定义见 [`visible_char_len`]。
                         let visible_end = visible_char_len(block_text);
-                        let lines = block_text.lines().count().max(1);
+                        // 编辑视图 = 块内容去掉尾部的幻影空行(块间空行归前
+                        // 一块,富渲染本就忽略它们;全显示会让块切源码凭空
+                        // 多出 1-2 个空行 —— 「点击后块展开」的主要来源)。
+                        // 两条延伸规则保住编辑语义:
+                        // ① 光标所在行可见 —— 光标进了幻影区(块尾 Enter 后
+                        //    的新行)时视图跟到光标行,否则光标落进不可见区;
+                        // ② 块尾 Enter 的当帧预先多给一个换行 —— 插入的换行
+                        //    必须当场可见,不然 egui 把新光标钳回内容末,新行
+                        //    落进不可见区,接着敲的字把新段落吞回块尾。
+                        let response_id = editor_id.with(("live-block", index));
+                        let content_bytes = block_text.trim_end_matches('\n').len();
+                        let full_chars = block_text.chars().count();
+                        let caret_local_chars = cursor
+                            .byte
+                            .filter(|byte| range.contains(byte))
+                            .map(|byte| editor.byte_to_char(byte) - editor.byte_to_char(range.start))
+                            .unwrap_or(0)
+                            .min(full_chars);
+                        let content_chars = block_text[..content_bytes].chars().count();
+                        let enter_at_tail = ui.input(|input| input.key_pressed(egui::Key::Enter))
+                            && caret_local_chars >= content_chars;
+                        let visible_chars = (content_chars.max(caret_local_chars)
+                            + usize::from(enter_at_tail))
+                        .min(full_chars);
+                        let visible_bytes = block_text
+                            .char_indices()
+                            .nth(visible_chars)
+                            .map_or(block_text.len(), |(byte, _)| byte)
+                            .max(content_bytes);
+                        let lines = block_text[..visible_bytes].lines().count().max(1);
                         let mut buffer = BlockBuffer {
                             buffer: editor,
                             range: range.clone(),
+                            visible_bytes,
                         };
                         // 稳定 id:按块序号(不带长度/hash),AGENTS §6.7 的红线
-                        let response_id = editor_id.with(("live-block", index));
+                        // (response_id 已在视图计算处派生)
                         let focus_memory_id = editor_id.with(("live-ime-focus", index));
                         let focused_last_frame = ui
                             .ctx()
@@ -953,7 +1003,22 @@ pub fn ui(
                         // #169):只留文字内距,光标/选区/IME 通路不变
                         let edit = edit
                             .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)));
+                        // 行距同源(#157):TextEdit 行盒高 = 等宽行高 + 本间距,
+                        // 拨到与预览正文行盒(`body_line_height`)等高 —— 配合
+                        // 幻影行裁剪,普通段落切形态**逐行等高**,高度零变化。
+                        // 差值可为负(等宽行高偏大时收紧行距);空文档分支与
+                        // 本分支互斥,且 Ui 每帧重建,不留残值。
+                        let mono_font = ui
+                            .style()
+                            .text_styles
+                            .get(&egui::TextStyle::Monospace)
+                            .cloned()
+                            .unwrap_or_else(|| egui::FontId::monospace(14.0));
+                        let mono_row_height = ui.fonts_mut(|f| f.row_height(&mono_font));
+                        ui.spacing_mut().extra_text_line_spacing =
+                            body_line_height(&gap_style, gap_font_size) - mono_row_height;
                         let output = edit.show(ui);
+                        ui.spacing_mut().extra_text_line_spacing = 0.0;
                         // 活动块源码形态的实测高(块切换视口锚定的塌缩侧输入,
                         // 与富渲染臂的 `live-render-h` 同款记账):下一帧本块
                         // 塌缩回富渲染时,点击帧用「富渲染估高 − 源码实测」
@@ -1511,8 +1576,9 @@ pub fn ui(
                             let clicked_row_top =
                                 egui_markdown::row_rect_at_pos(ui, label_id, pos).map(|r| r.min.y);
                             if let Some(row_top) = clicked_row_top {
+                                let view_bytes = block_text.trim_end_matches('\n').len();
                                 let (_src_h, src_caret_top) =
-                                    predict_source_layout(ui, block_text, local);
+                                    predict_source_layout(ui, &block_text[..view_bytes], local);
                                 let collapse_delta = match live.active {
                                     Some(old) if old < index => {
                                         let old_src_h = ui.ctx().data(|d| {
@@ -2211,6 +2277,7 @@ mod tests {
             let mut buffer = BlockBuffer {
                 buffer: &mut editor,
                 range: block.clone(),
+                visible_bytes: block.len(),
             };
             assert_eq!(egui::TextBuffer::as_str(&buffer), "hello\n\n");
             egui::TextBuffer::insert_text(&mut buffer, ">> ", egui::text::CharIndex(0));
@@ -2230,6 +2297,7 @@ mod tests {
             let mut buffer = BlockBuffer {
                 buffer: &mut editor,
                 range: block.clone(),
+                visible_bytes: block.len(),
             };
             assert_eq!(egui::TextBuffer::as_str(&buffer), "world\n");
             egui::TextBuffer::delete_char_range(
@@ -4647,11 +4715,10 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                let (_h, caret_top) = super::predict_source_layout(
-                    ui,
-                    &editor.text()[live.blocks[target_block].clone()],
-                    caret_char,
-                );
+                let block_text = &editor.text()[live.blocks[target_block].clone()];
+                let view_bytes = block_text.trim_end_matches('\n').len();
+                let (_h, caret_top) =
+                    super::predict_source_layout(ui, &block_text[..view_bytes], caret_char);
                 src_caret_top_rel = caret_top;
             },
         );
@@ -4660,6 +4727,123 @@ mod tests {
         assert!(
             (caret_row_screen_top - clicked_row_top).abs() <= 2.0,
             "被点击行钉在原地:源码光标行顶 {caret_row_screen_top} vs 点击行顶 {clicked_row_top}"
+        );
+    }
+
+    /// 活动块形态切换零展开(#157):幻影行裁剪 + 行距同源后,无行内标记
+    /// 的普通段落富渲染 ↔ 源码 TextEdit **块高几乎不变**(残差只剩
+    /// TextEdit 上下内距 4px 与整像素圆整)—— 点击进块的「展开感」来自
+    /// 块高突变,本测试把它钉死在常数级。
+    #[test]
+    fn live_plain_paragraph_toggle_keeps_block_height() {
+        let ctx = egui::Context::default();
+        let mut text = String::from("第一段,这一段只是普通正文。\n\n");
+        for i in 0..20 {
+            text.push_str(&format!("垫段{i:02},这一行只是垫高内容。\n\n"));
+        }
+        let mut editor = EditorBuffer::new(&text);
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let id = egui::Id::new("live-zero-expand");
+
+        // 无活动块帧:块 0 富渲染,实测高记在 live-render-h
+        let _ = live_scroll_frame(
+            &ctx,
+            id,
+            0.0,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+            false,
+            false,
+        );
+        let rich_h = ctx
+            .data(|d| d.get_temp::<f32>(id.with(("live-render-h", 0))))
+            .expect("富渲染实测高已记账");
+
+        // 激活落地帧:块 0 源码 TextEdit,实测高记在 live-src-h
+        live.active = Some(0);
+        live.pending_caret = Some((0, 0));
+        let _ = live_scroll_frame(
+            &ctx,
+            id,
+            0.1,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+            false,
+            false,
+        );
+        let src_h = ctx
+            .data(|d| d.get_temp::<f32>(id.with(("live-src-h", 0))))
+            .expect("源码实测高已记账");
+        assert!(
+            (src_h - rich_h).abs() <= 5.0,
+            "普通段落切形态块高不变:富渲染 {rich_h}px vs 源码 {src_h}px(残差应只剩内距常数)"
+        );
+    }
+
+    /// 块尾 Enter 的新行必须**可见可写**(幻影行裁剪的光标延伸规则):
+    /// 裁剪把块尾空行藏起来,但 Enter 在块尾新建的行恰在幻影区 —— 光标
+    /// 所在行延伸可见,接着敲的字落在新行上(新段落),而不是被吞回块尾。
+    #[test]
+    fn live_enter_at_block_end_reveals_new_line() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("第一段\n\n第二段\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(0),
+            ..LiveState::default()
+        };
+        let id = egui::Id::new("live-enter-visible").with(("live-block", 0));
+        let mut st = egui::widgets::text_edit::TextEditState::default();
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(3),
+        )));
+        st.store(&ctx, id);
+        ctx.memory_mut(|mem| mem.request_focus(id));
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        let mut frame = |time: f64, events: Vec<egui::Event>| {
+            live_scroll_frame(
+                &ctx,
+                egui::Id::new("live-enter-visible"),
+                time,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+                false,
+                false,
+            )
+        };
+        let _ = frame(0.0, Vec::new());
+        let _ = frame(0.1, vec![enter]);
+        let _ = frame(0.2, Vec::new());
+        let caret = egui::widgets::text_edit::TextEditState::load(&ctx, id)
+            .and_then(|state| state.cursor.char_range().map(|range| range.primary.index.0));
+        assert_eq!(caret, Some(4), "光标落在新行(块尾 Enter)");
+
+        // 新行敲字:落在光标处(第一个换行之后),新段落成立
+        let _ = frame(0.3, vec![egui::Event::Text("新".into())]);
+        // 段落一 + 新行「新」 + 空行 + 段落二:Enter 插入的换行成为新行的
+        // 行尾,原有块尾空行保留,新字落在光标行
+        assert_eq!(
+            editor.text(),
+            "第一段\n新\n\n第二段\n",
+            "块尾 Enter 后的新行可写,新字不被吞回块尾"
         );
     }
 
