@@ -567,6 +567,143 @@ fn locked_jump_landing(ui: &egui::Ui, live: &mut LiveState, rect: egui::Rect) {
     }
 }
 
+/// 活动块编辑视图的排版作业(#158 渲染形态原地编辑):**文本与缓冲不变**,
+/// 只换排版 —— Text 块用预览正文字体逐行排版(与富渲染同字体同字号同行
+/// 盒),Heading 块的标题行按 vendored 同式放大加粗(字号 ×
+/// `heading.scales[level]`、`bold` 族、strong 色文案、行高按放大后字号
+/// 重推导),ATX 前缀 `# ` 淡化为弱色正文小字;Widget 块(代码/表格/引用/
+/// 分隔线/图片)保持等宽(对齐表格与代码列,与既有源码编辑一致)。编辑态
+/// 与渲染态的字体、字号、行高全部同源取值 —— 点击进标题块不再「缩成
+/// 小字」,配合幻影行裁剪连标题块的高度都几乎不变。
+/// 行内 `**` 等标记仍由遮罩层(LP2-1)淡化;预测函数与编辑视图共用本函数,
+/// 视口锚定的预测精度随排版同源自动保持。
+fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::LayoutJob {
+    let style = egui_markdown_style::global_style(ui.ctx());
+    let font_size = crate::theme::editor_font_size(ui.ctx());
+    let body_family = crate::fonts::preview_body_family(ui.ctx());
+    let mono_font = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Monospace)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::monospace(14.0));
+    let body_lh = body_line_height(&style, font_size);
+    let text_color = ui.visuals().text_color();
+    let bold_family = egui::FontFamily::Name(std::sync::Arc::from("bold"));
+    let has_bold = ui.ctx().fonts(|f| f.families().contains(&bold_family));
+
+    let mut job = egui::text::LayoutJob {
+        text: text.to_owned(),
+        wrap: egui::text::TextWrapping {
+            max_width: wrap_width,
+            ..egui::text::TextWrapping::default()
+        },
+        break_on_newline: true,
+        halign: egui::Align::LEFT,
+        keep_trailing_whitespace: true,
+        ..egui::text::LayoutJob::default()
+    };
+    let section =
+        |byte_range: std::ops::Range<usize>, format: egui::TextFormat| egui::text::LayoutSection {
+            leading_space: 0.0,
+            byte_range: byte_range.start.into()..byte_range.end.into(),
+            format,
+        };
+
+    // Widget(代码/表格/引用/分隔线/图片):等宽回退 —— 对齐代码列与表格
+    // 列仍是刚需,与既有源码编辑一致;行盒高保持 #157 的同源口径。
+    if block_kind(text) == BlockKind::Widget {
+        let mut mono = egui::TextFormat::simple(mono_font, text_color);
+        mono.line_height = Some(body_lh);
+        job.sections.push(section(0..text.len(), mono));
+        return job;
+    }
+
+    // ATX 标题首行(与 [`block_kind`] 同判):`#{1,6}` + 空格,缩进行保守
+    // 不当标题排版。
+    let first_line_end = text.find('\n').unwrap_or(text.len());
+    let first_line = &text[..first_line_end];
+    let trimmed = first_line.trim_start();
+    let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+    let is_heading = (1..=6).contains(&hashes)
+        && trimmed.as_bytes().get(hashes) == Some(&b' ')
+        && first_line.starts_with(trimmed);
+    if is_heading {
+        let marker_len = hashes + 1;
+        let scale = style.heading.scales[(hashes.min(6) - 1).min(5)];
+        let scaled = font_size * scale;
+        let heading_lh = body_line_height(&style, scaled);
+        // ATX 前缀:弱色淡化,正文小字;行高用标题行盒,行内不劈行
+        let mut marker_format = egui::TextFormat::simple(
+            egui::FontId::new(font_size, body_family.clone()),
+            ui.visuals().weak_text_color(),
+        );
+        marker_format.line_height = Some(heading_lh);
+        job.sections.push(section(0..marker_len, marker_format));
+        // 标题文字:vendored 同式 —— bold 族(已注册时)+ 字号缩放 +
+        // strong 色,行高按放大后字号重推导
+        let mut heading_format = egui::TextFormat::simple(
+            egui::FontId::new(scaled, body_family.clone()),
+            ui.visuals().strong_text_color(),
+        );
+        if has_bold {
+            heading_format.font_id.family = bold_family;
+        }
+        heading_format.line_height = Some(heading_lh);
+        job.sections
+            .push(section(marker_len..first_line_end, heading_format));
+        if first_line_end < text.len() {
+            let mut rest = egui::TextFormat::simple(
+                egui::FontId::new(font_size, body_family.clone()),
+                text_color,
+            );
+            rest.line_height = Some(body_lh);
+            job.sections.push(section(first_line_end..text.len(), rest));
+        }
+    } else {
+        let mut body =
+            egui::TextFormat::simple(egui::FontId::new(font_size, body_family), text_color);
+        body.line_height = Some(body_lh);
+        job.sections.push(section(0..text.len(), body));
+    }
+    job
+}
+
+/// 活动块的类型徽标(#158):H1–H6 / 代码 / 表格 / 引用 / 分隔线 / 图片,
+/// 编辑时悬在块顶的块间空隙里(Notion 同款);普通段落不标。纯判定,
+/// 与 [`block_kind`] 同一套前缀规则。
+fn block_badge_label(block_text: &str) -> Option<&'static str> {
+    let first = block_text.lines().next().unwrap_or("");
+    let t = first.trim_start();
+    let hashes = t.bytes().take_while(|&b| b == b'#').count();
+    if (1..=6).contains(&hashes) && t.as_bytes().get(hashes) == Some(&b' ') {
+        return Some(match hashes {
+            1 => "H1",
+            2 => "H2",
+            3 => "H3",
+            4 => "H4",
+            5 => "H5",
+            _ => "H6",
+        });
+    }
+    if t.starts_with("```") || t.starts_with("~~~") {
+        return Some("代码");
+    }
+    if t.starts_with('|') {
+        return Some("表格");
+    }
+    if t.starts_with('>') {
+        return Some("引用");
+    }
+    if t.starts_with("![") {
+        return Some("图片");
+    }
+    if !t.is_empty() && t.bytes().all(|b| matches!(b, b'-' | b'*' | b'_' | b' ')) {
+        return Some("分隔线");
+    }
+    None
+}
+
 /// 预测活动块源码 TextEdit 的布局几何：(外框高, 光标行顶相对块顶的 y)。
 ///
 /// 与 egui TextEdit multiline 的 default_layouter 完全同参 shaping ——
@@ -579,27 +716,19 @@ fn locked_jump_landing(ui: &egui::Ui, live: &mut LiveState, rect: egui::Rect) {
 /// **之前**修正（重排发生在下一帧，偏移先行到位则重排帧不跳）；预测
 /// 残差由落地帧按实测光标行做一次校正（`LiveState::toggle_anchor`）。
 fn predict_source_layout(ui: &egui::Ui, text: &str, caret_char: usize) -> (f32, f32) {
-    let font_id = ui
-        .style()
-        .text_styles
-        .get(&egui::TextStyle::Monospace)
-        .cloned()
-        .unwrap_or_else(|| egui::FontId::monospace(14.0));
-    let line_height = body_line_height(
+    let wrap_width = (ui.available_width() - 8.0).max(24.0);
+    // 与编辑视图同一个排版作业(#158):预测即真相 —— 标题缩放/正文字体/
+    // 行盒高全部同源,视口锚定的预测精度不随排版改变而回退。
+    // (作业构造必须在 fonts_mut 闭包外:它内部取 context 写锁,与
+    // fonts_mut 的写锁嵌套即自死锁 —— 49ef922 记过的同类陷阱。)
+    let job = active_block_job(ui, text, wrap_width);
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let caret_row = galley.pos_from_cursor(egui::text::CCursor::new(caret_char));
+    let floor = body_line_height(
         &egui_markdown_style::global_style(ui.ctx()),
         crate::theme::editor_font_size(ui.ctx()),
     );
-    let wrap_width = (ui.available_width() - 8.0).max(24.0);
-    let mut job =
-        egui::text::LayoutJob::simple(text.to_owned(), font_id, egui::Color32::WHITE, wrap_width);
-    job.keep_trailing_whitespace = true;
-    for section in &mut job.sections {
-        section.format.line_height = Some(line_height);
-    }
-    let galley = ui.fonts_mut(|f| f.layout_job(job));
-    let caret_row = galley.pos_from_cursor(egui::text::CCursor::new(caret_char));
-    let height = galley.size().y.max(line_height) + 4.0;
-    (height, caret_row.min.y + 2.0)
+    (galley.size().y.max(floor) + 4.0, caret_row.min.y + 2.0)
 }
 
 /// 块内「可见内容末尾」的块内字符偏移：块源码尾部的换行（含块间空行
@@ -979,6 +1108,8 @@ pub fn ui(
                             .map_or(block_text.len(), |(byte, _)| byte)
                             .max(content_bytes);
                         let lines = block_text[..visible_bytes].lines().count().max(1);
+                        // 类型徽标文案提前判定(&'static str,不留 block_text 借用)
+                        let badge = block_badge_label(block_text);
                         let mut buffer = BlockBuffer {
                             buffer: editor,
                             range: range.clone(),
@@ -990,6 +1121,16 @@ pub fn ui(
                         let focused_last_frame = ui
                             .ctx()
                             .data(|data| data.get_temp::<bool>(focus_memory_id).unwrap_or(false));
+                        // 渲染形态原地编辑(#158)的排版闭包:先绑定再挂 ——
+                        // `.layouter(&mut 闭包字面量)` 的临时值撑不过语句
+                        let mut layouter = |ui: &egui::Ui,
+                                            text: &dyn egui::TextBuffer,
+                                            wrap_width: f32| {
+                            // 作业构造必须在 fonts_mut 闭包外:内部取
+                            // context 写锁,嵌套即自死锁(49ef922 同类)
+                            let job = active_block_job(ui, text.as_str(), wrap_width);
+                            ui.fonts_mut(|f| f.layout_job(job))
+                        };
                         let edit = egui::TextEdit::multiline(&mut buffer)
                             .id(response_id)
                             .font(egui::TextStyle::Monospace)
@@ -998,7 +1139,12 @@ pub fn ui(
                             // 与源码编辑器同样锁定焦点。活动块仍可由本模块的
                             // 单击路由显式切换，普通工具条、滚动和预览
                             // 控件不会让写作插入点被 egui 无意收回。
-                            .lock_focus(true);
+                            .lock_focus(true)
+                            // 渲染形态原地编辑(#158):自定义排版作业 ——
+                            // 文本与缓冲不变,光标/选区/IME 通路零改动;
+                            // 标题行放大加粗、正文行 = 预览正文字体,
+                            // Widget 块等宽回退。见 [`active_block_job`]。
+                            .layouter(&mut layouter);
                         // 活动块无输入框式外框(2026-10-10 mac 精修全平台化,
                         // #169):只留文字内距,光标/选区/IME 通路不变
                         let edit = edit
@@ -1029,6 +1175,31 @@ pub fn ui(
                                 output.response.response.rect.height(),
                             )
                         });
+                        // 类型徽标(#158):H1–H6/代码/表格/引用/分隔线/图片
+                        // 悬在块顶的块间空隙(首块钳回视口顶),纯绘制不参与
+                        // 命中 —— 「特殊功能地方编辑时显示」。
+                        if let Some(badge) = badge {
+                            let chip_h = 15.0;
+                            let clip = ui.clip_rect();
+                            let block_rect = output.response.response.rect;
+                            let y = (block_rect.top() - chip_h - 3.0).max(clip.top() + 1.0);
+                            let painter = ui.painter();
+                            let galley = painter.layout_no_wrap(
+                                badge.to_owned(),
+                                egui::FontId::monospace(10.0),
+                                ui.visuals().weak_text_color(),
+                            );
+                            let chip = egui::Rect::from_min_size(
+                                egui::pos2(block_rect.left(), y),
+                                egui::vec2(galley.size().x + 10.0, chip_h),
+                            );
+                            painter.rect_filled(chip, 3.0, ui.visuals().faint_bg_color);
+                            painter.galley(
+                                egui::pos2(chip.left() + 5.0, y + (chip_h - galley.size().y) * 0.5),
+                                galley,
+                                ui.visuals().weak_text_color(),
+                            );
+                        }
                         // 右键菜单(context-menu-plan §3 M1):活动块与源码
                         // 编辑器同一挂点,条目表共用;块内坐标落光标见
                         // editor_menu::attach。
@@ -4844,6 +5015,83 @@ mod tests {
             editor.text(),
             "第一段\n新\n\n第二段\n",
             "块尾 Enter 后的新行可写,新字不被吞回块尾"
+        );
+    }
+
+    /// 渲染形态原地编辑(#158):标题块激活后,编辑视图的标题行与富渲染
+    /// **同字体同字号同行盒**(形状高度差 ≤2px = 整像素圆整),块顶挂
+    /// H1 徽标;普通段落不挂徽标。文本与缓冲不变 —— 「点进去还是那个
+    /// 标题,只是多了个类型标签」。
+    #[test]
+    fn live_heading_edit_view_matches_render_and_shows_badge() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("# 标题甲乙丙\n\n正文段。\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+
+        // 浏览态帧:富渲染标题(纯文本形状,无 # 前缀、无徽标)
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let rich_rect = frame
+            .texts
+            .iter()
+            .find(|(t, _)| t.contains("标题甲乙丙"))
+            .expect("富渲染标题成形状")
+            .1;
+        assert!(!frame.texts.iter().any(|(t, _)| t == "H1"), "浏览态无徽标");
+
+        // 激活标题块:编辑视图标题行与富渲染同高;H1 徽标出现
+        live.active = Some(0);
+        live.pending_caret = Some((0, 0));
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let edit_rect = frame
+            .texts
+            .iter()
+            .find(|(t, _)| t.contains("标题甲乙丙"))
+            .expect("编辑视图标题成形状")
+            .1;
+        assert!(
+            (edit_rect.height() - rich_rect.height()).abs() <= 2.0,
+            "标题编辑行与渲染行同高:编辑 {:.1}px vs 渲染 {:.1}px",
+            edit_rect.height(),
+            rich_rect.height()
+        );
+        assert!(
+            frame.texts.iter().any(|(t, _)| t == "H1"),
+            "激活标题块挂 H1 徽标"
+        );
+
+        // 普通段落激活:不挂徽标
+        live.active = Some(1);
+        live.pending_caret = Some((1, 0));
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(
+            !frame
+                .texts
+                .iter()
+                .any(|(t, _)| matches!(t.as_str(), "H1" | "H2" | "代码" | "引用" | "表格")),
+            "普通段落无类型徽标"
         );
     }
 
