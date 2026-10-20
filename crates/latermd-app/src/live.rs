@@ -25,6 +25,15 @@
 //! 滚动);跨块路由与大纲跳转(`cursor.jump_to`)的光标落地与视口跟随
 //! **同帧**发生,不出现「光标写了但视图没跟」的帧。滚动偏移与跟随标志
 //! 都在 UI 侧,不进 State 归约。
+//!
+//! LP2-4 补**内联构造自动成形**(2026-10-20「输入后自动变成对应格式」):
+//! 活动块里**已配平**的内联构造(`**粗体**`、`` `代码` ``、`~~删除线~~`、
+//! `==高亮==`、`[链接]`、`*斜体*`)的内容直接套渲染格式 —— 区间判定是纯
+//! 函数 `latermd_md::inline_style_spans`(与渲染同一套 pulldown options,
+//! 未配平不出区间 = 打完闭标记的那一刻成形),排版落在
+//! [`active_block_job`] 的分段作业里(配方逐条镜像 vendored 富渲染),
+//! 定界符仍由 LP2-1 遮罩淡化 —— 成形与淡化两层职责互不侵吞,光标/选区/
+//! IME 通路零改动(还是那一个 TextEdit,只是排版变了)。
 
 use std::{
     hash::{Hash, Hasher},
@@ -567,6 +576,87 @@ fn locked_jump_landing(ui: &egui::Ui, live: &mut LiveState, rect: egui::Rect) {
     }
 }
 
+/// LP2-4 内联构造自动成形的着色参数(逐条镜像 vendored 富渲染的配方):
+/// 粗体走 bold 族(无族回退 strong 色,vendored `apply_bold` 同式)、斜体
+/// 假斜(vendored `TokenStyle.italic` 同式)、删除线 1px 基色描边
+/// (vendored `Stroke::new(1.0, color)` 同式)、行内代码 = 正文族 +
+/// `InlineCodeStyle` 前景/底色/外扩(vendored `apply_inline_code_bg`
+/// 同式,**字体不换** —— 富渲染的行内代码就是正文字体)、高亮 =
+/// `highlight_bg_color` 推导底色、链接文字 = `hyperlink_color`。
+struct InlineStylePaint {
+    has_bold: bool,
+    bold_family: egui::FontFamily,
+    strong_color: egui::Color32,
+    hyperlink_color: egui::Color32,
+    dark_mode: bool,
+    inline_code: egui_markdown_style::InlineCodeStyle,
+    highlight_bg: egui::Color32,
+}
+
+/// 把 [`latermd_md::inline_style_spans`] 的样式区间按字节边界切进 `region`,
+/// 每段从 `base` 克隆后叠加命中的样式集(LP2-4「输入后自动成形」的排版
+/// 落盘)。行内代码整段自成样式、不吃外层强调/链接色 —— vendored 渲染
+/// 「Code 事件重置 TokenStyle」同一语义。区间被 `region` 截断(构造跨
+/// 标题行边界等)时按截断后命中;样式表为空或 region 为空退化为单
+/// section,与 LP2-4 之前逐字节等价。
+fn push_inline_styled_sections(
+    job: &mut egui::text::LayoutJob,
+    region: Range<usize>,
+    base: &egui::TextFormat,
+    styles: &[latermd_md::InlineStyleSpan],
+    paint: &InlineStylePaint,
+) {
+    let hit = |kind: latermd_md::InlineStyleKind, seg: &Range<usize>| {
+        styles.iter().any(|span| {
+            span.kind == kind && span.range.start <= seg.start && seg.end <= span.range.end
+        })
+    };
+    let mut points = vec![region.start, region.end];
+    for span in styles {
+        if span.range.start < region.end && region.start < span.range.end {
+            points.push(span.range.start.max(region.start));
+            points.push(span.range.end.min(region.end));
+        }
+    }
+    points.sort_unstable();
+    points.dedup();
+    for window in points.windows(2) {
+        let seg = window[0]..window[1];
+        let mut format = base.clone();
+        if hit(latermd_md::InlineStyleKind::Code, &seg) {
+            format.color = paint.inline_code.color(paint.dark_mode);
+            format.background = paint.inline_code.background(paint.dark_mode);
+            format.expand_bg = paint.inline_code.expand_bg;
+        } else {
+            if hit(latermd_md::InlineStyleKind::Strong, &seg) {
+                if paint.has_bold {
+                    format.font_id.family = paint.bold_family.clone();
+                } else {
+                    format.color = paint.strong_color;
+                }
+            }
+            if hit(latermd_md::InlineStyleKind::Emphasis, &seg) {
+                format.italics = true;
+            }
+            if hit(latermd_md::InlineStyleKind::Strikethrough, &seg) {
+                format.strikethrough = egui::Stroke::new(1.0, base.color);
+            }
+            if hit(latermd_md::InlineStyleKind::LinkText, &seg) {
+                format.color = paint.hyperlink_color;
+            }
+            if hit(latermd_md::InlineStyleKind::Highlight, &seg) {
+                format.background = paint.highlight_bg;
+                format.expand_bg = crate::ui::rich_widgets::HIGHLIGHT_BG_EXPAND;
+            }
+        }
+        job.sections.push(egui::text::LayoutSection {
+            leading_space: 0.0,
+            byte_range: seg.start.into()..seg.end.into(),
+            format,
+        });
+    }
+}
+
 /// 活动块编辑视图的排版作业(#158 渲染形态原地编辑):**文本与缓冲不变**,
 /// 只换排版 —— Text 块用预览正文字体逐行排版(与富渲染同字体同字号同行
 /// 盒),Heading 块的标题行按 vendored 同式放大加粗(字号 ×
@@ -575,7 +665,9 @@ fn locked_jump_landing(ui: &egui::Ui, live: &mut LiveState, rect: egui::Rect) {
 /// 分隔线/图片)保持等宽(对齐表格与代码列,与既有源码编辑一致)。编辑态
 /// 与渲染态的字体、字号、行高全部同源取值 —— 点击进标题块不再「缩成
 /// 小字」,配合幻影行裁剪连标题块的高度都几乎不变。
-/// 行内 `**` 等标记仍由遮罩层(LP2-1)淡化;预测函数与编辑视图共用本函数,
+/// 行内已配平的构造由 [`push_inline_styled_sections`] 直接套渲染格式
+/// (LP2-4「输入后自动成形」:`**粗**` 出粗体、`` `代码` `` 出代码药丸
+/// ……),定界符仍由 LP2-1 遮罩层淡化;预测函数与编辑视图共用本函数,
 /// 视口锚定的预测精度随排版同源自动保持。
 fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::LayoutJob {
     let style = egui_markdown_style::global_style(ui.ctx());
@@ -628,6 +720,18 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
     let is_heading = (1..=6).contains(&hashes)
         && trimmed.as_bytes().get(hashes) == Some(&b' ')
         && first_line.starts_with(trimmed);
+    // LP2-4:已配平的内联构造内容直接套渲染格式(纯函数 + 快路径,纯正文
+    // 零解析、单 section 行为不变);定界符留给 LP2-1 遮罩。
+    let styles = latermd_md::inline_style_spans(text);
+    let paint = InlineStylePaint {
+        has_bold,
+        bold_family: bold_family.clone(),
+        strong_color: ui.visuals().strong_text_color(),
+        hyperlink_color: ui.visuals().hyperlink_color,
+        dark_mode: ui.visuals().dark_mode,
+        inline_code: style.inline_code.clone(),
+        highlight_bg: crate::ui::rich_widgets::highlight_bg_color(ui.visuals()),
+    };
     if is_heading {
         let marker_len = hashes + 1;
         let scale = style.heading.scales[(hashes.min(6) - 1).min(5)];
@@ -657,21 +761,30 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
             heading_format.font_id.family = bold_family;
         }
         heading_format.line_height = Some(heading_lh);
-        job.sections
-            .push(section(marker_len..first_line_end, heading_format));
+        push_inline_styled_sections(
+            &mut job,
+            marker_len..first_line_end,
+            &heading_format,
+            &styles,
+            &paint,
+        );
         if first_line_end < text.len() {
-            let mut rest = egui::TextFormat::simple(
-                egui::FontId::new(font_size, body_family.clone()),
-                text_color,
-            );
+            let mut rest =
+                egui::TextFormat::simple(egui::FontId::new(font_size, body_family), text_color);
             rest.line_height = Some(body_lh);
-            job.sections.push(section(first_line_end..text.len(), rest));
+            push_inline_styled_sections(
+                &mut job,
+                first_line_end..text.len(),
+                &rest,
+                &styles,
+                &paint,
+            );
         }
     } else {
         let mut body =
             egui::TextFormat::simple(egui::FontId::new(font_size, body_family), text_color);
         body.line_height = Some(body_lh);
-        job.sections.push(section(0..text.len(), body));
+        push_inline_styled_sections(&mut job, 0..text.len(), &body, &styles, &paint);
     }
     job
 }
@@ -2182,6 +2295,140 @@ mod tests {
         let mut live = LiveState::default();
         live.sync(&editor, None);
         (editor, live, OutlineCursor::default())
+    }
+
+    // —— LP2-4 活动块内联构造自动成形的排版守门 ——
+
+    /// 期望色/字号快照:与 job 同一帧取自同一个 Ui,断言不跨帧猜样式。
+    struct StyleExpectations {
+        strong: egui::Color32,
+        hyperlink: egui::Color32,
+        text: egui::Color32,
+        code_fg: egui::Color32,
+        code_bg: egui::Color32,
+        highlight_bg: egui::Color32,
+        h1_size: f32,
+    }
+
+    /// 无头构造 [`active_block_job`]:`run_ui` 取 Ui,顺手带回期望快照。
+    fn styled_job(text: &str) -> (egui::text::LayoutJob, StyleExpectations) {
+        let ctx = egui::Context::default();
+        let mut slot = None;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let job = active_block_job(ui, text, 480.0);
+            let style = egui_markdown_style::global_style(ui.ctx());
+            let inline_code = style.inline_code.clone();
+            let dark = ui.visuals().dark_mode;
+            let expected = StyleExpectations {
+                strong: ui.visuals().strong_text_color(),
+                hyperlink: ui.visuals().hyperlink_color,
+                text: ui.visuals().text_color(),
+                code_fg: inline_code.color(dark),
+                code_bg: inline_code.background(dark),
+                highlight_bg: crate::ui::rich_widgets::highlight_bg_color(ui.visuals()),
+                h1_size: crate::theme::editor_font_size(ui.ctx()) * style.heading.scales[0],
+            };
+            slot = Some((job, expected));
+        })
+        .drop_without_applying_deltas();
+        slot.expect("run_ui 闭包必已执行")
+    }
+
+    /// 覆盖 `byte`(字节偏移)的 section;没有则 panic(排版漏段当场红)。
+    fn section_at(job: &egui::text::LayoutJob, byte: usize) -> &egui::text::LayoutSection {
+        job.sections
+            .iter()
+            .find(|section| section.byte_range.start.0 <= byte && byte < section.byte_range.end.0)
+            .unwrap_or_else(|| panic!("字节 {byte} 不在任何 section"))
+    }
+
+    /// 六种构造的内容段套上对应格式;定界符段保持正文观感(LP2-1 的地盘,
+    /// 成形层不侵吞)。
+    #[test]
+    fn active_block_styles_completed_inline_constructs() {
+        let text = "**b** *i* ~~s~~ `c` [t](u) ==h==";
+        let (job, expected) = styled_job(text);
+        // 无头环境没有 bold 族:粗体回退 strong 色(vendored apply_bold 同式)
+        assert_eq!(section_at(&job, 2).format.color, expected.strong);
+        assert!(section_at(&job, 7).format.italics, "斜体假斜");
+        let strike = section_at(&job, 12).format.strikethrough;
+        assert_eq!(strike.color, expected.text, "删除线 1px 基色描边");
+        assert_eq!(strike.width, 1.0);
+        let code = &section_at(&job, 17).format;
+        assert_eq!(code.color, expected.code_fg, "行内代码前景");
+        assert_eq!(code.background, expected.code_bg, "行内代码药丸底色");
+        assert_eq!(
+            section_at(&job, 21).format.color,
+            expected.hyperlink,
+            "链接色"
+        );
+        let highlight = &section_at(&job, 29).format;
+        assert_eq!(highlight.background, expected.highlight_bg, "高亮荧光底");
+        assert_eq!(
+            highlight.expand_bg,
+            crate::ui::rich_widgets::HIGHLIGHT_BG_EXPAND
+        );
+        // 定界符(`**` 的首字节)不吃任何成形格式:正文色、无底、不假斜
+        let delimiter = &section_at(&job, 0).format;
+        assert_eq!(delimiter.color, expected.text);
+        assert_eq!(delimiter.background, egui::Color32::TRANSPARENT);
+        assert!(!delimiter.italics);
+    }
+
+    /// 纯正文与未配平构造:单 section、零成形 —— LP2-4 之前的行为逐字节
+    /// 不变(「打完闭标记才成形」的语义边界)。
+    #[test]
+    fn active_block_plain_and_unclosed_stay_single_section() {
+        for text in ["普通正文,没有标记。", "**b `c [t](u ==h"] {
+            let (job, _) = styled_job(text);
+            assert_eq!(job.sections.len(), 1, "{text:?}");
+            assert_eq!(job.sections[0].byte_range.start.0, 0);
+            assert_eq!(job.sections[0].byte_range.end.0, text.len());
+            assert_eq!(
+                job.sections[0].format.background,
+                egui::Color32::TRANSPARENT
+            );
+        }
+    }
+
+    /// 标题块:幽灵 `# ` 前缀观感不回归(#158),标题行内已配平构造在
+    /// **标题字号**上成形(代码药丸叠在放大字号上,不是缩回正文)。
+    #[test]
+    fn active_block_heading_keeps_marker_and_styles_inline() {
+        let (job, expected) = styled_job("# 标题 `代码`");
+        let ranges: Vec<(usize, usize)> = job
+            .sections
+            .iter()
+            .map(|section| (section.byte_range.start.0, section.byte_range.end.0))
+            .collect();
+        // 字节:# (0..2) | 标题+空格+开反引号 (2..10) | 代码内容 (10..16) | 闭反引号 (16..17)
+        // —— 反引号是定界符,不吃药丸,留在标题正文段里(成形只管内容)
+        assert_eq!(ranges, vec![(0, 2), (2, 10), (10, 16), (16, 17)]);
+        // 幽灵前缀:正文色 × 43% 透明度(110/255),字号 = 标题字号
+        assert_eq!(
+            job.sections[0].format.color,
+            egui::Color32::from_rgba_unmultiplied(
+                expected.text.r(),
+                expected.text.g(),
+                expected.text.b(),
+                110
+            )
+        );
+        assert_eq!(job.sections[0].format.font_id.size, expected.h1_size);
+        // 标题文字段:标题字号 + strong 色;代码内容段:标题字号上叠药丸
+        assert_eq!(job.sections[1].format.font_id.size, expected.h1_size);
+        assert_eq!(job.sections[1].format.color, expected.strong);
+        assert_eq!(job.sections[2].format.background, expected.code_bg);
+        assert_eq!(job.sections[2].format.font_id.size, expected.h1_size);
+        // 两个反引号定界符都不吃药丸(成形只管内容,定界符归 LP2-1)
+        assert_eq!(
+            job.sections[1].format.background,
+            egui::Color32::TRANSPARENT
+        );
+        assert_eq!(
+            job.sections[3].format.background,
+            egui::Color32::TRANSPARENT
+        );
     }
 
     /// 块表连续覆盖全文(安全底线:落在块外的字节会在编辑时丢失)。
