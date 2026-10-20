@@ -553,35 +553,33 @@ impl LaterMdApp {
         // 状态源。完全收起时 egui 只画右缘一根细把手(旧口径同款),
         // `add_contents` 不再执行。
         let mut compare_open = split;
-        // **进场动画分两条通道**(2026-10-19 坤哥:「切换分栏时改成向右滑动」
-        // +「源码模式从右往左是之前的模式,别改」):
+        // **抽屉语义**(2026-10-20 坤哥:「分栏回到写作模式的时候,能不能
+        // 从右往左覆盖的感觉,循环起来」):从**写作档**推进来的那一轮
+        // (`split_enter_from == Live`),进场是「列向左铺开后向右推到槽位」,
+        // 退场要沿同一条路**反向退回**(向左)并淡出 —— 推出去的能拉回来,
+        // 才读得出「循环」。
         //
-        // - `写作 → 分栏`:自己驱动 `enter-slide`,列整块盖在编辑区上向右
-        //   推进到槽位。
-        // - `源码 → 分栏`:**走 egui 原生的从右缘向左进入**,即本 PR 之前的
-        //   观感,一个字都不改。
+        // 从**源码档**推进来的那一轮维持 #279 的旧观感:列从屏幕右缘向左
+        // 进入,退场也反向退回右缘(egui 原生滑出)。**方向镜像「来时那条
+        // 路」**,不按退出目标再分一路 —— 怎么来怎么回去。
         //
-        // 两条通道的**起点视觉完全一样**(编辑区都是满宽的源码 TextEdit),
-        // 单看当前 `render_mode` 分不出来 —— 故来源由归约记在
-        // `state.split_enter_from`(见该字段文档)。
-        //
-        // 向右滑那条必须绕开 egui 的收展通道:它的实现是把面板**向固定边
-        // (右缘)平移**并按可见部分裁剪(`panel.rs` `slide_distance`/
-        // `visible_outer_rect`),所以**只可能**得到「从屏幕右缘飞进来」。
-        // 绕法是自己驱动一条独立动画 `enter-slide`,并在进场期间把 egui 的
-        // 收展比例**钉死在展开端点**:`animation_time = 0` 时
-        // `animate_bool` 的 `elapsed / 0` 必非有限值 ⇒ 落 `end` 分支,面板
-        // 第一帧即满宽(编辑区当帧收窄);位移、裁剪与正文绘制全在 ⑤'(中央
-        // 编辑区**之后**,否则盖不住编辑区)。
-        let slide_right = split && self.state.split_enter_from == crate::live::RenderMode::Live;
-        let enter_frac = ui.ctx().animate_bool_responsive(
-            egui::Id::new(COMPARE_PANEL_ID).with("enter-slide"),
-            slide_right,
-        );
-        if slide_right && enter_frac < 1.0 {
+        // 抽屉那条路进出共用一个 0..1 的进度值,同一个公式
+        // `dx = -(1 - frac) * 宽`:进场 frac 0→1(从槽位左侧一路推到槽位),
+        // 退场 frac 1→0(原路退回槽位左侧)。二者都必须**钉住 egui 原生
+        // 收展**(`animation_time = 0` ⇒ `elapsed / 0` 非有限值 ⇒ 直接落
+        // `end` 分支):
+        // - 进场钉 `true`:面板当帧满宽,编辑区立刻收窄;
+        // - 退场钉 `false`:面板当帧归零,**立刻把宽度还给中央区**,位移、
+        //   裁剪、淡出全交给 ⑤' 的浮层。不钉的话 egui 会插一手自己的
+        //   「向右滑出」,与抽屉的向左退回在同一帧里打架。
+        let drawer = self.state.split_enter_from == crate::live::RenderMode::Live;
+        let drawer_frac = ui
+            .ctx()
+            .animate_bool_responsive(egui::Id::new(COMPARE_PANEL_ID).with("drawer-slide"), split);
+        if drawer {
             ui.ctx().animate_bool_with_time(
                 egui::Id::new(COMPARE_PANEL_ID).with("animation"),
-                true,
+                split,
                 0.0,
             );
         }
@@ -640,19 +638,17 @@ impl LaterMdApp {
                     let avail = ui.available_rect_before_wrap();
                     ui.set_min_width(avail.width());
                     ui.expand_to_include_y(avail.max.y);
-                    // **「写作 → 分栏」的正文不在这里画**(2026-10-19 坤哥:
-                    // 「切换分栏时改成窗口向右滑动」)。本 Ui 的 clip 被 egui
-                    // 钉在槽位上(`panel.rs` `set_clip_rect(visible_outer_rect)`),
-                    // 而那条通道要的正是「列盖在编辑区上向右推进」—— 画在这里
-                    // 必被裁掉左半截,退化回「从边上进来」。它的正文在 ⑤'
-                    // (中央编辑区之后)单独画一遍。
+                    // **抽屉那一轮的正文全程不在④画**(2026-10-19 坤哥「切
+                    // 换分栏时改成向右滑动」,2026-10-20 退场反向)。本 Ui 的
+                    // clip 被 egui 钉在槽位上(`panel.rs`
+                    // `set_clip_rect(visible_outer_rect)`),而列要经过槽位
+                    // **左侧**的编辑区上方 —— 画在这里必被裁掉那一截,退化
+                    // 回「从边上飞」。它的正文在 ⑤'(中央编辑区之后)画。
                     //
-                    // **其余全部在这里画**:「源码 → 分栏」要保留 egui 原生的
-                    // 从右缘进入(坤哥同轮:「源码模式从右往左是之前的模式」),
-                    // 以及退场 —— 后者坤哥明确「不动」,而 egui 的滑出动画
-                    // (`slide_distance` + 可见部分 clip)正是现状观感。
-                    // 三者按 `slide_right` 互斥,任一帧只画一次。
-                    if !slide_right {
+                    // **源码档那一轮仍然在这里画**:egui 原生的从右缘向左
+                    // 进入(#279 的旧观感)与它的反向退回都由 panel 的 clip
+                    // 兜着,不需要绕。两者按 `drawer` 互斥,任一帧只画一次。
+                    if !drawer {
                         compare_column_body(ui, self);
                     }
                 });
@@ -931,19 +927,30 @@ impl LaterMdApp {
         }
 
         // ⑤' 对照列正文:面板(④)只占位,正文在这里画第二遍。**只服务
-        // 「写作 → 分栏」那一条**(见 ④ 的 `slide_right` 文档)。
+        // 抽屉那一轮**(见 ④ 的 `drawer` 文档)—— 进场向右推开、退场反向
+        // 退回,两条都是这条浮层。
         //
         // **为什么必须在中央编辑区之后**:那条通道要的观感是「列整块盖在
-        // 编辑区上,由左向右推进到槽位」。而 ④ 的 Ui 被 egui 把 clip 钉在槽位上
+        // 编辑区上」,而 ④ 的 Ui 被 egui 把 clip 钉在槽位上
         // (`panel.rs` `set_clip_rect(visible_outer_rect)`),画在 ④ 会被裁掉
-        // 左半截,退化回「从边上进来」。这里用根层另开一个子 Ui,clip 由
-        // 本函数自己给,才盖得住编辑区。
+        // 槽位左侧那一截。这里用根层另开一个子 Ui,clip 由本函数自己给,
+        // 才盖得住编辑区。
         //
-        // 「源码 → 分栏」与退场都走 egui 原生滑入/滑出,正文由 ④ 的面板 Ui
-        // 画(那边 `!slide_right` 时才调 `compare_column_body`)。
-        if slide_right {
+        // 源码档那一轮的进出都由 ④ 的面板 Ui 画(那边 `!drawer` 时才调
+        // `compare_column_body`),走 egui 原生滑入/滑出。
+        //
+        // **退场收尾必须彻底停画**:动画收敛后 `drawer_frac` 停在 0,`dx`
+        // 恒等于 −槽位宽,列整块落在槽位左侧、opacity 为 0 —— 肉眼不可见,
+        // 但 `compare_column_body` 会在**离开分栏后的每一帧**照跑一遍
+        // (整套 Live 富渲染 + 块同步)。生产里这就是「切回写作档之后白烧
+        // 一整条渲染」。故闸门加在这里,不看 opacity 看「这个抽屉还有没有
+        // 被看见的可能」。
+        if drawer && (split || drawer_frac > 0.0) {
             if let Some(slot) = compare_slot {
-                let dx = -(1.0 - enter_frac) * slot.width();
+                // 进退同一个公式:frac 0→1 是「从槽位左侧一路推到槽位」,
+                // 1→0 是原路退回。方向完全由这一个值决定,不存在第二份
+                // 「退场该往哪」,翻来覆去都不会漂移。
+                let dx = -(1.0 - drawer_frac) * slot.width();
                 let rect = egui::Rect::from_min_max(
                     egui::pos2(slot.left() + dx, slot.top()),
                     egui::pos2(slot.right() + dx, slot.bottom()),
@@ -964,6 +971,18 @@ impl LaterMdApp {
                             .layout(egui::Layout::top_down(egui::Align::Min)),
                     );
                     holder.set_clip_rect(clip);
+                    // 淡出只作用于**退场的后半程**:抽屉往回缩的同时渐渐
+                    // 透明,回到起点恰好隐没。前半程(frac > 0.55)保持不
+                    // 透明 —— 否则列刚退就发虚,看不出是在平移。
+                    //
+                    // 为什么写 Ui 而不是 painter:`Ui::painter()` 只有只读借
+                    // 用;而 `Ui::set_opacity` 写的是 Ui 自己的 painter 副本,
+                    // `new_child`/`Frame::show` 克隆 painter 时会带着它往下
+                    // 传 —— 正好覆盖到列头与 Live 正文的每一笔。
+                    if !split {
+                        let fade = ((drawer_frac - 0.15) / 0.55).clamp(0.0, 1.0);
+                        holder.set_opacity(fade);
+                    }
                     // 背景必须跟着正文一起走,否则列会「透明」地压在编辑
                     // 区上。色值与 ④ 的 Panel Frame 同源。
                     egui::Frame::default()
@@ -8847,6 +8866,144 @@ mod tests {
             landed,
             "60 帧内应滑到位(槽位左缘 {slot_left:.1}),停在 {left:.1}"
         );
+    }
+
+    /// 从**写作档**切进来又切回去时,对照列必须**沿原路向左退回**并淡出
+    /// (2026-10-20 坤哥:「分栏回到写作模式的时候,能不能从右往左覆盖的
+    /// 感觉,这样给人感觉是循环起来的」)。
+    ///
+    /// 这是 [`Self::compare_column_slides_right_into_place_on_enter`] 的**反向
+    /// 镜像**:那条守「推开」(左缘向右),本条守「退回」(左缘向左)。两条
+    /// 同时绿,抽屉才真闭上。
+    ///
+    /// **为什么必须另起一条,不能指望 `compare_column_slides_closed_over_frames`**:
+    /// 那条用的 `compare_only_app` 是**直接赋值** `render_mode`,没走
+    /// `set_render_mode`,于是 `split_enter_from` 停在初值 `Source` —— 它守
+    /// 的是「源码档那一轮」的退场。**抽屉退场那条分支本来就零覆盖**,不补
+    /// 这条的话写反了方向也照样全绿。
+    ///
+    /// 判据同样取「读者看得见的列左缘」,不读 `drawer_frac`。三条断言:
+    /// 1. **首帧列仍在槽位附近**(不是瞬移消失):退场有动画的最低要求。
+    /// 2. **左缘逐帧向左**(单调不增):「从右往左覆盖」的物理含义。
+    ///    旧实现向**右**滑出,这条直接红。
+    /// 3. **最终彻底不见**:不能留残影。
+    ///
+    /// 退场期间列的宽度会变(on── `dx` 把它往左推,但 clip 的右边界不动,
+    /// 被裁出来的可见部分逐帧变窄),故宽度过滤用「非全宽」而不是定值区间。
+    #[test]
+    fn compare_column_retracts_left_when_learing_the_drawer_round() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let ctx = egui::Context::default();
+        ctx.set_visuals(egui::Visuals::light());
+        let mut app = LaterMdApp {
+            frameless: true,
+            ..Default::default()
+        };
+        app.state.layout.left = false;
+        app.state.render_mode = crate::live::RenderMode::Source;
+        for _ in 0..3 {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+        }
+        // 走真实归约进场:源码 → 写作 → 分栏。`split_enter_from` 因此是
+        // `Live`,退场才会走抽屉通道 —— 这正是本测试的前提。
+        app.state.apply(Message::ToggleLivePreview);
+        app.state.apply(Message::ToggleLivePreview);
+        assert_eq!(
+            app.state.render_mode,
+            crate::live::RenderMode::Split,
+            "前置:两次切换应到分栏档"
+        );
+        // 先跑到进场动画收敛,baseline 才有意义(落的那一帧不能当退场证据)。
+        let column_left = |out: &egui::FullOutput| -> Option<f32> {
+            out.shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(r)
+                        if r.rect.height() > 400.0
+                            && r.fill != egui::Color32::TRANSPARENT
+                            && r.rect.width() < 700.0
+                            && r.rect.width() > 8.0 =>
+                    {
+                        Some(r.rect.left())
+                    }
+                    _ => None,
+                })
+                .min_by(|a, b| a.total_cmp(b))
+        };
+        let frame = |app: &mut LaterMdApp, reduce: bool| -> egui::FullOutput {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    if reduce {
+                        app.reduce(ui.ctx());
+                    }
+                    app.draw(ui);
+                },
+            );
+            out.textures_delta.clear();
+            out
+        };
+        for _ in 0..60 {
+            if column_left(&frame(&mut app, true)).is_none() {
+                break;
+            }
+        }
+        let settled =
+            column_left(&frame(&mut app, false)).expect("前置:分栏档收敛后应能看到对照列");
+
+        // 切回写作档:`Split → Source` 是循环档序的下一档。
+        app.state.apply(Message::ToggleLivePreview);
+        assert_eq!(
+            app.state.render_mode,
+            crate::live::RenderMode::Source,
+            "前置:分栏的下一档应是源码档"
+        );
+        // 为什么不断言「首帧 ≈ 静止位置」:`animate_bool_responsive` 是
+        // cubic_out(easing(x)=1−(1−x)³),退场第一步就吃掉 23% 的路程
+        // (实测 980 → 883.5,正是 420 × 0.23)。这是 easing 的本意(出手快、
+        // 收尾慢),不是跳帧。所以判据写成**方向性**的:首帧的列左缘不许
+        // 跑到静止位置**右边**去 —— 旧「向右滑出」的观感恰恰是这个方向。
+        let first = column_left(&frame(&mut app, true)).expect("退场第一帧列应仍在(不是瞬移)");
+        assert!(
+            first <= settled + 0.5,
+            "退场第一帧应已开始向左退(左缘 ≤ 静止位 {settled:.1}),实得 {first:.1}\
+             —— 往右走就是旧的「滑出屏幕」观感"
+        );
+
+        let mut edge = first;
+        let mut moved = 0;
+        let mut gone = false;
+        for _ in 0..60 {
+            match column_left(&frame(&mut app, true)) {
+                Some(now) => {
+                    assert!(
+                        now <= edge + 0.5,
+                        "抽屉应向左退回(左缘不增),却从 {edge:.1} 涨到 {now:.1}\
+                         —— 这是旧「向右滑出」的观感"
+                    );
+                    if now < edge - 0.5 {
+                        moved += 1;
+                    }
+                    edge = now;
+                }
+                None => {
+                    gone = true;
+                    break;
+                }
+            }
+        }
+        assert!(moved >= 4, "应至少 4 帧看到列在向左退回,实得 {moved} 帧");
+        assert!(gone, "60 帧内应退干净(卡在 {edge:.1})");
     }
 
     /// 从**源码档**切到分栏时,对照列必须保留**旧观感**(从屏幕右缘向左
