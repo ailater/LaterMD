@@ -55,10 +55,15 @@
 
 - **【修复 2026-10-16】分隔线压弹窗(层序,非 P4 缺失而是历史旧病)**:`panel_divider` 原先画在独立 `Order::Middle` 散层,而 egui 出同一 Order 形状时先排**已注册 Area**(全部 `egui::Window` 弹窗)、非 Area 散层兜底追加在最后 ⇒ 线横穿设置/关于等一切弹窗(坤哥截图实测;P4 前的旧 `preview_divider` 同构,属历史旧病)。修法 = 改画**调用方所在层**(根层,提交序:调用点 ⑥ 在中央面板内容之后 ⇒ 盖得住面板;弹窗是注册 Area ⇒ 永远在根层之上)。守门 `compare_divider_paints_below_dialogs` 断言形状流序(分隔线下标 < 弹窗标题下标;egui Window 首帧是 sizing pass 不出形状,须跑两帧取证),独立散层实现必红。
 
+- **【核验 2026-10-20】对 main `c2c2fe7`(#281,距上次核验 #279 又 3 个提交)重验七阶段不变量,全部成立 ⇒ 无阶段可推进**。`ui::preview::` / `pub mod preview` 零命中;`ToggleRightPreview` 只剩 `command.rs` 两条注释 + 三份历史文档(`docs/README.md`、`docs/auto-plan.md`、`docs/decisions-pending.md` —— 按「历史记录只加后记不改原文」保留);`RenderMode` 三态齐(`live.rs:91`),`TabState::live_right`(`tabs.rs:126`)+ `LiveState::browse_locked`(`live.rs:135`)+ `layout.rs` 的 `live_right_width` 在位;`MarkdownLabel` 生产调用点只在 `live::ui`(其余命中是 benches / examples / 验收 harness,非生产);`AGENTS.md` 铁律四含「单一富渲染路径」;main CI #281 success。**R1–R7 全部销账、阻塞为空、文档里没有 P7 ⇒ 本轮不造阶段、不改判据。**
+
+- **【遗留 2026-10-20,非阻塞,等裁决】`crates/` 里仍有 10 处注释把已删的 `ui/preview.rs` 当「同款参照」**:`live.rs` 2 处(2864 / 2877)、`preview_typography_acceptance.rs` 1 处(126)、`ui/editor.rs` 1 处(806)、`ui/editor_menu.rs` 1 处(268)、`ui/mermaid.rs` 1 处(40)、`ui/minimap.rs` 2 处(264 / 593)、`ui/tab_switch_perf.rs` 2 处(5 / 122)。**根因**:P5 删模块、P6 清的 5 处死链是 **rustdoc 链接**(`[`...`]` 型),扫的是文档面,没扫「照 `ui/preview.rs` tests 同款」这类**参照系注释** —— 它们是过程信息(「当年抄自哪里」),不是事实陈述,删模块后就成了指向不存在文件的路标,会误导后来者。**建议两个方案**(本轮未动代码):①**就地改口径** —— 把参照从句改指向现存真实宿主(`live.rs` 自身的测试手法 / `ui::rich_widgets` / `ui::ai_card`),语义信息零丢失,8 个非 `live.rs` 文件可立即清;②**只删不替** —— 认定「抄自哪里」不是读者需要的信息,直接删掉从句,改动最小但丢一条溯源。**本轮不动 `crates/` 的理由**:开工时主工作区有他人未提交 WIP(`live.rs` +463/−2、`latermd-md/src/lib.rs` +11,含 `lp25_probe` 调试模块),而 `live.rs` 正是死链文件之一,改它必与在途改动抢 hunk —— 按共享工作区纪律让路,先登记等裁决。
 
 ## 阻塞
 
 （无。遇到编译不过 / 测试红 / 决策点时在此记录：问题现象、已排除的可能、建议的两个方案，等人工裁决。）
+
+**非阻塞遗留**：上一节末条登记的「`crates/` 里 10 处 `ui/preview.rs` 死链注释」（2026-10-20）。它不阻塞任何阶段（代码与测试全绿），只是等「改口径 / 只删不替」的二选一裁决，故不入本节。
 
 ---
 
