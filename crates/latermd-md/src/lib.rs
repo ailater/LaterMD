@@ -629,6 +629,201 @@ pub fn inline_marks_with_pairs(text: &str) -> InlineMarks {
     }
 }
 
+/// 活动块「输入后自动成形」的样式区间(LP2-4):每个**已配平**的内联构造,
+/// 给出应套用其渲染格式的**内容**字节区间 —— 区间落在定界符内侧,定界符
+/// 本身仍归 LP2-1 半隐藏层淡化,成形与淡化两层职责互不侵吞。
+///
+/// 判定与 [`inline_marks_with_pairs`] 同一套 pulldown-cmark options(铁律
+/// 「单一解析器」):未配平的 `**`/`` ` ``/`[` 在 pulldown 语义里是普通文
+/// 本,不出区间 —— 即「打完闭标记的那一刻才成形」,正是「各种输入后自动
+/// 变成对应格式」的语义。`==高亮==` 不是 CommonMark 构造,复用
+/// [`highlight_spans`] 的扫描(连带它自己的豁免清单:与代码/链接/强调
+/// 重叠的整对作废)。
+///
+/// 输入应是单个块的源码([`blocks`] 保证块可独立解析),返回区间是块内
+/// 偏移、按 start 升序。嵌套构造(`***x***`、链接文字里的强调)每层各出
+/// 一条区间,重叠是正常的 —— 消费侧按原子字节段合并属性;唯一例外是行
+/// 内代码:它整段自成样式、不吃外层强调,与 vendored 渲染「Code 事件
+/// 重置 TokenStyle」同一语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineStyleKind {
+    /// `**粗体**` / `__粗体__`
+    Strong,
+    /// `*斜体*` / `_斜体_`
+    Emphasis,
+    /// `~~删除线~~`
+    Strikethrough,
+    /// `` `行内代码` ``(内容区间,反引号不在内)
+    Code,
+    /// `[文字](目标)` 的文字部分与 autolink 的 URL。
+    LinkText,
+    /// `==高亮==`(扩展语法,非 CommonMark)。
+    Highlight,
+}
+
+/// [`inline_style_spans`] 的一条产出:构造类型 + 应套用该格式的字节区间。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineStyleSpan {
+    /// 应套用格式的字节区间(定界符内侧)。
+    pub range: Range<usize>,
+    /// 构造类型。
+    pub kind: InlineStyleKind,
+}
+
+/// 抽出全部已配平内联构造的样式区间(LP2-4,详见 [`InlineStyleKind`])。
+///
+/// 快路径:文本不含任一定界字符(`*` `_` `~` `` ` `` `[` `<` 与 `==`)时
+/// 不启动解析,直接空表 —— 纯正文零开销。
+pub fn inline_style_spans(text: &str) -> Vec<InlineStyleSpan> {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    if !text
+        .bytes()
+        .any(|b| matches!(b, b'*' | b'_' | b'~' | b'`' | b'[' | b'<'))
+        && !text.contains("==")
+    {
+        return Vec::new();
+    }
+
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_TASKLISTS);
+
+    // 开放构造栈。强调族闭合时按「构造两端的定界符长跑」剥内容:`***x***`
+    // 里 Strong 与 Emphasis 的构造区间彼此覆盖,gap 推导会双双落空,而
+    // `*`/`_`/`~` 的开闭长跑是唯一稳定事实;链接族相反,文字里的 `]` 与
+    // 目标里的 `[]()` 剥不出长跑,只有「内容 gap」推导可靠(与
+    // [`inline_marks_with_pairs`] 同式)。各用各的。
+    enum Frame {
+        /// 强调族:(类型, 构造区间)。
+        Emph(InlineStyleKind, Range<usize>),
+        /// 链接族:(是否链接而非图片, 构造区间, 内部内容累计)。
+        Link(bool, Range<usize>, Vec<Range<usize>>),
+    }
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut spans: Vec<InlineStyleSpan> = Vec::new();
+    let feed = |stack: &mut Vec<Frame>, range: Range<usize>| {
+        if let Some(Frame::Link(_, _, covered)) = stack.last_mut() {
+            covered.push(range);
+        }
+    };
+
+    for (event, span) in Parser::new_ext(text, options).into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                feed(&mut stack, span.clone());
+                let frame = match tag {
+                    Tag::Strong => Frame::Emph(InlineStyleKind::Strong, span.clone()),
+                    Tag::Emphasis => Frame::Emph(InlineStyleKind::Emphasis, span.clone()),
+                    Tag::Strikethrough => Frame::Emph(InlineStyleKind::Strikethrough, span.clone()),
+                    Tag::Link { .. } => Frame::Link(true, span.clone(), Vec::new()),
+                    Tag::Image { .. } => Frame::Link(false, span.clone(), Vec::new()),
+                    _ => continue,
+                };
+                stack.push(frame);
+            }
+            Event::End(tag_end) => {
+                let frame = match tag_end {
+                    TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => stack.pop(),
+                    TagEnd::Link | TagEnd::Image => stack.pop(),
+                    _ => None,
+                };
+                match frame {
+                    Some(Frame::Emph(kind, range)) => {
+                        let bytes = text.as_bytes();
+                        let tilde = kind == InlineStyleKind::Strikethrough;
+                        let delim = |byte: u8| {
+                            if tilde {
+                                byte == b'~'
+                            } else {
+                                byte == b'*' || byte == b'_'
+                            }
+                        };
+                        let mut start = range.start;
+                        while start < range.end && delim(bytes[start]) {
+                            start += 1;
+                        }
+                        let mut end = range.end;
+                        while end > start && delim(bytes[end - 1]) {
+                            end -= 1;
+                        }
+                        if start < end {
+                            spans.push(InlineStyleSpan {
+                                range: start..end,
+                                kind,
+                            });
+                        }
+                        feed(&mut stack, range);
+                    }
+                    Some(Frame::Link(is_link, range, covered)) => {
+                        // gap 推导:首末 gap 之间的就是链接文字(嵌套内容
+                        // 不是 gap)。图片 alt 不出样式 —— 富渲染整块换成
+                        // 图片 widget,活动块保持源码观感。
+                        let mut covered = covered;
+                        covered.sort_by_key(|inner| inner.start);
+                        let mut gaps = Vec::new();
+                        let mut cursor = range.start;
+                        for inner in covered {
+                            let inner = inner.start.max(range.start)..inner.end.min(range.end);
+                            if inner.start > cursor {
+                                gaps.push(cursor..inner.start);
+                            }
+                            cursor = cursor.max(inner.end);
+                        }
+                        if cursor < range.end {
+                            gaps.push(cursor..range.end);
+                        }
+                        if is_link && gaps.len() >= 2 {
+                            let content = gaps[0].end..gaps[gaps.len() - 1].start;
+                            if !content.is_empty() {
+                                spans.push(InlineStyleSpan {
+                                    range: content,
+                                    kind: InlineStyleKind::LinkText,
+                                });
+                            }
+                        }
+                        feed(&mut stack, range);
+                    }
+                    _ => {}
+                }
+            }
+            // 行内代码是单事件(区间含反引号与内容):两端的反引号串剥掉,
+            // 内容区间成形。空代码(``` `` ``` 之间无字)不出区间。
+            Event::Code(_) => {
+                let bytes = text.as_bytes();
+                let mut ticks_start = span.start;
+                while ticks_start < span.end && bytes[ticks_start] == b'`' {
+                    ticks_start += 1;
+                }
+                let mut ticks_end = span.end;
+                while ticks_end > ticks_start && bytes[ticks_end - 1] == b'`' {
+                    ticks_end -= 1;
+                }
+                if ticks_start < ticks_end {
+                    spans.push(InlineStyleSpan {
+                        range: ticks_start..ticks_end,
+                        kind: InlineStyleKind::Code,
+                    });
+                }
+                feed(&mut stack, span);
+            }
+            _ => feed(&mut stack, span),
+        }
+    }
+
+    // `==高亮==` 扩展语法:区间含两侧 `==`(ASCII,各 2 字节),内容在中间。
+    for highlight in highlight_spans(text) {
+        spans.push(InlineStyleSpan {
+            range: highlight.span.start + 2..highlight.span.end - 2,
+            kind: InlineStyleKind::Highlight,
+        });
+    }
+    spans.sort_by_key(|span| span.range.start);
+    spans
+}
+
 /// 触发选区扩展的指针手势(LP2-2)。扩展是**一次性**的:只在事件帧传入
 /// [`mark_interaction`],静止帧传 `None` —— 选区不会被持续吸附到标记对。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2861,6 +3056,103 @@ mod tests {
     fn inline_marks_empty_and_plain_text() {
         assert!(inline_marks("").is_empty());
         assert!(inline_marks("普通段落,没有标记。").is_empty());
+    }
+
+    // —— inline_style_spans(LP2-4 活动块内联构造自动成形)——
+
+    fn span_of(range: Range<usize>, kind: InlineStyleKind) -> InlineStyleSpan {
+        InlineStyleSpan { range, kind }
+    }
+
+    /// 六种构造各出一条**内容**区间:定界符一律不在区间内。
+    #[test]
+    fn inline_styles_cover_common_constructs() {
+        let text = "**b** *i* ~~s~~ `c` [t](u) ==h==";
+        assert_eq!(
+            inline_style_spans(text),
+            vec![
+                span_of(2..3, InlineStyleKind::Strong),
+                span_of(7..8, InlineStyleKind::Emphasis),
+                span_of(12..13, InlineStyleKind::Strikethrough),
+                span_of(17..18, InlineStyleKind::Code),
+                span_of(21..22, InlineStyleKind::LinkText),
+                span_of(29..30, InlineStyleKind::Highlight),
+            ]
+        );
+    }
+
+    /// 未配平的定界符是普通文本:打完闭标记才成形(「输入后自动变成对应
+    /// 格式」的语义边界)。
+    #[test]
+    fn inline_styles_unclosed_constructs_stay_plain() {
+        assert!(inline_style_spans("").is_empty());
+        assert!(inline_style_spans("普通正文,没有任何定界符。").is_empty());
+        assert!(inline_style_spans("**b `c [t](u ==h").is_empty());
+    }
+
+    /// 下划线变体与 CJK 内容:区间按字节,不按字符数。
+    #[test]
+    fn inline_styles_underscore_and_cjk() {
+        assert_eq!(
+            inline_style_spans("__b__ _斜体_"),
+            vec![
+                span_of(2..3, InlineStyleKind::Strong),
+                span_of(7..13, InlineStyleKind::Emphasis), // `_`(6) + 6 字节 CJK(7..13)
+            ]
+        );
+    }
+
+    /// 嵌套强调(`***x***`):两层构造区间彼此覆盖,各自剥出同一内容区间。
+    #[test]
+    fn inline_styles_nested_emphasis_each_layer() {
+        assert_eq!(
+            inline_style_spans("***x***"),
+            vec![
+                span_of(3..4, InlineStyleKind::Strong),
+                span_of(3..4, InlineStyleKind::Emphasis),
+            ]
+        );
+        // 强调里套行内代码:两层各出区间(消费侧让代码整段自成样式)
+        assert_eq!(
+            inline_style_spans("*a `b` c*"),
+            vec![
+                span_of(1..8, InlineStyleKind::Emphasis),
+                span_of(4..5, InlineStyleKind::Code),
+            ]
+        );
+    }
+
+    /// 链接文字与 autolink:文字区间成形,`](目标)` 不在内。
+    #[test]
+    fn inline_styles_link_text_and_autolink() {
+        assert_eq!(
+            inline_style_spans("看 [文档](https://a.b) 与 <https://c.d>"),
+            vec![
+                span_of(5..11, InlineStyleKind::LinkText), // 「文档」6 字节
+                span_of(31..42, InlineStyleKind::LinkText), // autolink 的 URL
+            ]
+        );
+    }
+
+    /// 图片 alt 不出样式:富渲染整块换成图片 widget,活动块保持源码观感。
+    #[test]
+    fn inline_styles_image_alt_stays_plain() {
+        assert!(inline_style_spans("![alt](x.png)").is_empty());
+    }
+
+    /// 高亮豁免:反引号内的 `==` 不成形,与渲染同一语义(整体只有代码区间)。
+    #[test]
+    fn inline_styles_highlight_exempts_code() {
+        assert_eq!(
+            inline_style_spans("`==x==`"),
+            vec![span_of(1..6, InlineStyleKind::Code)]
+        );
+    }
+
+    /// 围栏代码块内容是 Event::Text,不出样式区间(```rs\nlet x = 1;\n```)。
+    #[test]
+    fn inline_styles_skip_code_block_contents() {
+        assert!(inline_style_spans("```rs\nlet a = *b*;\n```").is_empty());
     }
 
     // —— inline_mark_pairs / mark_interaction(LP2-2 选区扩展与配对显形)——
