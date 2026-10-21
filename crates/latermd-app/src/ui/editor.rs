@@ -252,6 +252,8 @@ pub fn ui(
             show_focus,
             base_dir,
             heal,
+            // 主写作列开徽标槽(LP2-6):左缘 44px 悬类型徽标,点击切标题级别
+            true,
             keymap,
             outbox,
         );
