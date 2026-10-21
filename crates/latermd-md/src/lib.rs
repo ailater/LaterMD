@@ -2622,6 +2622,20 @@ mod tests {
         assert_covers_text(text, &blocks);
     }
 
+    /// 多行引用必须作为一个完整 Live 块,不能按引用内部的段落/换行
+    /// 拆散;点击任意引用行都应在同一活动块内编辑。
+    #[test]
+    fn blocks_keep_multiline_blockquote_together() {
+        let text = "> 第一行引用\n> 第二行引用\n> 第三行引用\n\n尾段\n";
+        let ranges = blocks(text);
+        let slices: Vec<&str> = ranges.iter().map(|range| &text[range.clone()]).collect();
+        assert_eq!(
+            slices,
+            vec!["> 第一行引用\n> 第二行引用\n> 第三行引用\n\n", "尾段\n"]
+        );
+        assert_covers_text(text, &ranges);
+    }
+
     /// 表格与列表:表格整块;列表**每项**一块(每项都可单独进 Live 编辑)。
     #[test]
     fn blocks_cover_tables_and_list_items() {
