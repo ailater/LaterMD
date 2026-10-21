@@ -103,26 +103,31 @@ pub(crate) fn append_highlight_section(
 /// 是一个 `latermd_md::Rewrite`(与 wikilink 展开层**同一结构**),字符串
 /// 改写与偏移映射(`map_source_offset`)共用同一份,两处不漂移。
 pub(crate) fn image_rewrites(text: &str, base_dir: Option<&Path>) -> Vec<latermd_md::Rewrite> {
-    let Some(base_dir) = base_dir.filter(|dir| !dir.as_os_str().is_empty()) else {
-        return Vec::new();
-    };
-    inline_image_dests(text)
-        .into_iter()
-        .filter(|(_, dest, _)| is_relative(dest))
-        .map(|(span, dest, wrapped)| {
-            let mut uri = file_uri(base_dir, &dest);
-            // 原 `<…>` 形式保持包裹;拼出来的 URI 含空格时裸目标语法会被
-            // 截断,也要包。目标本身就在 `(` 与 `)` 之间,替换串带尖括号
-            // 仍是合法 Markdown。
-            if wrapped || uri.chars().any(char::is_whitespace) {
-                uri = format!("<{uri}>");
-            }
-            latermd_md::Rewrite {
-                span,
-                replacement: uri,
-            }
-        })
-        .collect()
+    let mut rewrites = Vec::new();
+    if let Some(base_dir) = base_dir.filter(|dir| !dir.as_os_str().is_empty()) {
+        rewrites = inline_image_dests(text)
+            .into_iter()
+            .filter(|(_, dest, _)| is_relative(dest))
+            .map(|(span, dest, wrapped)| {
+                let mut uri = file_uri(base_dir, &dest);
+                // 原 `<…>` 形式保持包裹;拼出来的 URI 含空格时裸目标语法会被
+                // 截断,也要包。目标本身就在 `(` 与 `)` 之间,替换串带尖括号
+                // 仍是合法 Markdown。
+                if wrapped || uri.chars().any(char::is_whitespace) {
+                    uri = format!("<{uri}>");
+                }
+                latermd_md::Rewrite {
+                    span,
+                    replacement: uri,
+                }
+            })
+            .collect();
+    }
+    // 块级 HTML `<img>` 的形态改写与相对地址无关(未落盘也改形态),
+    // 不受 base_dir 早退约束;清单须按 span 升序,两路扫描合并后统一排。
+    rewrites.extend(html_img_rewrites(text, base_dir));
+    rewrites.sort_unstable_by_key(|rewrite| rewrite.span.start);
+    rewrites
 }
 
 /// 扫出全部**内联图片** `![alt](dest)` / `![alt](<dest> "title")` 的目标:
@@ -191,6 +196,127 @@ fn dest_span(text: &str, after_paren: usize) -> Option<(Range<usize>, String, bo
         }
         None => None,
     }
+}
+
+/// 块级 HTML 内联图片的改写清单:`<img src="…">` / `<img src='…'>` 整个
+/// 标签换成等价 Markdown 图片 `![alt](dest)` —— vendored 渲染层把块级
+/// HTML 当字面文本画(`Event::Html` → `Token::Text`),`<img>` 因此从不出
+/// 图;换成 Markdown 图片后走既有 `Token::Image` 通道,与 `![](x)` 同源。
+/// src 相对时按文档目录拼 `file://` 绝对 URI(与内联图片改写同一口径)。
+///
+/// 只认小写 `img`(HTML 不区分大小写,但生产端(`srcset`、README、HTML
+/// 输出)与主流书写习惯是小写;扩大字母集会拉宽无谓的误配面);围栏代码
+/// 块内的 `<img>` 是字面文本,不认;`src` 缺失或值为空不认。
+pub(crate) fn html_img_rewrites(text: &str, base_dir: Option<&Path>) -> Vec<latermd_md::Rewrite> {
+    html_img_tags(text)
+        .into_iter()
+        .filter_map(|(span, src, alt)| {
+            if src.is_empty() {
+                return None;
+            }
+            let dest = if is_relative(&src) {
+                match base_dir.filter(|dir| !dir.as_os_str().is_empty()) {
+                    Some(base) => file_uri(base, &src),
+                    // 文档未落盘拼不出绝对地址:仍改成 Markdown 形态,
+                    // 相对路径原样保留 —— 不出图但也不再裸露标签文本。
+                    None => src.clone(),
+                }
+            } else {
+                src.clone()
+            };
+            let replacement = if dest.chars().any(char::is_whitespace) {
+                format!("![{alt}](<{dest}>)")
+            } else {
+                format!("![{alt}]({dest})")
+            };
+            Some(latermd_md::Rewrite { span, replacement })
+        })
+        .collect()
+}
+
+/// 扫出块级 HTML 里的全部 `<img …>` 标签:`(整个标签的字节区间, src 值,
+/// alt 值)`。与 [`inline_image_dests`] 同款扫描纪律:围栏代码块内不认。
+/// 区间覆盖 `<` 到 `>`(含两端),替换时整标签顶掉。自闭合(`<img … />`)
+/// 与 HTML 式非闭合(`<img …>`)都成立 —— `<` 起点到首个 `>` 即标签体。
+/// 属性值只认引号形式(`"…"` / `'…'`),alt 缺省为空。
+fn html_img_tags(text: &str) -> Vec<(Range<usize>, String, String)> {
+    let mut tags = Vec::new();
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    let mut in_code = false;
+    while index < bytes.len() {
+        let rest = &text[index..];
+        let line_start = index == 0 || bytes[index - 1] == b'\n';
+        if line_start {
+            let trimmed = rest.trim_start_matches([' ', '\t']);
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                in_code = !in_code;
+            }
+        }
+        if !in_code && rest.starts_with("<img") {
+            let is_tag =
+                matches!(rest.as_bytes().get(4), Some(b) if b.is_ascii_whitespace() || *b == b'>');
+            if is_tag {
+                if let Some(close) = rest.find('>') {
+                    // `close` 是 `>` 相对 `rest` 的偏移;`<img` 占 4 字节且
+                    // 不含 `>`,故 close ≥ 4,标签体与全长由此得。
+                    let body = &rest[4..close];
+                    let src = quoted_attr(body, "src");
+                    let alt = quoted_attr(body, "alt").unwrap_or_default();
+                    let full = close + 1;
+                    tags.push((index..index + full, src.unwrap_or_default(), alt));
+                    index += full;
+                    continue;
+                }
+            }
+            index += 4;
+            continue;
+        }
+        let step = rest.chars().next().map_or(1, char::len_utf8);
+        index += step;
+    }
+    tags
+}
+
+/// 标签体内取引号属性值:`src="…"` / `src='…'`(键后允许任意空白)。
+/// 未写或裸值(`src=x.png`,非法 HTML)返回 `None`。
+fn quoted_attr(body: &str, key: &str) -> Option<String> {
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while let Some(pos) = body[i..].find(key) {
+        let at = i + pos;
+        // 键必须整体:前一字节不能是属性名成分(`data-src` 里的 `src` 不认)
+        let prev_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric() && bytes[at - 1] != b'-';
+        let after = at + key.len();
+        let next_ok = bytes
+            .get(after)
+            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'=');
+        if prev_ok && next_ok {
+            let mut j = after;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if bytes.get(j) == Some(&b'=') {
+                let mut k = j + 1;
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if let Some(&quote) = bytes.get(k) {
+                    if quote == b'"' || quote == b'\'' {
+                        if let Some(end) = body[k + 1..].find(quote as char) {
+                            return Some(body[k + 1..k + 1 + end].to_owned());
+                        }
+                        // 引号未闭合:属性吃到标签尾(`rest.find('>')` 已保证
+                        // `>` 在引号外,这里只会发生在残缺写法上)
+                        return None;
+                    }
+                }
+                return None;
+            }
+        }
+        i = at + key.len();
+    }
+    None
 }
 
 /// 目标是否**相对**:无 scheme(含 `wiki://`、`data:`、`ai://`)、非 Windows
@@ -573,6 +699,74 @@ mod tests {
             return text.to_owned();
         }
         latermd_md::OffsetMap::from_rewrites(rewrites).apply(text)
+    }
+
+    /// 块级 HTML `<img>` 改写:整个标签换成等价 Markdown 图片,相对 src 按
+    /// 文档目录拼 `file://`。README 头部 `<img src="…" width="128">` 即此
+    /// 形态 —— 换掉 `width` 这类 Markdown 图片表达不了的属性(点击渲染层
+    /// 用 `max_width` 收列,不受影响)。
+    #[test]
+    fn html_img_tags_become_markdown_images() {
+        let base = Path::new("/home/u/LaterMD");
+        let out = rewrite(
+            "<img src=\"assets/logo/deliverables/png/icon-256.png\" alt=\"LaterMD\" width=\"128\">",
+            Some(base),
+        );
+        assert_eq!(
+            out,
+            "![LaterMD](file:///home/u/LaterMD/assets/logo/deliverables/png/icon-256.png)"
+        );
+        // 单引号 / 自闭合 / alt 缺省 / 含空格路径
+        let out = rewrite("<img src='./d/屏幕 截图.png' />", Some(base));
+        assert_eq!(out, "![](<file:///home/u/LaterMD/d/屏幕 截图.png>)");
+        // 绝对 URL 不拼 base;未落盘(None)仍改形态、相对地址原样保留
+        let out = rewrite("<img src=\"https://e.com/a.png\">", None);
+        assert_eq!(out, "![](https://e.com/a.png)");
+        assert_eq!(
+            rewrite("<img src=\"rel/a.png\" alt=\"x\">", None),
+            "![x](rel/a.png)"
+        );
+        // 周边文本逐字节保留
+        let doc = "前文\n\n<img src=\"a.png\">\n\n后文";
+        assert_eq!(
+            rewrite(doc, Some(base)),
+            "前文\n\n![](file:///home/u/LaterMD/a.png)\n\n后文"
+        );
+    }
+
+    /// `<img>` 扫描的边界:围栏代码块内是字面文本不认;非 img 标签
+    /// (`<image>`、`<imgx>`)不认;`src` 缺失/裸值/`data-src` 假属性不认。
+    #[test]
+    fn html_img_scan_boundaries() {
+        let base = Path::new("/home/u/docs");
+        // 围栏内不认
+        let doc = "```\n<img src=\"a.png\">\n```\n\n<img src=\"b.png\">";
+        assert_eq!(
+            rewrite(doc, Some(base)),
+            "```\n<img src=\"a.png\">\n```\n\n![](file:///home/u/docs/b.png)"
+        );
+        // 标签名必须精确:<img 后跟字母/斜杠不是 img 标签
+        assert_eq!(
+            rewrite("<image src=\"a.png\">", Some(base)),
+            "<image src=\"a.png\">"
+        );
+        assert_eq!(
+            rewrite("<imgx src=\"a.png\">", Some(base)),
+            "<imgx src=\"a.png\">"
+        );
+        // src 缺失 / 裸值(非法 HTML)/ 键被前缀污染
+        assert_eq!(rewrite("<img alt=\"a\">", Some(base)), "<img alt=\"a\">");
+        assert_eq!(rewrite("<img src=a.png>", Some(base)), "<img src=a.png>");
+        assert_eq!(
+            rewrite("<img data-src=\"a.png\">", Some(base)),
+            "<img data-src=\"a.png\">"
+        );
+        // 混排:同一文档既有 `![](x)` 又有 `<img>`,两路改写共存且区间互不重叠
+        let doc = "![一](a.png)\n\n<img src=\"b.png\" alt=\"二\">";
+        assert_eq!(
+            rewrite(doc, Some(base)),
+            "![一](file:///home/u/docs/a.png)\n\n![二](file:///home/u/docs/b.png)"
+        );
     }
 
     /// 相对图片改写:A 段自产形态(`./foo.assets/中文.png`)、上级目录、
