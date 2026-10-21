@@ -76,10 +76,20 @@ type RichBlock = (
     Arc<latermd_md::OffsetMap>,
 );
 
-/// 徽标槽宽度(LP2-6):写作栏内容左移量,类型徽标(H1–H6/代码/引用…)
-/// 悬在槽内、与活动块首行对齐。宽度取最宽徽标「分隔线」三字 + 内距的
-/// 实测量级,槽内点击不与内容命中重叠。
-pub const BADGE_GUTTER: f32 = 44.0;
+/// 徽标槽宽度(LP2-7):写作栏内容左移量,左侧悬一个**圆点手柄图标**
+/// (2×3 点阵,Notion 手柄同款),点击弹快捷菜单切换标题级别/行内格式。
+/// 用户反馈 44px 文字芯片「左右偏移的更狠了」,收窄到 16px 只容图标。
+pub const BADGE_GUTTER: f32 = 16.0;
+
+/// 圆点手柄的点阵(相对芯片左上):2 列 × 3 行,Notion 拖拽手柄同款。
+const HANDLE_DOTS: [egui::Vec2; 6] = [
+    egui::vec2(3.0, 2.0),
+    egui::vec2(8.0, 2.0),
+    egui::vec2(3.0, 6.5),
+    egui::vec2(8.0, 6.5),
+    egui::vec2(3.0, 11.0),
+    egui::vec2(8.0, 11.0),
+];
 
 fn source_hash(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1069,16 +1079,18 @@ impl JobRenderMap {
     }
 }
 
-/// 徽标点击切换标题级别(LP2-6):`H1→H2→…→H6→正文`,正文→`H1`,循环。
-/// 只处理**顶格**前缀:标题直接改写 `#{N} `,普通段落插入 `# `(列表/
-/// 引用/代码等带结构前缀的块不动 —— 它们的徽标本就只显示不可点)。
-/// 改写走 `replace_range`(与格式动作/AI 润色同一通道,TextEdit 内建
-/// undo 单步可退);光标按前缀字符差平移并经 `pending_caret` 落回,
-/// 不拽视口。
-fn cycle_block_heading(
+/// 徽标菜单的标题级别切换(LP2-7):`target = Some(n)` 把块变成 `#{n}` 标
+/// 题,`None` 变回正文 —— 从单击循环(LP2-6,用户反馈要菜单不要循环)泛
+/// 化成「指哪打哪」。只处理**顶格**前缀:标题改写 `#{N} `,普通段落插入
+/// `# `;列表/引用/代码等带结构前缀的块不动。改写走 `replace_range`
+/// (与格式动作/AI 润色同一通道,TextEdit 内建 undo 单步可退);光标按
+/// 前缀字符差平移并经 `pending_caret` 落回,不拽视口。目标与现状相同时
+/// 幂等不动。
+fn set_block_heading_level(
     editor: &mut EditorBuffer,
     live: &mut LiveState,
     index: usize,
+    target: Option<u8>,
     caret_local: usize,
 ) {
     let Some(range) = live.blocks.get(index).cloned() else {
@@ -1092,20 +1104,21 @@ fn cycle_block_heading(
     }
     let hashes = first_line.bytes().take_while(|&b| b == b'#').count();
     let is_heading = (1..=6).contains(&hashes) && first_line.as_bytes().get(hashes) == Some(&b' ');
-    let (new_prefix, old_prefix_len) = if is_heading {
-        let old = hashes + 1;
-        if hashes < 6 {
-            (format!("{} ", "#".repeat(hashes + 1)), old)
-        } else {
-            (String::new(), old)
+    let (new_prefix, old_prefix_len) = match (is_heading, target) {
+        (true, Some(n)) if n as usize != hashes => {
+            (format!("{} ", "#".repeat(n as usize)), hashes + 1)
         }
-    } else {
-        // 普通段落才可升 H1:列表项(有自己的徽标语义)、引用/代码等
-        // 结构块一律不动
-        if block_kind(&block) != BlockKind::Text || list_prefix(first_line).is_some() {
-            return;
+        (true, None) => (String::new(), hashes + 1),
+        (false, Some(n)) => {
+            // 普通段落才可升级:列表项(有自己的徽标语义)、引用/代码等
+            // 结构块一律不动
+            if block_kind(&block) != BlockKind::Text || list_prefix(first_line).is_some() {
+                return;
+            }
+            (format!("{} ", "#".repeat(n as usize)), 0)
         }
-        ("# ".to_owned(), 0)
+        // 已是正文 / 目标级别与现状相同:幂等不动
+        (false, None) | (true, Some(_)) => return,
     };
     let delta_chars = new_prefix.chars().count() as isize - old_prefix_len as isize;
     // 前缀是纯 ASCII(`#` 与空格),字符数 == 字节数
@@ -1607,13 +1620,35 @@ pub fn ui(
                         let lines = block_text[..visible_bytes].lines().count().max(1);
                         // 类型徽标文案提前判定(&'static str,不留 block_text 借用)
                         let badge = block_badge_label(block_text);
-                        // 徽标交互判定提前算(&'static str/枚举,不留块文本
-                        // 借用 —— buffer 要独占 editor)
+                        // 徽标交互判定提前算(&'static str/枚举/拷贝,不留块
+                        // 文本借用 —— buffer 要独占 editor,菜单闭包也要可变
+                        // 借用 editor 做级别转换)
                         let kind = block_kind(block_text);
                         let first_line = block_text.lines().next().unwrap_or("");
                         let plain_cycle = badge.is_none()
                             && kind == BlockKind::Text
                             && list_prefix(first_line).is_none();
+                        let text_family = kind == BlockKind::Heading || plain_cycle;
+                        let current_level = if kind == BlockKind::Heading {
+                            Some(
+                                first_line
+                                    .bytes()
+                                    .take_while(|&b| b == b'#')
+                                    .count()
+                                    .min(6) as u8,
+                            )
+                        } else {
+                            None
+                        };
+                        // 菜单首行的当前类型名:widget 用 #158 徽标词,列表
+                        // 项「列表」,其余「正文」
+                        let type_label = badge.unwrap_or_else(|| {
+                            if list_prefix(first_line).is_some() {
+                                "列表"
+                            } else {
+                                "正文"
+                            }
+                        });
                         let mut buffer = BlockBuffer {
                             buffer: editor,
                             range: range.clone(),
@@ -1682,15 +1717,13 @@ pub fn ui(
                                 output.response.response.rect.height(),
                             )
                         });
-                        // 类型徽标(LP2-6,取代 #158 的「块顶空隙」画法):
-                        // H1–H6/代码/表格/引用/分隔线/图片悬在**左侧徽标槽**
-                        // 内、与块首行对齐 —— 悬在块顶会顶着上一块的空隙
-                        // (用户实测「标签显示有明显向下位移」)。标题徽标可
-                        // 点击循环 H1→…→H6→正文,普通段落显示幽灵 H1(点击
-                        // 升级);widget 徽标只显示。
-                        // 标题/普通段落可点:循环切换级别;widget 徽标只显示
-                        let clickable = kind == BlockKind::Heading || plain_cycle;
-                        if badge.is_some() || plain_cycle {
+                        // 徽标手柄(LP2-7,取代 LP2-6 的文字芯片):**左侧槽**
+                        // 内悬一个 2×3 圆点手柄(Notion 拖拽手柄同款)—— 用户
+                        // 反馈 44px 文字芯片「左右偏移的更狠了」,收窄到 16px
+                        // 只容图标。点击弹快捷菜单:标题级别转换(H1–H6/正文,
+                        // 文本族块可用)+ 行内格式(加粗/斜体/删除线,作用于
+                        // 当前选区)。所有块型都有手柄(菜单首行显示当前类型)。
+                        {
                             let clip = ui.clip_rect();
                             let block_rect = output.response.response.rect;
                             // 槽在内容左缘之外;绘制裁剪扩到槽区(galley 画在
@@ -1700,44 +1733,74 @@ pub fn ui(
                                 egui::pos2(block_rect.left(), clip.bottom()),
                             );
                             let painter = ui.painter().with_clip_rect(gutter_clip);
-                            let label = badge.unwrap_or("H1");
-                            let ghost = badge.is_none();
-                            let chip_h = 18.0;
-                            let galley = painter.layout_no_wrap(
-                                label.to_owned(),
-                                egui::FontId::monospace(10.0),
-                                ui.visuals().weak_text_color(),
-                            );
                             let chip = egui::Rect::from_min_size(
                                 egui::pos2(
-                                    block_rect.left() - BADGE_GUTTER + 4.0,
+                                    block_rect.left() - BADGE_GUTTER + 3.0,
                                     block_rect.top() + 1.0,
                                 ),
-                                egui::vec2(galley.size().x + 10.0, chip_h),
+                                egui::vec2(12.0, 14.0),
                             );
-                            let bg = if ghost {
-                                egui::Color32::TRANSPARENT
-                            } else {
-                                ui.visuals().faint_bg_color
-                            };
-                            painter.rect_filled(chip, 3.0, bg);
-                            painter.galley(
-                                egui::pos2(chip.left() + 5.0, chip.center().y - galley.size().y * 0.5),
-                                galley,
-                                ui.visuals().weak_text_color(),
-                            );
-                            if clickable {
-                                let response = ui.allocate_rect(chip, egui::Sense::click());
-                                if response.clicked() {
-                                    let caret_local = output
-                                        .state
-                                        .cursor
-                                        .char_range()
-                                        .map(|range| range.primary.index.0)
-                                        .unwrap_or(0);
-                                    cycle_block_heading(editor, live, index, caret_local);
-                                }
+                            painter.rect_filled(chip, 3.0, egui::Color32::TRANSPARENT);
+                            let dot = ui.visuals().weak_text_color();
+                            for offset in HANDLE_DOTS {
+                                painter.circle_filled(chip.min + offset, 1.3, dot);
                             }
+                            let handle = ui.interact(
+                                chip,
+                                editor_id.with(("live-badge", index)),
+                                egui::Sense::click(),
+                            );
+                            let caret_local = output
+                                .state
+                                .cursor
+                                .char_range()
+                                .map(|range| range.primary.index.0)
+                                .unwrap_or(0);
+                            egui::Popup::menu(&handle).show(|ui| {
+                                ui.set_min_width(120.0);
+                                ui.label(egui::RichText::new(type_label).weak().monospace());
+                                ui.separator();
+                                for level in 1u8..=6 {
+                                    let row = ui.add_enabled_ui(text_family, |ui| {
+                                        ui.selectable_label(current_level == Some(level), format!("H{level}"))
+                                    })
+                                    .inner;
+                                    if row.clicked() {
+                                        set_block_heading_level(
+                                            editor,
+                                            live,
+                                            index,
+                                            Some(level),
+                                            caret_local,
+                                        );
+                                        ui.close();
+                                    }
+                                }
+                                let row = ui.add_enabled_ui(text_family, |ui| {
+                                    ui.selectable_label(
+                                        text_family && current_level.is_none(),
+                                        "正文",
+                                    )
+                                })
+                                .inner;
+                                if row.clicked() {
+                                    set_block_heading_level(editor, live, index, None, caret_local);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                // 行内格式:复用格式动作通道,作用于当前选区
+                                // (无选区时 apply_format_live 静默不动)
+                                for (label, action) in [
+                                    ("加粗", crate::compose::FormatAction::Bold),
+                                    ("斜体", crate::compose::FormatAction::Italic),
+                                    ("删除线", crate::compose::FormatAction::Strike),
+                                ] {
+                                    if ui.selectable_label(false, label).clicked() {
+                                        outbox.push(Message::FormatRequested(action));
+                                        ui.close();
+                                    }
+                                }
+                            });
                         }
                         // 右键菜单(context-menu-plan §3 M1):活动块与源码
                         // 编辑器同一挂点,条目表共用;块内坐标落光标见
@@ -3703,68 +3766,66 @@ mod tests {
         );
     }
 
-    // —— LP2-6 徽标槽与标题级别点击切换 ——
+    // —— LP2-7 徽标手柄与快捷菜单 ——
 
-    /// 级别循环:H1→H2→…→H6→正文→H1;光标按前缀差平移;列表项不动。
+    /// 级别直选:H1→H6、H6→正文、正文→H3;幂等(目标==现状不动);光
+    /// 标按前缀差平移;列表项不动。
     #[test]
-    fn cycle_block_heading_walks_levels_and_back_to_plain() {
+    fn set_block_heading_level_targets_directly() {
         let mut editor = EditorBuffer::new("# 标题内容\n\n- 列表项\n\n正文段落\n");
         let mut live = LiveState::default();
         live.sync(&editor, None);
-        let mut caret = 4usize; // 块内字符 4 = 「内」之前
         macro_rules! block_text {
             ($i:expr) => {
                 BlockBuffer::slice(editor.text(), &live.blocks[$i].clone()).to_owned()
             };
         }
 
-        // H1→H2:前缀 +1 字符,光标平移;块表随修订号重算
-        cycle_block_heading(&mut editor, &mut live, 0, caret);
+        // H1→H6:前缀改写,光标 +5(4→9)
+        set_block_heading_level(&mut editor, &mut live, 0, Some(6), 4);
         live.sync(&editor, None);
-        assert_eq!(block_text!(0), "## 标题内容\n\n");
-        assert_eq!(live.pending_caret, Some((0, 5)), "光标随前缀平移");
-        // H2→H6 连点四次到 H6
-        for level in 3..=6 {
-            caret = live.pending_caret.unwrap().1;
-            cycle_block_heading(&mut editor, &mut live, 0, caret);
-            live.sync(&editor, None);
-            let expect = format!("{} 标题内容\n\n", "#".repeat(level));
-            assert_eq!(block_text!(0), expect);
-        }
+        assert_eq!(block_text!(0), "###### 标题内容\n\n");
+        assert_eq!(live.pending_caret, Some((0, 9)), "光标随前缀平移");
+        // H6→H6:幂等不动(修订号不前进)
+        let rev = editor.revision();
+        set_block_heading_level(&mut editor, &mut live, 0, Some(6), 9);
+        assert_eq!(editor.revision(), rev, "同级别幂等");
         // H6→正文:前缀剥掉,光标 -7(9→2)
-        caret = live.pending_caret.unwrap().1;
-        cycle_block_heading(&mut editor, &mut live, 0, caret);
+        set_block_heading_level(&mut editor, &mut live, 0, None, 9);
         live.sync(&editor, None);
         assert_eq!(block_text!(0), "标题内容\n\n");
-        assert_eq!(live.pending_caret, Some((0, 2)), "剥前缀后光标平移");
-        // 正文→H1
-        caret = live.pending_caret.unwrap().1;
-        cycle_block_heading(&mut editor, &mut live, 0, caret);
+        assert_eq!(live.pending_caret, Some((0, 2)));
+        // 正文→H3:插入前缀,光标 +4(2→6)
+        set_block_heading_level(&mut editor, &mut live, 0, Some(3), 2);
         live.sync(&editor, None);
-        assert_eq!(block_text!(0), "# 标题内容\n\n");
-        assert_eq!(live.pending_caret, Some((0, 4)));
+        assert_eq!(block_text!(0), "### 标题内容\n\n");
+        assert_eq!(live.pending_caret, Some((0, 6)));
         assert!(!live.caret_follow, "切换不拽视口");
 
-        // 列表项:徽标本就不显示,函数对它不动
+        // 列表项:不可升级也不可转正文
         let list_index = live
             .block_containing(editor.text().find("列表项").unwrap())
             .unwrap();
         let before = block_text!(list_index);
-        cycle_block_heading(&mut editor, &mut live, list_index, 0);
-        assert_eq!(block_text!(list_index), before, "列表项不可升级");
+        let rev = editor.revision();
+        set_block_heading_level(&mut editor, &mut live, list_index, Some(1), 0);
+        set_block_heading_level(&mut editor, &mut live, list_index, None, 0);
+        assert_eq!(editor.revision(), rev, "列表项不动");
+        assert_eq!(block_text!(list_index), before);
     }
 
-    /// 全帧:点活动块标题的左侧徽标 → 源码前缀 H1→H2,块保持活动、光标
-    /// 保持落点。徽标芯片在内容左缘 - 徽标槽 + 4(gutter=true 的帧)。
+    /// 全帧:点活动块的圆点手柄 → 弹快捷菜单 → 点「H2」行 → 源码前缀
+    /// H1→H2,块保持活动、光标平移。手柄在内容左缘 - 徽标槽 + 3 的
+    /// 12×14 芯片内(gutter=true 的帧)。
     #[test]
-    fn live_badge_click_cycles_heading_level() {
+    fn live_badge_menu_converts_heading_level() {
         let ctx = egui::Context::default();
         let mut editor = EditorBuffer::new("# 标题一\n");
         let mut preview = PreviewState::new(&editor);
         let mut cursor = OutlineCursor::default();
         let mut live = LiveState::default();
 
-        // 徽标槽只在写作栏开启(LP2-6):本测试的帧带 gutter=true。
+        // 徽标槽只在写作栏开启(LP2-7):本测试的帧带 gutter=true。
         let run = |events: Vec<egui::Event>,
                    editor: &mut EditorBuffer,
                    preview: &mut PreviewState,
@@ -3836,17 +3897,47 @@ mod tests {
             .find(|(t, _)| t == "# 标题一")
             .map(|(_, r)| *r)
             .expect("活动块 TextEdit 形状(槽内容左缘 = 其左缘)");
+        // 手柄芯片中心(12×14,左缘 = 内容左缘 - 槽宽 + 3)
         let chip = egui::pos2(
-            edit_rect.left() - crate::live::BADGE_GUTTER + 10.0,
-            edit_rect.top() + 10.0,
+            edit_rect.left() - crate::live::BADGE_GUTTER + 3.0 + 6.0,
+            edit_rect.top() + 1.0 + 7.0,
         );
         for events in click_events(chip) {
             let _ = run(events, &mut editor, &mut preview, &mut cursor, &mut live);
         }
-        assert_eq!(editor.text(), "## 标题一\n", "点击徽标后 H1→H2");
+        // 菜单帧:应出现 H1..H6/正文/加粗条目(手柄点击 → Popup 打开)
+        let menu_texts = run(
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        for expected in ["H1", "H2", "H6", "正文", "加粗"] {
+            assert!(
+                menu_texts.iter().any(|(t, _)| t == expected),
+                "快捷菜单应含 {expected} 条目"
+            );
+        }
+        // 点「H2」条目:菜单标签 galley 中心
+        let h2 = menu_texts
+            .iter()
+            .find(|(t, _)| t == "H2")
+            .map(|(_, r)| r.center())
+            .expect("菜单 H2 行");
+        for events in click_events(h2) {
+            let _ = run(events, &mut editor, &mut preview, &mut cursor, &mut live);
+        }
+        assert_eq!(editor.text(), "## 标题一\n", "菜单选 H2 后前缀改写");
         assert_eq!(live.active, Some(0), "块保持活动");
-        // pending_caret 在点击帧内即被活动块落地消费(设计如此),光标从
-        // TextEdit state 验证:字符 2 → 3(前缀 +1)
+        // 转换的光标经 pending_caret 落地:再跑一帧读 TextEdit state
+        let _ = run(
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
         let state = egui::widgets::text_edit::TextEditState::load(
             &ctx,
             egui::Id::new("badge-cycle-test").with(("live-block", 0)),
@@ -3855,7 +3946,7 @@ mod tests {
         assert_eq!(
             state.cursor.char_range().map(|r| r.primary.index.0),
             Some(3),
-            "光标随前缀平移"
+            "光标随前缀平移(2→3)"
         );
     }
 
@@ -6364,13 +6455,10 @@ mod tests {
             edit_rect.height(),
             rich_rect.height()
         );
-        assert!(
-            frame.texts.iter().any(|(t, _)| t == "H1"),
-            "激活标题块挂 H1 徽标"
-        );
+        // 徽标已是圆点手柄(LP2-7,无文字芯片);其交互由
+        // live_badge_menu_converts_heading_level 全帧覆盖。
 
-        // 普通段落激活:挂幽灵 H1(LP2-6,点击升级的入口),但无实体块型
-        // 徽标(代码/引用/表格等同族)
+        // 普通段落激活:同样只有圆点手柄,无块型文字芯片
         live.active = Some(1);
         live.pending_caret = Some((1, 0));
         let frame = live_frame(
@@ -6382,15 +6470,11 @@ mod tests {
             &mut live,
         );
         assert!(
-            frame.texts.iter().any(|(t, _)| t == "H1"),
-            "普通段落挂幽灵 H1(点击升级入口)"
-        );
-        assert!(
             !frame
                 .texts
                 .iter()
-                .any(|(t, _)| matches!(t.as_str(), "代码" | "引用" | "表格" | "图片" | "分隔线")),
-            "普通段落无实体块型徽标"
+                .any(|(t, _)| matches!(t.as_str(), "H1" | "H2" | "代码" | "引用" | "表格")),
+            "手柄无文字芯片(类型改在菜单里显示)"
         );
     }
 
@@ -6476,15 +6560,15 @@ mod tests {
             "前缀是幽灵色(文本色降透明度),不是弱色实心/全文色:{marker_color:?}"
         );
 
-        // 块首敲 #:升 H2 —— 文本真实改写,徽标跟成 H2
+        // 块首敲 #:升 H2 —— 文本真实改写(galley 文本即编辑缓冲切片)
         let _ = frame(0.2, vec![egui::Event::Text("#".into())]);
         let texts = frame(0.3, Vec::new());
-        // 编辑视图文本以 "## " 开头 = 源码真实改写(galley 文本即编辑缓冲切片)
+        // 编辑视图文本以 "## " 开头 = 源码真实改写;手柄无文字芯片
+        // (LP2-7),级别即源码前缀本身
         assert!(
             texts.iter().any(|(t, _)| t.starts_with("## 标题甲乙丙")),
             "块首敲 # 真实改写源码:编辑视图应含 ## 前缀"
         );
-        assert!(texts.iter().any(|(t, _)| t == "H2"), "徽标跟随级别变成 H2");
     }
 
     /// 大纲跳转消费:Live 模式下 jump_to(与源码模式同一入口、同一时序
