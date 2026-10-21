@@ -2412,15 +2412,21 @@ pub fn ui(
                             })
                             .unwrap_or_else(|| live.block_char_len(editor, index));
 
-                            // 行内代码点击语义(LP2-9):点在 `` `代码` ``
-                            // 的内容上直接取消反引号,不先把光标落进源码再
-                            // 让用户手动调用格式工具。判定基于源码块的
-                            // `inline_style_spans`,不是渲染坐标,因此改写层
-                            // (wikilink/highlight/task/image)不会改变语义。
-                            let inline_code_toggle = latermd_md::inline_style_spans(block_source)
+                            // 行内格式点击语义(LP2-9):点在已配平的行内
+                            // 构造内容上直接取消定界符。覆盖行内代码、粗体、
+                            // 斜体、删除线和高亮;链接不在此处拆,避免误删目标
+                            // 结构。判定基于源码区间,不受渲染改写层影响。
+                            let inline_toggle = latermd_md::inline_style_spans(block_source)
                                 .into_iter()
                                 .find(|span| {
-                                    if span.kind != latermd_md::InlineStyleKind::Code {
+                                    if !matches!(
+                                        span.kind,
+                                        latermd_md::InlineStyleKind::Code
+                                            | latermd_md::InlineStyleKind::Strong
+                                            | latermd_md::InlineStyleKind::Emphasis
+                                            | latermd_md::InlineStyleKind::Strikethrough
+                                            | latermd_md::InlineStyleKind::Highlight
+                                    ) {
                                         return false;
                                     }
                                     let start = block_source[..span.range.start].chars().count();
@@ -2428,13 +2434,21 @@ pub fn ui(
                                     start <= local && local <= end
                                 })
                                 .and_then(|span| {
+                                    let delimiter = match span.kind {
+                                        latermd_md::InlineStyleKind::Code => b'`',
+                                        latermd_md::InlineStyleKind::Strong
+                                        | latermd_md::InlineStyleKind::Emphasis => b'*',
+                                        latermd_md::InlineStyleKind::Strikethrough => b'~',
+                                        latermd_md::InlineStyleKind::Highlight => b'=',
+                                        _ => return None,
+                                    };
                                     let mut open = span.range.start;
-                                    while open > 0 && block_source.as_bytes()[open - 1] == b'`' {
+                                    while open > 0 && block_source.as_bytes()[open - 1] == delimiter {
                                         open -= 1;
                                     }
                                     let mut close = span.range.end;
                                     while close < block_source.len()
-                                        && block_source.as_bytes()[close] == b'`'
+                                        && block_source.as_bytes()[close] == delimiter
                                     {
                                         close += 1;
                                     }
@@ -2453,7 +2467,7 @@ pub fn ui(
                                         (new_block, new_caret)
                                     })
                                 });
-                            if let Some((new_block, new_caret)) = inline_code_toggle {
+                            if let Some((new_block, new_caret)) = inline_toggle {
                                 let base = editor.byte_to_char(range.start);
                                 let old_len = block_source.chars().count();
                                 editor.replace_range(base..base + old_len, &new_block);
