@@ -34,6 +34,12 @@
 //! [`active_block_job`] 的分段作业里(配方逐条镜像 vendored 富渲染),
 //! 定界符仍由 LP2-1 遮罩淡化 —— 成形与淡化两层职责互不侵吞,光标/选区/
 //! IME 通路零改动(还是那一个 TextEdit,只是排版变了)。
+//!
+//! LP2-5 补**列表点击保持位置**(2026-10-20「点击列表项不再缩进跳变」):
+//! 活动块是列表项时,前缀(缩进空白、marker、`[ ]` 任务标记)幽灵化
+//! (ATX 前缀同款),内容列按 vendored `layout.rs` ListMarker 分支的同一
+//! 套公式对位(marker 右对齐 `"99. "` 槽位、内容落 槽位+gap+勾选框列)
+//! —— 点击进编辑与富渲染的内容 x 逐像素一致,不再「往前缩」。
 
 use std::{
     hash::{Hash, Hasher},
@@ -667,8 +673,9 @@ fn push_inline_styled_sections(
 /// 小字」,配合幻影行裁剪连标题块的高度都几乎不变。
 /// 行内已配平的构造由 [`push_inline_styled_sections`] 直接套渲染格式
 /// (LP2-4「输入后自动成形」:`**粗**` 出粗体、`` `代码` `` 出代码药丸
-/// ……),定界符仍由 LP2-1 遮罩层淡化;预测函数与编辑视图共用本函数,
-/// 视口锚定的预测精度随排版同源自动保持。
+/// ……),定界符仍由 LP2-1 遮罩层淡化;列表项首行走 LP2-5 的幽灵前缀 +
+/// 富渲染同式内容列对位(见 [`list_prefix`]);预测函数与编辑视图共用
+/// 本函数,视口锚定的预测精度随排版同源自动保持。
 fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::LayoutJob {
     let style = egui_markdown_style::global_style(ui.ctx());
     let font_size = crate::theme::editor_font_size(ui.ctx());
@@ -780,6 +787,116 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
                 &paint,
             );
         }
+    } else if let Some(prefix) = list_prefix(first_line) {
+        // 列表项(LP2-5「列表点击保持位置」,2026-10-20):marker 与内容按
+        // 富渲染同式对位 —— marker 右对齐进 "99. " 槽位、内容落在
+        // 槽位 + gap(+ 任务勾选框宽)列,公式逐项照抄 vendored layout.rs
+        // 的 ListMarker 分支;前缀(缩进空白、marker、marker 后空白、
+        // `[ ]`/`[x]` 任务标记)整体幽灵化(ATX 前缀同款 43% 弱化)。
+        // 点击进列表项不再横向跳变:活动态内容列 == 富渲染内容列。折行
+        // 行回到 x=0,与富渲染「wrapped rows return to column 0」同一
+        // 口径;首行外的续行(懒延续)按正文无缩进,与现状一致。
+        let ghost = egui::Color32::from_rgba_unmultiplied(
+            text_color.r(),
+            text_color.g(),
+            text_color.b(),
+            110,
+        );
+        let body_font = egui::FontId::new(font_size, body_family.clone());
+        let mut ghost_format = egui::TextFormat::simple(body_font.clone(), ghost);
+        ghost_format.line_height = Some(body_lh);
+        let width_of = |text: &str| {
+            ui.ctx().fonts_mut(|f| {
+                text.chars()
+                    .map(|c| f.glyph_width(&body_font, c))
+                    .sum::<f32>()
+            })
+        };
+        let space_w = width_of(" ");
+        let slot_w = width_of("99. ");
+        // vendored 的 marker 字串含尾随空格("• "/"N. ")且右对齐进槽位 ——
+        // 活动块的 marker 段因此吃进 marker 后的第一个空格,宽度口径一致,
+        // 内容才会落在同列;其余(marker 后多余空白、`[ ]` 任务标记)归
+        // rest 段自然排布。
+        let marker_span = if text[prefix.rest.clone()].starts_with(' ') {
+            prefix.marker.start..prefix.rest.start + 1
+        } else {
+            prefix.marker.clone()
+        };
+        let marker_w = width_of(&text[marker_span.clone()]);
+        let rest_str = &text[prefix.rest.clone()];
+        let rest_span = marker_span.end..prefix.rest.end;
+        let rest_w = width_of(&text[rest_span.clone()]);
+        // 任务项:富渲染在内容列头部画 "☐ "(Token::TaskListMarker 基础
+        // 格式),内容再多让出这一列宽
+        let is_task = rest_str.trim_start_matches(' ').starts_with('[');
+        let task_w = if is_task { width_of("☐ ") } else { 0.0 };
+        // 嵌套缩进:源码前导空白按 2 空格一级折算(vendored indent_width
+        // 同单位);奇数空格向下取整,与 pulldown 按层级记 indent 的口径
+        // 在常见的 2 空格缩进下逐像素一致
+        let nesting = (prefix.leading.len() / 2) as f32 * space_w * 2.0;
+        let nudge = if prefix.is_ordered {
+            style.list.number_nudge
+        } else {
+            style.list.bullet_nudge
+        };
+        // vendored 同式:marker(含尾随空格)右对齐进槽位,leading 下限 0 =
+        // 宽 marker 不越出条目左缘
+        let marker_x = nesting + (slot_w - nudge - marker_w).max(0.0);
+        let mut cursor_x = prefix.leading.len() as f32 * space_w;
+        let ghost_section =
+            |byte_range: Range<usize>, leading_space: f32| egui::text::LayoutSection {
+                leading_space,
+                byte_range: byte_range.start.into()..byte_range.end.into(),
+                format: ghost_format.clone(),
+            };
+        if !prefix.leading.is_empty() {
+            job.sections
+                .push(ghost_section(prefix.leading.clone(), 0.0));
+        }
+        let marker_lead = (marker_x - cursor_x).max(0.0);
+        job.sections
+            .push(ghost_section(marker_span.clone(), marker_lead));
+        cursor_x = (cursor_x + marker_lead).max(marker_x) + marker_w;
+        if !rest_span.is_empty() {
+            job.sections.push(ghost_section(rest_span, 0.0));
+            cursor_x += rest_w;
+        }
+        // 内容列校准:nesting + 槽位 + gap(+ 勾选框);已越过(宽 marker)
+        // 则保持自然位置 —— vendored 的 trailing 空段同一语义
+        let content_target = nesting + slot_w + style.list.gap + task_w;
+        let calibrate = (content_target - cursor_x).max(0.0);
+        if calibrate > 0.0 {
+            job.sections.push(egui::text::LayoutSection {
+                leading_space: calibrate,
+                byte_range: prefix.rest.end.into()..prefix.rest.end.into(),
+                format: ghost_format.clone(),
+            });
+        }
+        let mut body_fmt = egui::TextFormat::simple(
+            egui::FontId::new(font_size, body_family.clone()),
+            text_color,
+        );
+        body_fmt.line_height = Some(body_lh);
+        push_inline_styled_sections(
+            &mut job,
+            prefix.rest.end..first_line_end,
+            &body_fmt,
+            &styles,
+            &paint,
+        );
+        if first_line_end < text.len() {
+            let mut rest =
+                egui::TextFormat::simple(egui::FontId::new(font_size, body_family), text_color);
+            rest.line_height = Some(body_lh);
+            push_inline_styled_sections(
+                &mut job,
+                first_line_end..text.len(),
+                &rest,
+                &styles,
+                &paint,
+            );
+        }
     } else {
         let mut body =
             egui::TextFormat::simple(egui::FontId::new(font_size, body_family), text_color);
@@ -822,6 +939,71 @@ fn block_badge_label(block_text: &str) -> Option<&'static str> {
         return Some("分隔线");
     }
     None
+}
+
+/// 列表项首行的前缀结构(LP2-5「列表点击保持位置」):前导空白、
+/// marker(`-`/`*`/`+`/`N.`/`N)`,不含尾随空白)、marker 后的空白与可选
+/// 任务标记(`[ ]`/`[x]` + 空白)。三段区间首尾相接 = `0..rest.end`,即
+/// 列表项「内容」的起点。与 [`block_kind`]/[`block_badge_label`] 同一套
+/// 保守前缀嗅探口径:marker 后必须有空白(或行尾),`*强调*` 这类行内
+/// 构造不会被误判成列表。
+struct ListPrefix {
+    leading: Range<usize>,
+    marker: Range<usize>,
+    rest: Range<usize>,
+    is_ordered: bool,
+}
+
+/// 解析列表项首行前缀;不是列表项返回 `None`。有序 marker 最多 9 位数字
+/// (CommonMark 上限),前导空白只认空格(tab 视作非空白,保守不当列表)。
+fn list_prefix(first_line: &str) -> Option<ListPrefix> {
+    let bytes = first_line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    let leading = 0..i;
+    let marker_start = i;
+    if matches!(bytes.get(i), Some(b'-' | b'*' | b'+')) {
+        i += 1;
+    } else {
+        let digits = bytes[i..]
+            .iter()
+            .take_while(|&&b| b.is_ascii_digit())
+            .count();
+        if (1..=9).contains(&digits) && matches!(bytes.get(i + digits), Some(b'.' | b')')) {
+            i += digits + 1;
+        } else {
+            return None;
+        }
+    }
+    let marker = marker_start..i;
+    let is_ordered = first_line[marker.clone()].starts_with(|c: char| c.is_ascii_digit());
+    // marker 后必须是空白(或行尾:空列表项 `-` 单独成行也是列表)
+    if bytes.get(i).is_some_and(|&b| b != b' ') {
+        return None;
+    }
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    // 任务列表标记:`[ ]`/`[x]`/`[X]` + 空白,贴在内容起点才算
+    if bytes.get(i) == Some(&b'[')
+        && matches!(bytes.get(i + 1), Some(b' ' | b'x' | b'X'))
+        && bytes.get(i + 2) == Some(&b']')
+        && bytes.get(i + 3).is_some_and(|&b| b == b' ')
+    {
+        i += 3;
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+    }
+    let rest = marker.end..i;
+    Some(ListPrefix {
+        leading,
+        marker,
+        rest,
+        is_ordered,
+    })
 }
 
 /// 预测活动块源码 TextEdit 的布局几何：(外框高, 光标行顶相对块顶的 y)。
@@ -2431,6 +2613,155 @@ mod tests {
         );
     }
 
+    // —— LP2-5 列表点击保持位置 ——
+
+    /// 前缀嗅探期望:(文本, 前导空白, marker, rest, 有序)。
+    type PrefixCase<'a> = (&'a str, Range<usize>, Range<usize>, Range<usize>, bool);
+
+    /// 前缀嗅探:常见形态全识别,行内强调/缺空白/纯数字不误判。
+    #[test]
+    fn list_prefix_detects_common_forms() {
+        let cases: &[PrefixCase<'_>] = &[
+            ("- 项目", 0..0, 0..1, 1..2, false),
+            ("* 项目", 0..0, 0..1, 1..2, false),
+            ("+ 项目", 0..0, 0..1, 1..2, false),
+            ("  * 嵌套", 0..2, 2..3, 3..4, false),
+            ("1. 有序", 0..0, 0..2, 2..3, true),
+            ("12) 有序", 0..0, 0..3, 3..4, true),
+            // 任务项:rest 吃进 marker 后空白 + `[x]` + 尾空白
+            ("- [x] 完成", 0..0, 0..1, 1..6, false),
+            // 空列表项:marker 后即行尾
+            ("-", 0..0, 0..1, 1..1, false),
+        ];
+        for (text, leading, marker, rest, ordered) in cases {
+            let prefix = list_prefix(text).unwrap_or_else(|| panic!("{text:?} 应识别为列表项"));
+            assert_eq!(prefix.leading, leading.clone(), "{text:?}");
+            assert_eq!(prefix.marker, marker.clone(), "{text:?}");
+            assert_eq!(prefix.rest, rest.clone(), "{text:?}");
+            assert_eq!(prefix.is_ordered, *ordered, "{text:?}");
+        }
+        for text in ["*强调*", "10 数字", "正文段落", "> 引用", "1.x 无空"] {
+            assert!(list_prefix(text).is_none(), "{text:?} 不该识别成列表项");
+        }
+    }
+
+    /// 无头排版列表项活动块,测「内容列 x」并对回 vendored 公式的期望列
+    /// (同一帧从字体度量独立复算,不抄实现):返回 (内容列 x, 期望列 x,
+    /// 全部 section 颜色)。
+    fn list_alignment(
+        text: &str,
+        content_char: usize,
+        nesting_spaces: usize,
+        task: bool,
+    ) -> (f32, f32, Vec<egui::Color32>) {
+        let ctx = egui::Context::default();
+        let mut slot = None;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let job = active_block_job(ui, text, 480.0);
+            let colors: Vec<egui::Color32> = job.sections.iter().map(|s| s.format.color).collect();
+            let style = egui_markdown_style::global_style(ui.ctx());
+            let font = egui::FontId::new(
+                crate::theme::editor_font_size(ui.ctx()),
+                crate::fonts::preview_body_family(ui.ctx()),
+            );
+            let width_of = |s: &str| {
+                ui.ctx()
+                    .fonts_mut(|f| s.chars().map(|c| f.glyph_width(&font, c)).sum::<f32>())
+            };
+            let space_w = width_of(" ");
+            // vendored layout.rs ListMarker 分支的同一公式(独立复算)
+            let expected = (nesting_spaces / 2) as f32 * space_w * 2.0
+                + width_of("99. ")
+                + style.list.gap
+                + if task { width_of("☐ ") } else { 0.0 };
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            let pos = galley.pos_from_cursor(egui::text::CCursor::new(content_char));
+            slot = Some((pos.min.x, expected, colors));
+        })
+        .drop_without_applying_deltas();
+        slot.expect("run_ui 闭包必已执行")
+    }
+
+    /// 列表项活动块的内容列 == 富渲染内容列(±0.5px),前缀幽灵化、内容
+    /// 正文色 —— 点击进编辑不再横向跳变。
+    #[test]
+    fn active_block_list_item_keeps_rich_render_column() {
+        for (text, content_char, nesting, task) in [
+            ("- 项目一", 2, 0, false),
+            ("  - 嵌套项", 4, 2, false),
+            ("12. 有序条目", 4, 0, false),
+            ("- [ ] 待办事项", 6, 0, true),
+        ] {
+            let (x, expected, colors) = list_alignment(text, content_char, nesting, task);
+            assert!(
+                (x - expected).abs() < 0.5,
+                "{text:?} 内容列 {x} != 富渲染公式列 {expected}"
+            );
+            // 前缀 section(marker 起)幽灵化:α=110;末个内容 section 不幽灵
+            assert_eq!(colors[0].a(), 110, "{text:?} marker 应幽灵化");
+            assert_eq!(
+                colors.last().unwrap().a(),
+                255,
+                "{text:?} 内容应保持正文不透明"
+            );
+        }
+    }
+
+    /// 列表项内容里的行内构造照样成形(LP2-4 与 LP2-5 叠加不互斥)。
+    #[test]
+    fn active_block_list_content_keeps_inline_styles() {
+        let (job, expected) = styled_job("- 项目 `代码`");
+        // 字节:-(0) 空格(1) 项目(2..8) 空格(8) `(9) 代码(10..16) `(16)
+        let code = &section_at(&job, 10).format;
+        assert_eq!(code.background, expected.code_bg, "列表内容里的药丸");
+        assert_eq!(code.color, expected.code_fg);
+        assert_eq!(section_at(&job, 0).format.color.a(), 110, "marker 幽灵化");
+    }
+
+    /// 真机字体栈(Inter + Noto CJK 等,`fonts::install`)下的列表对位:默认
+    /// 字体绿、真字体红曾真机复现(2026-10-20),字体回退链改变空格/槽位
+    /// 度量时对位公式必须依旧成立。无 CJK 字体的环境跳过(#43 口径)。
+    #[test]
+    fn active_block_list_alignment_with_installed_fonts() {
+        if crate::fonts::install(&egui::Context::default()).is_none() {
+            return; // 无字体资产的环境(部分 CI)跳过
+        }
+        let ctx = egui::Context::default();
+        assert!(
+            crate::fonts::install(&ctx).is_some(),
+            "字体资产存在时应安装成功"
+        );
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+        for ppp in [1.0, 1.25] {
+            ctx.set_pixels_per_point(ppp);
+            let mut slot = None;
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                let text = "- 项目一";
+                let job = active_block_job(ui, text, 480.0);
+                let style = egui_markdown_style::global_style(ui.ctx());
+                let font = egui::FontId::new(
+                    crate::theme::editor_font_size(ui.ctx()),
+                    crate::fonts::preview_body_family(ui.ctx()),
+                );
+                let width_of = |s: &str| {
+                    ui.ctx()
+                        .fonts_mut(|f| s.chars().map(|c| f.glyph_width(&font, c)).sum::<f32>())
+                };
+                let expected = width_of("99. ") + style.list.gap;
+                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                let pos = galley.pos_from_cursor(egui::text::CCursor::new(2));
+                slot = Some((pos.min.x, expected));
+            })
+            .drop_without_applying_deltas();
+            let (x, expected) = slot.expect("run_ui 闭包必已执行");
+            assert!(
+                (x - expected).abs() < 0.5,
+                "ppp={ppp}: 内容列 {x} != 富渲染公式列 {expected}"
+            );
+        }
+    }
+
     /// 块表连续覆盖全文(安全底线:落在块外的字节会在编辑时丢失)。
     #[test]
     fn blocks_cover_the_whole_document() {
@@ -2901,6 +3232,10 @@ mod tests {
         /// galley 文本 + 全部字形的屏幕坐标(行序拼接,与渲染文本字符序
         /// 对齐):定位「点第二段第二行首字」这类目标,不必模拟字体度量。
         glyphs: Vec<(String, Vec<egui::Pos2>)>,
+        /// galley 文本 + (字形字符, 屏幕坐标) 对(行序):按字符找列位用
+        /// —— 富渲染 galley 的空段(列表 marker leading/trailing)与换行
+        /// 不产字形,字符序号 ≠ 字形序号,必须带 chr 找。
+        glyph_chars: Vec<(String, Vec<(char, egui::Pos2)>)>,
         messages: Vec<Message>,
         /// 本帧镜像出的格式工具条选区(活动块持久选区的文档坐标)。
         selection_mirror: Option<(usize, usize)>,
@@ -2944,6 +3279,7 @@ mod tests {
         let messages = outbox;
         let mut texts = Vec::new();
         let mut glyphs = Vec::new();
+        let mut glyph_chars = Vec::new();
         for clipped in &output.shapes {
             if let egui::epaint::Shape::Text(t) = &clipped.shape {
                 texts.push((
@@ -2957,6 +3293,15 @@ mod tests {
                         .iter()
                         .flat_map(|row| row.glyphs.iter())
                         .map(|glyph| t.pos + glyph.pos.to_vec2())
+                        .collect(),
+                ));
+                glyph_chars.push((
+                    t.galley.text().to_owned(),
+                    t.galley
+                        .rows
+                        .iter()
+                        .flat_map(|row| row.glyphs.iter())
+                        .map(|glyph| (glyph.chr, t.pos + glyph.pos.to_vec2()))
                         .collect(),
                 ));
             }
@@ -2979,9 +3324,143 @@ mod tests {
             opened,
             texts,
             glyphs,
+            glyph_chars,
             messages,
             selection_mirror,
         }
+    }
+
+    /// 列表项点击保持位置(LP2-5 的全帧守门):生产 `super::ui` 一路渲染,
+    /// 浏览态量「列表内容列 − 段落内容列」的富渲染差(= marker 槽位 + gap),
+    /// 点击进编辑后再量活动态同一差值 —— 两者必须相等(±0.75px):活动块
+    /// 的列表前缀按 vendored 同式对位,不再「往前缩」。对照差取的是**列表
+    /// 相对段落的差**,TextEdit 内边距等系统性偏移被基线吸收。
+    #[test]
+    fn live_list_click_keeps_content_column() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("正文段落。\n\n- 项目甲,点击进入编辑\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+
+        // 浏览帧:富渲染的段落与列表项都在 texts/glyphs 里。列表块 galley 的
+        // 文本含 marker("• "),首个 CJK 字形 x = 富渲染内容列;段落块同法。
+        let browse = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        // 取「首个 CJK 字形」的 x 作内容列:富渲染 galley 文本含 marker
+        // ("• " 在内容前,不产 CJK 字形),按字符找列位必须带 chr —— 富渲染
+        // 的空段(leading/trailing)与换行不产字形,字符序号 ≠ 字形序号。
+        let first_cjk_x = |frame: &LiveFrame, needle: &str| -> Option<f32> {
+            frame
+                .glyph_chars
+                .iter()
+                .find(|(text, _)| text.contains(needle))
+                .and_then(|(_, pairs)| {
+                    pairs
+                        .iter()
+                        .find(|(chr, _)| ('\u{4E00}'..='\u{9FFF}').contains(chr))
+                        .map(|(_, pos)| pos.x)
+                })
+        };
+        let rich_delta = {
+            let para_x = first_cjk_x(&browse, "正文段落").expect("段落应有内容字形");
+            let item_x = first_cjk_x(&browse, "项目甲").expect("列表项应有内容字形");
+            item_x - para_x
+        };
+        assert!(
+            rich_delta > 8.0,
+            "富渲染列表内容列应明显缩进于段落(实测 {rich_delta})"
+        );
+
+        // 点击列表项内容首字 → 进编辑;稳定帧量活动块的内容列。
+        let click_pos = browse
+            .glyphs
+            .iter()
+            .find(|(text, _)| text.contains("项目甲"))
+            .and_then(|(_, glyphs)| glyphs.first().copied())
+            .expect("列表项内容首字坐标");
+        for events in click_events(click_pos) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        let item_active = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let item_content_x = item_active
+            .glyphs
+            .iter()
+            .find(|(text, _)| text.starts_with("- 项目甲"))
+            .and_then(|(text, glyphs)| {
+                // 活动块 galley 文本 = 块源码;跳过前缀 "- " 后的首个字形
+                let skip = "- ".chars().count();
+                glyphs
+                    .iter()
+                    .skip(skip)
+                    .find(|_| true)
+                    .or_else(|| glyphs.first())
+                    .copied()
+                    .map(|pos| {
+                        let _ = text;
+                        pos.x
+                    })
+            })
+            .expect("活动块应有内容字形");
+
+        // 点击段落 → 段落进编辑,量活动段落的正文列(同一系统性偏移)。
+        let para_click = item_active
+            .glyphs
+            .iter()
+            .find(|(text, _)| text.contains("正文段落"))
+            .and_then(|(_, glyphs)| glyphs.first().copied())
+            .expect("段落内容首字坐标");
+        for events in click_events(para_click) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        let para_active = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let para_content_x = para_active
+            .glyphs
+            .iter()
+            .find(|(text, _)| text.starts_with("正文段落"))
+            .and_then(|(_, glyphs)| glyphs.first().copied())
+            .map(|pos| pos.x)
+            .expect("活动段落应有内容字形");
+
+        let active_delta = item_content_x - para_content_x;
+        assert!(
+            (active_delta - rich_delta).abs() < 0.75,
+            "列表项活动态内容列应与富渲染同位:富渲染差 {rich_delta:.2}px,活动态差 {active_delta:.2}px"
+        );
     }
 
     /// Live 模式点非活动代码块的复制按钮必须复制、且不得切入编辑态(#38
