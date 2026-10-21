@@ -1,4 +1,4 @@
-; LaterMD Inno Setup script(对齐 GLMeter 的发行形态)
+﻿; LaterMD Inno Setup script(对齐 GLMeter 的发行形态)
 ; Build (from repo root, after copying latermd.exe + latermd.ico here):
 ;   iscc /DVERSION=x.y.z latermd.iss
 
@@ -36,7 +36,14 @@ Name: "desktop"; Description: "Create a desktop shortcut (创建桌面快捷方�
 ; 与 PrivilegesRequired=lowest 一致),LaterMD 出现在「打开方式」列表里;
 ; 不勾也能正常用,只是要用户自己去「设置 → 应用 → 默认应用」里认领。
 ; 用户可随时在安装器里取消勾选重装回去,不必手动清注册表。
-Name: "mdassoc"; Description: "Associate .md and .markdown files with LaterMD (关联 .md / .markdown 文件,可在系统「默认应用」中改为其它程序)"; Flags: checked
+;
+; 「默认勾选」在 Inno 里的正确表达是**不写 Flags**(任务默认即勾选)。
+; [Tasks] 段的 Flags 只认 checkablealone / checkedonce / dontinheritcheck /
+; exclusive / restart / unchecked —— **没有 checked**,写上去 iscc 直接报
+; `Parameter "Flags" includes an unknown flag` 并中止编译,整个安装器就没了
+; (2026-10-18 v0.0.7 实测:release.yml 的 windows-installer job 红,Release
+; 里只剩 zip + 裸 exe)。要表达「默认不勾」才写 Flags: unchecked。
+Name: "mdassoc"; Description: "Associate .md and .markdown files with LaterMD (关联 .md / .markdown 文件,可在系统「默认应用」中改为其它程序)"
 
 [Icons]
 Name: "{group}\LaterMD"; Filename: "{app}\latermd.exe"
