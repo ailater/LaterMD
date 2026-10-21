@@ -385,7 +385,7 @@ const WRAP_DOC: &str = "中文连续行观测相邻行墨迹净空中文中文�
 
 /// 无头渲染一个 markdown 片段,返回其 galley(`layout_in_ui` 与预览的
 /// `show()` 走同一 `build_layout` + `layout_job` 管线;此处只取形,不绘制)。
-/// #43 M2 起**与生产 preview::ui 同配置**:字体族取 [`fonts::preview_body_family`]
+/// #43 M2 起**与生产 `live::ui` 同配置**:字体族取 [`fonts::preview_body_family`]
 /// (链头 = 行 metrics 对齐 CJK 回退的 Inter 副本),样式取
 /// [`theme::effective_markdown_style`](行高下限已按本机 CJK face 注入)。
 fn render_case(ctx: &egui::Context, id_salt: &str, md: &str) -> Arc<egui::epaint::text::Galley> {

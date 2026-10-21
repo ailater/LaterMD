@@ -1299,7 +1299,7 @@ fn visible_char_len(block_text: &str) -> usize {
     block_text.trim_end_matches('\n').chars().count()
 }
 
-/// 滚动探针的 data 键(P3,与预览 scroll_probe_id 同款,按编辑器 id 分标签)。
+/// 滚动探针的 data 键(P3,按编辑器 id 分标签 —— 两个渲染实例各一份)。
 /// `pub(crate)`:布局层测试读右栏对照列的探针断言滚轮锚点落地。
 pub(crate) fn scroll_probe_id(editor_id: egui::Id) -> egui::Id {
     egui::Id::new("latermd-live-scroll").with(editor_id)
@@ -2528,7 +2528,7 @@ pub fn ui(
         .ctx()
         .data_mut(|d| d.insert_temp(emoji_probe_id(editor_id), emoji_rects));
 
-    // 滚动探针(P3,照 preview::ScrollProbe 的 data 手法):帧末滚动偏移 +
+    // 滚动探针(P3,`LiveScrollProbe` 的 data 落点):帧末滚动偏移 +
     // 视口矩形 + 内容高度,生产只写不读 —— 测试断言「浏览态跳转真的滚动
     // 了视口」用。
     panel.ctx().data_mut(|d| {
@@ -3605,7 +3605,7 @@ mod tests {
 
     // —— 代码块复制头(#38)与「整块点击进编辑」的点击优先级 ——
 
-    /// 从帧输出抽出全部 CopyText 命令的载荷(照 ui/preview.rs tests 同款)。
+    /// 从帧输出抽出全部 CopyText 命令的载荷(本模块测试共用的取证 helper)。
     fn copied_texts(output: &eframe::egui::FullOutput) -> Vec<String> {
         output
             .platform_output
@@ -3618,8 +3618,8 @@ mod tests {
             .collect()
     }
 
-    /// 指针序列:移入 → 按下 → 抬起(照 ui/preview.rs tests 同款三帧;
-    /// egui 的 click 判定发生在抬起帧)。
+    /// 指针序列:移入 → 按下 → 抬起(与 `ui::editor_menu` 测试里的
+    /// `click_frames` 同手法三帧;egui 的 click 判定发生在抬起帧)。
     fn click_events(pos: egui::Pos2) -> Vec<Vec<egui::Event>> {
         let click = |pos, pressed| egui::Event::PointerButton {
             pos,

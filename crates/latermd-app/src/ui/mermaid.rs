@@ -37,7 +37,7 @@ const RADIUS_NODE: f32 = 6.0;
 /// 边标签垫底矩形向四周扩展的半量(px)。
 const LABEL_PAD: f32 = 3.0;
 
-/// info string 首词判定:与 ```ai 指令卡(preview.rs `is_instruction_info`)
+/// info string 首词判定:与 ```ai 指令卡(`ui::ai_card::is_instruction_info`)
 /// 同一口径,`mermaid` 后跟元数据(如 `mermaid title=x`)不命中。
 pub(crate) fn is_mermaid_info(language: Option<&str>) -> bool {
     language.is_some_and(|info| info.split_whitespace().next() == Some("mermaid"))

@@ -265,8 +265,8 @@ mod tests {
         })
     }
 
-    /// 三帧点击序列(移动 → 按下 → 释放),与 preview.rs `click_events`
-    /// 同手法。
+    /// 三帧点击序列(移动 → 按下 → 释放),与 `live.rs` 测试里的
+    /// `click_events` 同手法。
     fn click_frames(pos: Pos2, button: PointerButton) -> Vec<Vec<Event>> {
         let click = |pos, pressed| Event::PointerButton {
             pos,

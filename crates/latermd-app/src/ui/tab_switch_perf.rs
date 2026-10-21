@@ -1,8 +1,8 @@
 //! #39 M1「切换卡顿取证」的无头测量 harness(纯测试模块,生产构建不编译)。
 //!
 //! 手法照抄库内测试的 egui 上下文用法:整帧走生产路径
-//! [`LaterMdApp::draw`](同 `ui/layout.rs` 测试的 `draw_frames`),单件预览/
-//! 编辑器走 `ctx.run_ui`(同 `ui/preview.rs` 测试)。不触碰 vendored 一行,
+//! [`LaterMdApp::draw`](同 `ui/layout.rs` 测试的 `draw_frames`),单件
+//! 渲染走 `ctx.run_ui`(同 `fonts.rs` 测试的上下文用法)。不触碰 vendored 一行,
 //! 分段计时全部用公开 API(`egui_markdown::{heal, parse}`、
 //! `latermd_md::{expand_wikilinks, outline}`)在 app 侧复现同一变换。
 //!
@@ -119,7 +119,8 @@ fn label_frame_with_id(ctx: &egui::Context, id: &egui::Id, rendered: &str) -> Du
                 .id_salt(id.with("scroll"))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // 与生产 preview.rs 同一 id 命名空间:切换文本时的缓存
+                    // 与生产 `live::ui` 同一 id 命名空间(都由编辑器 id
+                    // 派生):切换文本时的缓存
                     // 行为(同 id 覆盖/hash 不匹配 → miss)与生产一致。
                     // defer_offscreen_highlight 同步生产(#59 M2 起预览开启,
                     // miss 帧视口外段免 syntect,几何零变化)。

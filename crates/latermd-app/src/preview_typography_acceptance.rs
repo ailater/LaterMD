@@ -123,8 +123,9 @@ struct DocColors {
 
 /// 按生产链路渲染一帧:装出厂字体(预览专用族)+ `ThemeSettings::default()
 /// .apply`(用户行距 1.5 覆盖 + CJK 行高下限注入)→ probe 回调里摆
-/// `MarkdownLabel`(生产入口 `ui/preview.rs` 同款:显式 FontId(用户字号+
-/// 预览族)+ wrap,样式吃 context 全局槽)。probe 拿到面板与验收区矩形,
+/// `MarkdownLabel`(生产入口 `live::ui` 同款:`editor_id.with(("live-render",
+/// index))` + 显式 FontId(用户字号 + 预览族)+ wrap,样式吃 context 全局槽)。
+/// probe 拿到面板与验收区矩形,
 /// 自行创建 child;返回 probe 的捕获值、实际 visuals 断言用色、生效样式、
 /// 网格与 CJK 行高下限。
 /// #43 口径的无 CJK 环境检测:像素/几何验收没有混排对象,失败不代表

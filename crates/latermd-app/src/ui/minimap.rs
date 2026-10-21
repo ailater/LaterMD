@@ -261,8 +261,8 @@ impl VisibleWindow {
     }
 
     /// 行号 → 该行条的 y(相对 minimap 视口顶);区间外返回 `None`。
-    /// M1 单测的取证面,非测试构建豁免 dead_code(与 preview.rs
-    /// `ScrollProbe` 同款口径)。
+    /// M1 单测的取证面,非测试构建豁免 dead_code(与 `live::LiveScrollProbe`
+    /// 同款口径)。
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn y_of(&self, line: usize) -> Option<f32> {
         if !self.range.contains(&line) {
@@ -590,7 +590,7 @@ pub(crate) fn grab_id(editor_id: egui::Id) -> egui::Id {
 }
 
 /// 测试探针载荷(仅测试读;生产每帧写、从不读,字段读取豁免
-/// dead_code —— 与 preview.rs `ScrollProbe` 同款)。
+/// dead_code —— 与 `live::LiveScrollProbe` 同款)。
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct MinimapProbe {
