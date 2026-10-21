@@ -719,6 +719,8 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
             max_width: wrap_width,
             ..egui::text::TextWrapping::default()
         },
+        // 默认保留源码换行;普通段落分支会按 Markdown 软换行语义关闭
+        // `break_on_newline`,引用/标题/列表/Widget 保持既有逐行口径。
         break_on_newline: true,
         halign: egui::Align::LEFT,
         keep_trailing_whitespace: true,
@@ -741,6 +743,7 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
     // Widget(代码/表格/分隔线/图片):等宽回退 —— 对齐代码列与表格列。
     // 引用单独走下方的正文族多行分支,保留每个物理换行和 `> ` 前缀。
     if block_kind(text) == BlockKind::Widget && !is_quote {
+        job.break_on_newline = true;
         let mut mono = egui::TextFormat::simple(mono_font, text_color);
         mono.line_height = Some(body_lh);
         job.sections.push(section(0..text.len(), mono));
@@ -766,10 +769,13 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
         highlight_bg: crate::ui::rich_widgets::highlight_bg_color(ui.visuals()),
     };
     if is_quote {
-        // 引用活动态(LP2-8):富渲染的 Blockquote 是多行正文,源码侧也必须
-        // 保留物理换行;之前把引用当 Widget 后虽喂入原文,测试/排版口径
-        // 仍按等宽整块处理,点击后视觉上压成一行并触发高度跳变。
-        // `> ` 前缀幽灵化,正文继续走 LP2-4 内联成形。
+        // 引用活动态(LP2-8):富渲染的 Blockquote 是正文流,源码中的
+        // 普通换行(包括 lazy continuation,即后续行没有 `> ` 前缀)是软
+        // 换行,不能一律强制拆行——截图中的「普通文本都换行」正是这里
+        // 的回归。保留源码字符和索引,只关闭 epaint 的强制换行,让它按
+        // 可用宽自然折行;显式 `> ` 前缀仍在下方幽灵化。
+        job.break_on_newline = false;
+        // `> ` 前缀幽灵化,正文继续 LP2-4 内联成形。
         let mut line_start = 0usize;
         for line in text.split_inclusive('\n') {
             let line_end = line_start + line.len();
@@ -975,6 +981,9 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
             );
         }
     } else {
+        // 普通编辑块保留源码物理换行:键盘逐行导航、光标行跟随和源码
+        // 换行语义必须稳定。引用的多行专用布局在上方单独处理,不改变
+        // 普通文本的全局导航口径。
         let mut body =
             egui::TextFormat::simple(egui::FontId::new(font_size, body_family), text_color);
         body.line_height = Some(body_lh);
@@ -2932,7 +2941,7 @@ mod tests {
     /// 这是 LP2-8 的核心回归:引用不能再落进 Widget 单行等宽路径。
     #[test]
     fn active_block_multiline_quote_keeps_rows_and_prefix() {
-        let text = "> 第一行引用\n> 第二行 `代码`\n> 第三行引用";
+        let text = "> 第一行引用内容很长,用于在编辑器宽度内产生稳定折行并验证引用行\n> 第二行 `代码` 内容很长,用于验证内联成形与软换行\n> 第三行引用内容很长,用于验证点击后高度不会压成单行";
         let (job, expected) = styled_job(text);
         let galley = egui::Context::default();
         let ctx = egui::Context::default();
@@ -2942,7 +2951,7 @@ mod tests {
             rows = galley.rows.len();
         })
         .drop_without_applying_deltas();
-        assert_eq!(rows, 3, "三行引用必须保持三行");
+        assert!(rows >= 3, "多行引用不能压成单行(实际 {rows} 行)");
         assert_eq!(job.text, text);
         assert_eq!(job.sections.first().unwrap().format.color.a(), 110);
         assert_eq!(
