@@ -805,7 +805,7 @@ pub fn ui(
         // shapes 的上画布与探针写入都在 with_lines 的 data_mut 借用之外:
         // painter 的 add 会再进同一把 Context 写锁,借用内重入即死锁。
         panel.painter().extend(shapes);
-        // 测试探针(照 preview.rs `ScrollProbe` 的 data 手法,生产只写
+        // 测试探针(照 `live::LiveScrollProbe` 的 data 手法,生产只写
         // 不读):供无头测试断言「关闭态零 minimap 元素 / 开启态行条数」。
         panel.ctx().data_mut(|d| {
             d.insert_temp(

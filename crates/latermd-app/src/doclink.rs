@@ -12,7 +12,7 @@
 //! 自己生成的 `[标题](#锚点)` 目录链接必须能点回对应标题,这是本模块的
 //! 一等公民场景,不是附加能力。
 //!
-//! 纯逻辑模块,不 import egui;UI 侧(live/preview 的 handler)只做分类
+//! 纯逻辑模块,不 import egui;UI 侧(live 的 handler)只做分类
 //! 与消息投递,归约在 `state::open_doc_link`。
 
 use std::path::{Path, PathBuf};
