@@ -1546,8 +1546,8 @@ pub fn ui(
                 for index in 0..block_count {
                     let range = live.blocks[index].clone();
                     // 块文本直接借用共享缓冲；渲染缓存持有改写结果，稳态帧不再复制整块。
-                    let block_text = BlockBuffer::slice(editor.text(), &range);
-                    let kind = block_kind(block_text);
+                    let block_text = BlockBuffer::slice(editor.text(), &range).to_owned();
+                    let kind = block_kind(&block_text);
                     if let Some(prev) = prev_kind {
                         ui.add_space(block_gap(&gap_style, gap_font_size, prev, kind));
                     }
@@ -1593,7 +1593,7 @@ pub fn ui(
                         )
                         .with_ai(crate::ui::rich_widgets::ai_link_color(dark_mode), ai);
                         let (block_rendered, ..) =
-                            live.rich_block_with_base(index, block_text, base_dir);
+                            live.rich_block_with_base(index, &block_text, base_dir);
                         // heal 与真实臂同开关:流式帧的残缺 fence 在估高里也
                         // 补闭合,高度与真实渲染同源。
                         let estimate = egui_markdown::MarkdownLabel::new(
@@ -1653,7 +1653,7 @@ pub fn ui(
                     if !live.browse_only && live.active == Some(index) {
                         // 可见内容末尾(幻影行之前的最后一个字符位置),跨块
                         // 路由的块尾判定边界;定义见 [`visible_char_len`]。
-                        let visible_end = visible_char_len(block_text);
+                        let visible_end = visible_char_len(&block_text);
                         // 编辑视图 = 块内容去掉尾部的幻影空行(块间空行归前
                         // 一块,富渲染本就忽略它们;全显示会让块切源码凭空
                         // 多出 1-2 个空行 —— 「点击后块展开」的主要来源)。
@@ -1685,11 +1685,11 @@ pub fn ui(
                             .max(content_bytes);
                         let lines = block_text[..visible_bytes].lines().count().max(1);
                         // 类型徽标文案提前判定(&'static str,不留 block_text 借用)
-                        let badge = block_badge_label(block_text);
+                        let badge = block_badge_label(&block_text);
                         // 徽标交互判定提前算(&'static str/枚举/拷贝,不留块
                         // 文本借用 —— buffer 要独占 editor,菜单闭包也要可变
                         // 借用 editor 做级别转换)
-                        let kind = block_kind(block_text);
+                        let kind = block_kind(&block_text);
                         let first_line = block_text.lines().next().unwrap_or("");
                         let plain_cycle = badge.is_none()
                             && kind == BlockKind::Text
@@ -2287,7 +2287,7 @@ pub fn ui(
                             emoji_map,
                             task_map,
                             image_map,
-                        ) = live.rich_block_with_base(index, block_text, base_dir);
+                        ) = live.rich_block_with_base(index, &block_text, base_dir);
                         // 字体与右栏预览同源(#23 F3):size = 用户字号偏好,
                         // 族 = 预览专用族(#43 M2 的行 metrics 对齐副本,无 CJK
                         // 回落 Proportional)。源码/Live 两种模式下排版偏好同观感。
@@ -2411,7 +2411,56 @@ pub fn ui(
                                     - editor.byte_to_char(range.start)
                             })
                             .unwrap_or_else(|| live.block_char_len(editor, index));
-                            activate = Some((index, local));
+
+                            // 行内代码点击语义(LP2-9):点在 `` `代码` ``
+                            // 的内容上直接取消反引号,不先把光标落进源码再
+                            // 让用户手动调用格式工具。判定基于源码块的
+                            // `inline_style_spans`,不是渲染坐标,因此改写层
+                            // (wikilink/highlight/task/image)不会改变语义。
+                            let inline_code_toggle = latermd_md::inline_style_spans(block_source)
+                                .into_iter()
+                                .find(|span| {
+                                    if span.kind != latermd_md::InlineStyleKind::Code {
+                                        return false;
+                                    }
+                                    let start = block_source[..span.range.start].chars().count();
+                                    let end = block_source[..span.range.end].chars().count();
+                                    start <= local && local <= end
+                                })
+                                .and_then(|span| {
+                                    let mut open = span.range.start;
+                                    while open > 0 && block_source.as_bytes()[open - 1] == b'`' {
+                                        open -= 1;
+                                    }
+                                    let mut close = span.range.end;
+                                    while close < block_source.len()
+                                        && block_source.as_bytes()[close] == b'`'
+                                    {
+                                        close += 1;
+                                    }
+                                    (open < span.range.start && close > span.range.end).then(|| {
+                                        let mut new_block = String::with_capacity(
+                                            block_source.len() - (span.range.start - open)
+                                                - (close - span.range.end),
+                                        );
+                                        new_block.push_str(&block_source[..open]);
+                                        new_block.push_str(&block_source[span.range.start..span.range.end]);
+                                        new_block.push_str(&block_source[close..]);
+                                        let new_caret = block_source[..span.range.start]
+                                            .chars()
+                                            .count()
+                                            .saturating_sub(span.range.start - open);
+                                        (new_block, new_caret)
+                                    })
+                                });
+                            if let Some((new_block, new_caret)) = inline_code_toggle {
+                                let base = editor.byte_to_char(range.start);
+                                let old_len = block_source.chars().count();
+                                editor.replace_range(base..base + old_len, &new_block);
+                                activate = Some((index, new_caret));
+                            } else {
+                                activate = Some((index, local));
+                            }
                             // 块切换视口锚定(点击帧预测,帧末 `activate` 消费
                             // 点落账):块从富渲染切源码高度必变,若不动偏移,
                             // 下一帧视口内内容整体平移 —— 「点哪跳哪」。这里
