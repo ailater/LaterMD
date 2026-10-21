@@ -343,7 +343,14 @@ impl LiveState {
         block_source_len: usize,
     ) -> Option<usize> {
         let rendered_byte = match egui_markdown::char_index_at_pos(ui, label_id, pos) {
-            Some(char_index) => char_indices_to_byte(rendered, char_index),
+            Some(char_index) => {
+                // 命中表给的是排版 job 文本字符序号;单段块经映射表折回
+                // rendered 字符序号(标题剥 `# `、列表换 `• `、任务换 `☐`
+                // 都在这里归位),多段块保持旧口径(恒等)。
+                let rendered_char =
+                    JobRenderMap::build(rendered).map_or(char_index, |map| map.lookup(char_index));
+                char_indices_to_byte(rendered, rendered_char)
+            }
             None => {
                 let blocks = egui_markdown::block_span_rects(ui, label_id)?;
                 let last = blocks
@@ -941,6 +948,122 @@ fn block_badge_label(block_text: &str) -> Option<&'static str> {
     None
 }
 
+/// vendored 命中表(`char_index_at_pos`)返回的是**排版 job 文本**的字符
+/// 序号,不是块源码的 —— 富渲染会把 `# ` 前缀剥进样式、把 `- ` 换成 `• `、
+/// 把 `[ ] ` 换成 `☐ `,job 文本与源码逐字符错位(2026-10-21 用户实测:H1
+/// 点到 M 后面、光标落在 e,正好差 `# ` 两字符)。本表把 job 字符序号映
+/// 射回 rendered 字符序号,再走既有改写层逆穿回源码。
+///
+/// 只对**单段块**成立(代码块/表格/引用/图片/分隔线是独立 galley 分段,
+/// 命中序号按段内计数,全块累计表对不上)——多段块 `build` 返回 `None`,
+/// 调用方保持旧口径(恒等),与修复前一致,不劣化。
+struct JobRenderMap {
+    /// 按 job_start 升序的伸展表。ren = ren_start + min(rel, ren_cap_len):
+    /// Text 伸展 cap == job_len(逐字符 1:1);marker/任务伸展 cap 取源码
+    /// 段长(点在渲染 marker 上 → 落到源码 marker 区间内);链接文字伸展
+    /// cap = 文字长(点在目标/括号上 → 吸到文字尾)。
+    stretches: Vec<JobStretch>,
+}
+
+struct JobStretch {
+    job_start: usize,
+    ren_start: usize,
+    ren_cap_len: usize,
+}
+
+impl JobRenderMap {
+    /// 从 rendered 的 vendored 解析建表。返回 `None` = 多段块,调用方保持
+    /// 旧口径。
+    fn build(rendered: &str) -> Option<Self> {
+        use egui_markdown::{Markdown, Token};
+        let md: Markdown<'_> = egui_markdown::parser::parse(rendered);
+        // 多段块:命中序号按段内计数,恒等回退
+        if md.tokens.iter().any(|token| {
+            matches!(
+                token,
+                Token::CodeBlock { .. }
+                    | Token::Table(_)
+                    | Token::Image { .. }
+                    | Token::HorizontalRule
+                    | Token::BlockquoteStart
+                    | Token::BlockquoteEnd
+            )
+        }) {
+            return None;
+        }
+        let char_at = |byte: usize| rendered[..byte.min(rendered.len())].chars().count();
+        let mut stretches = Vec::new();
+        let mut job = 0usize;
+        for (token, span) in md.tokens.iter().zip(&md.spans) {
+            let span_start = char_at(span.start);
+            let span_end = span.end.min(rendered.len());
+            let span_chars = rendered[span.start..span_end].chars().count();
+            // 追加一个伸展:job 前进 job_len,rendered 侧覆盖
+            // [ren_start, ren_start + ren_cap_len)
+            let mut push =
+                |job: &mut usize, ren_start: usize, job_len: usize, ren_cap_len: usize| {
+                    stretches.push(JobStretch {
+                        job_start: *job,
+                        ren_start,
+                        ren_cap_len,
+                    });
+                    *job += job_len;
+                };
+            match token {
+                // 正文/行内代码/软换行空格:append 的就是 span 尾部这段,
+                // 逐字符 1:1(标题 `# `、列表缩进等被吸收进 span 头部)
+                Token::Text { text, .. } => {
+                    let len = text.chars().count();
+                    push(&mut job, span_start + span_chars - len, len, len);
+                }
+                Token::Newline => push(&mut job, span_start + span_chars - 1, 1, 1),
+                // `- ` → "• "、`12. ` → `12. `:源码 marker 恰在 span 尾部
+                // 且字符数与渲染 marker 相同
+                Token::ListMarker { marker, .. } => {
+                    let len = marker.chars().count();
+                    push(&mut job, span_start + span_chars - len, len, len);
+                }
+                // `[ ] ` → "☐ ":渲染 2 字符、源码段 4 字符,点渲染勾选框
+                // 落进源码 `[ ]` 区间
+                Token::TaskListMarker { .. } => push(&mut job, span_start, 2, span_chars),
+                // `[文字](目标)`:文字在首个 `[` 之后,1:1;点在括号/目标上
+                // 吸到文字尾。autolink `<url>` 同构(`<` 即开括号)
+                Token::Link { text, .. } => {
+                    let len = text.chars().count();
+                    let slice = &rendered[span.start..span_end];
+                    let open = slice
+                        .find('[')
+                        .map(|i| span_start + slice[..i].chars().count());
+                    let (ren_start, ren_cap_len) = match open {
+                        // 文字须真落在 span 内(防御:开放式残构退化为整段吸)
+                        Some(open) if open + 1 + len <= span_start + span_chars => (open + 1, len),
+                        _ => (span_start, span_chars),
+                    };
+                    push(&mut job, ren_start, len, ren_cap_len);
+                }
+                Token::FootnoteRef { label } | Token::FootnoteDef { label } => {
+                    let len = label.chars().count();
+                    push(&mut job, span_start + 1, len, len);
+                }
+                // 不产 job 字符的 token(分段类已在门里回退,不会走到)
+                _ => {}
+            }
+        }
+        (!stretches.is_empty()).then_some(Self { stretches })
+    }
+
+    /// job 字符序号 → rendered 字符序号。越界钳到表端。
+    fn lookup(&self, index: usize) -> usize {
+        let last = self
+            .stretches
+            .partition_point(|s| s.job_start <= index)
+            .saturating_sub(1);
+        let s = &self.stretches[last];
+        let rel = (index - s.job_start).min(s.ren_cap_len);
+        s.ren_start + rel
+    }
+}
+
 /// 列表项首行的前缀结构(LP2-5「列表点击保持位置」):前导空白、
 /// marker(`-`/`*`/`+`/`N.`/`N)`,不含尾随空白)、marker 后的空白与可选
 /// 任务标记(`[ ]`/`[x]` + 空白)。三段区间首尾相接 = `0..rest.end`,即
@@ -1010,15 +1133,16 @@ fn list_prefix(first_line: &str) -> Option<ListPrefix> {
 ///
 /// 与 egui TextEdit multiline 的 default_layouter 完全同参 shaping ——
 /// Monospace 字号、行盒高与活动块同源（[`body_line_height`]，见活动块
-/// 分支的 `extra_text_line_spacing` 拨动）、可用宽 − 左右内距 (4+4) 的
-/// 折行宽、`keep_trailing_whitespace`；外框高 = galley 高 + 上下内距
-/// 4px，光标行顶 = galley 行顶 + 上内距 2px。**text 须与编辑视图同文**
-/// （裁掉幻影空行的前缀，见 `BlockBuffer::visible_bytes`）。用于点击帧
-/// 预判「块切源码后被点击行落到哪里」，让 ScrollArea 偏移在内容重排
-/// **之前**修正（重排发生在下一帧，偏移先行到位则重排帧不跳）；预测
-/// 残差由落地帧按实测光标行做一次校正（`LiveState::toggle_anchor`）。
+/// 分支的 `extra_text_line_spacing` 拨动）、可用宽（水平内距已归零,
+/// LP2-5「活动块与富渲染同 x」）的折行宽、`keep_trailing_whitespace`；
+/// 外框高 = galley 高 + 上下内距 4px，光标行顶 = galley 行顶 + 上内距
+/// 2px。**text 须与编辑视图同文**（裁掉幻影空行的前缀，见
+/// `BlockBuffer::visible_bytes`）。用于点击帧预判「块切源码后被点击行
+/// 落到哪里」，让 ScrollArea 偏移在内容重排**之前**修正（重排发生在下
+/// 一帧，偏移先行到位则重排帧不跳）；预测残差由落地帧按实测光标行做
+/// 一次校正（`LiveState::toggle_anchor`）。
 fn predict_source_layout(ui: &egui::Ui, text: &str, caret_char: usize) -> (f32, f32) {
-    let wrap_width = (ui.available_width() - 8.0).max(24.0);
+    let wrap_width = ui.available_width().max(24.0);
     // 与编辑视图同一个排版作业(#158):预测即真相 —— 标题缩放/正文字体/
     // 行盒高全部同源,视口锚定的预测精度不随排版改变而回退。
     // (作业构造必须在 fonts_mut 闭包外:它内部取 context 写锁,与
@@ -1448,9 +1572,16 @@ pub fn ui(
                             // Widget 块等宽回退。见 [`active_block_job`]。
                             .layouter(&mut layouter);
                         // 活动块无输入框式外框(2026-10-10 mac 精修全平台化,
-                        // #169):只留文字内距,光标/选区/IME 通路不变
-                        let edit = edit
-                            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 2)));
+                        // #169):只留上下内距;水平内距归零(LP2-5)—— 富渲染
+                        // 文字从块左缘 0 起,TextEdit 若留左右内距,整块内容
+                        // 相对富渲染右移 4px(用户实测「普通文本轻微右移」)。
+                        // 光标/选区/IME 通路不变
+                        let edit = edit.frame(egui::Frame::NONE.inner_margin(egui::Margin {
+                            left: 0,
+                            right: 0,
+                            top: 2,
+                            bottom: 2,
+                        }));
                         // 行距同源(#157):TextEdit 行盒高 = 等宽行高 + 本间距,
                         // 拨到与预览正文行盒(`body_line_height`)等高 —— 配合
                         // 幻影行裁剪,普通段落切形态**逐行等高**,高度零变化。
@@ -3463,6 +3594,160 @@ mod tests {
         );
     }
 
+    /// H1 点击落点(LP2-5 后续,2026-10-21 用户实测「点到 M 后面、光标落
+    /// 在 e」):vendored 命中表给 job 文本序号,标题 `# ` 前缀被剥进样式
+    /// —— 不经映射表就差 2 字符。守门:点在富渲染 H1 的「M|D」之间,进
+    /// 编辑后光标必须落在源码 `# LaterMD` 的字符 8(D 之前 = M 之后)。
+    #[test]
+    fn live_heading_click_lands_after_clicked_glyph() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("# LaterMD\n\n正文段落。\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+
+        let browse = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        // 富渲染 H1 galley 里找「D」的字形坐标(点 M 与 D 之间 = D 左缘;
+        // galley 文本不含 `#` —— 前缀被剥进样式,这正是本修复的根源)
+        let click_pos = browse
+            .glyph_chars
+            .iter()
+            .find(|(text, _)| text.contains("LaterMD"))
+            .and_then(|(_, pairs)| pairs.iter().find(|(chr, _)| *chr == 'D'))
+            .map(|(_, pos)| *pos)
+            .expect("H1 富渲染应有 D 字形");
+        for events in click_events(click_pos) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        assert_eq!(live.active, Some(0), "点击应进入 H1 块");
+        assert_eq!(
+            live.pending_caret,
+            Some((0, 8)),
+            "光标应落在「M 之后」(D 之前,块内字符 8);旧口径落 6(r)或 5(e)"
+        );
+    }
+
+    /// 活动块与富渲染**绝对**同 x(LP2-5 收尾):普通段落点击进编辑后,
+    /// 首个 CJK 字形的屏幕 x 与富渲染帧相等(±0.6px)—— TextEdit 水平内
+    /// 距归零,不再「轻微右移」。列表项同断言。
+    #[test]
+    fn live_active_block_aligns_absolutely_with_rich_render() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("正文段落。\n\n- 项目甲\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+
+        let browse = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let first_cjk_x = |frame: &LiveFrame, needle: &str| -> Option<f32> {
+            frame
+                .glyph_chars
+                .iter()
+                .find(|(text, _)| text.contains(needle))
+                .and_then(|(_, pairs)| {
+                    pairs
+                        .iter()
+                        .find(|(chr, _)| ('\u{4E00}'..='\u{9FFF}').contains(chr))
+                        .map(|(_, pos)| pos.x)
+                })
+        };
+        let rich_para_x = first_cjk_x(&browse, "正文段落").expect("富渲染段落");
+        let rich_item_x = first_cjk_x(&browse, "项目甲").expect("富渲染列表项");
+
+        // 点段落 → 活动态首 CJK x == 富渲染段落 x(±0.6px,内距归零)
+        let para_click = browse
+            .glyph_chars
+            .iter()
+            .find(|(text, _)| text.contains("正文段落"))
+            .and_then(|(_, pairs)| {
+                pairs
+                    .iter()
+                    .find(|(chr, _)| ('\u{4E00}'..='\u{9FFF}').contains(chr))
+                    .map(|(_, pos)| *pos)
+            })
+            .expect("段落点击点");
+        for events in click_events(para_click) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        let para_active = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let active_para_x = first_cjk_x(&para_active, "正文段落").expect("活动段落");
+        assert!(
+            (active_para_x - rich_para_x).abs() < 0.6,
+            "段落活动态首字 x {active_para_x} 应与富渲染 {rich_para_x} 绝对同位(±0.6px)"
+        );
+
+        // 点列表项 → 活动态内容首字 x == 富渲染列表项 x
+        let item_click = browse
+            .glyph_chars
+            .iter()
+            .find(|(text, _)| text.contains("项目甲"))
+            .and_then(|(_, pairs)| {
+                pairs
+                    .iter()
+                    .find(|(chr, _)| ('\u{4E00}'..='\u{9FFF}').contains(chr))
+                    .map(|(_, pos)| *pos)
+            })
+            .expect("列表项点击点");
+        for events in click_events(item_click) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        let item_active = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let active_item_x = first_cjk_x(&item_active, "项目甲").expect("活动列表项");
+        assert!(
+            (active_item_x - rich_item_x).abs() < 0.6,
+            "列表项活动态内容 x {active_item_x} 应与富渲染 {rich_item_x} 绝对同位(±0.6px)"
+        );
+    }
+
     /// Live 模式点非活动代码块的复制按钮必须复制、且不得切入编辑态(#38
     /// 评审修复):「整块点击进编辑」一旦参与 hit-test,无论注册先后都按
     /// egui 0.36 同层平局规则取后注册者(hit_test.rs `find_closest_within`)
@@ -5389,9 +5674,13 @@ mod tests {
                         if let Some(block_rect) = egui_markdown::block_span_rects(panel, probe_id)
                             .and_then(|blocks| blocks.first().map(|b| b.rect))
                         {
-                            // 长段落 0.75 块高落在第二视觉行内
+                            // 长段落 0.75 块高落在第二视觉行内;x 取行内 40px
+                            // —— 行首 3px 会点中**软换行边界字符**(行 N 末尾
+                            // = 行 N+1 开头),egui 对边界光标画在上一行行尾,
+                            // 与富渲染「下一行开头」天然差一行,锚定契约的
+                            // 「点哪行钉哪行」对边界字符不成立
                             let pos = egui::pos2(
-                                block_rect.min.x + 3.0,
+                                block_rect.min.x + 40.0,
                                 block_rect.min.y + block_rect.height() * 0.75,
                             );
                             row_top = egui_markdown::row_rect_at_pos(panel, probe_id, pos)
@@ -5514,8 +5803,9 @@ mod tests {
                 .1;
             if frame.row_top.is_some() && (rect.min.y - prev_min_y).abs() <= 0.01 {
                 clicked_row_top = frame.row_top;
+                // 与行探针同 x:行内 40px,避开软换行边界字符(见行探针注释)
                 target = Some(egui::pos2(
-                    rect.min.x + 3.0,
+                    rect.min.x + 40.0,
                     rect.min.y + rect.height() * 0.75,
                 ));
                 break;
@@ -5590,16 +5880,15 @@ mod tests {
         // 该块同参 shaping 的光标行顶(与生产共用 predict_source_layout)
         // == 被点击渲染行顶,容差 2px。
         tick += 0.1;
-        let active_rect = run(
+        let measure_frame = run(
             tick,
             Vec::new(),
             &mut editor,
             &mut preview,
             &mut cursor,
             &mut live,
-        )
-        .active_rect
-        .expect("活动块 TextEdit 响应可读");
+        );
+        let active_rect = measure_frame.active_rect.expect("活动块 TextEdit 响应可读");
         // 点击字符在源码里的行顶(块内偏移 → 同参 shaping 预测的 galley
         // 行顶),加上 TextEdit 矩形顶即它的屏幕位置;预测与生产共用同一
         // 函数,差异只剩布局实测 vs 理论 —— 残差校正正是为此存在,终态
