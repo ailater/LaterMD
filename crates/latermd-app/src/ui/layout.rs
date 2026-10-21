@@ -1399,6 +1399,8 @@ impl LaterMdApp {
                             .as_deref()
                             .and_then(std::path::Path::parent),
                         streaming_here,
+                        // 禅定是只读阅读:无徽标槽,内容不右移
+                        false,
                         &state.keymap,
                         outbox,
                     );
@@ -1559,6 +1561,8 @@ fn compare_column_body(ui: &mut egui::Ui, app: &mut LaterMdApp) {
         false,
         base_dir,
         heal,
+        // 只读对照列:无徽标槽,内容不右移
+        false,
         &state.keymap,
         outbox,
     );

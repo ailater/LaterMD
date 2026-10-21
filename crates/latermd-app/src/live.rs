@@ -76,6 +76,11 @@ type RichBlock = (
     Arc<latermd_md::OffsetMap>,
 );
 
+/// 徽标槽宽度(LP2-6):写作栏内容左移量,类型徽标(H1–H6/代码/引用…)
+/// 悬在槽内、与活动块首行对齐。宽度取最宽徽标「分隔线」三字 + 内距的
+/// 实测量级,槽内点击不与内容命中重叠。
+pub const BADGE_GUTTER: f32 = 44.0;
+
 fn source_hash(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
@@ -1064,6 +1069,55 @@ impl JobRenderMap {
     }
 }
 
+/// 徽标点击切换标题级别(LP2-6):`H1→H2→…→H6→正文`,正文→`H1`,循环。
+/// 只处理**顶格**前缀:标题直接改写 `#{N} `,普通段落插入 `# `(列表/
+/// 引用/代码等带结构前缀的块不动 —— 它们的徽标本就只显示不可点)。
+/// 改写走 `replace_range`(与格式动作/AI 润色同一通道,TextEdit 内建
+/// undo 单步可退);光标按前缀字符差平移并经 `pending_caret` 落回,
+/// 不拽视口。
+fn cycle_block_heading(
+    editor: &mut EditorBuffer,
+    live: &mut LiveState,
+    index: usize,
+    caret_local: usize,
+) {
+    let Some(range) = live.blocks.get(index).cloned() else {
+        return;
+    };
+    let block = BlockBuffer::slice(editor.text(), &range).to_owned();
+    let first_line_end = block.find('\n').unwrap_or(block.len());
+    let first_line = &block[..first_line_end];
+    if !first_line.starts_with(first_line.trim_start()) {
+        return; // 缩进行保守不处理
+    }
+    let hashes = first_line.bytes().take_while(|&b| b == b'#').count();
+    let is_heading = (1..=6).contains(&hashes) && first_line.as_bytes().get(hashes) == Some(&b' ');
+    let (new_prefix, old_prefix_len) = if is_heading {
+        let old = hashes + 1;
+        if hashes < 6 {
+            (format!("{} ", "#".repeat(hashes + 1)), old)
+        } else {
+            (String::new(), old)
+        }
+    } else {
+        // 普通段落才可升 H1:列表项(有自己的徽标语义)、引用/代码等
+        // 结构块一律不动
+        if block_kind(&block) != BlockKind::Text || list_prefix(first_line).is_some() {
+            return;
+        }
+        ("# ".to_owned(), 0)
+    };
+    let delta_chars = new_prefix.chars().count() as isize - old_prefix_len as isize;
+    // 前缀是纯 ASCII(`#` 与空格),字符数 == 字节数
+    editor.replace_range(range.start..range.start + old_prefix_len, &new_prefix);
+    // 光标平移:前缀差按字符计,钳进新块文本(旧块长 + 差值)
+    let new_len = (block.chars().count() as isize + delta_chars).max(0) as usize;
+    let new_caret = ((caret_local as isize + delta_chars).max(0) as usize).min(new_len);
+    live.pending_caret = Some((index, new_caret));
+    live.pending_range = None;
+    live.caret_follow = false;
+}
+
 /// 列表项首行的前缀结构(LP2-5「列表点击保持位置」):前导空白、
 /// marker(`-`/`*`/`+`/`N.`/`N)`,不含尾随空白)、marker 后的空白与可选
 /// 任务标记(`[ ]`/`[x]` + 空白)。三段区间首尾相接 = `0..rest.end`,即
@@ -1135,8 +1189,8 @@ fn list_prefix(first_line: &str) -> Option<ListPrefix> {
 /// Monospace 字号、行盒高与活动块同源（[`body_line_height`]，见活动块
 /// 分支的 `extra_text_line_spacing` 拨动）、可用宽（水平内距已归零,
 /// LP2-5「活动块与富渲染同 x」）的折行宽、`keep_trailing_whitespace`；
-/// 外框高 = galley 高 + 上下内距 4px，光标行顶 = galley 行顶 + 上内距
-/// 2px。**text 须与编辑视图同文**（裁掉幻影空行的前缀，见
+/// 外框高 = galley 高（内距已全零,LP2-6），光标行顶 = galley 行顶。
+/// **text 须与编辑视图同文**（裁掉幻影空行的前缀，见
 /// `BlockBuffer::visible_bytes`）。用于点击帧预判「块切源码后被点击行
 /// 落到哪里」，让 ScrollArea 偏移在内容重排**之前**修正（重排发生在下
 /// 一帧，偏移先行到位则重排帧不跳）；预测残差由落地帧按实测光标行做
@@ -1154,7 +1208,8 @@ fn predict_source_layout(ui: &egui::Ui, text: &str, caret_char: usize) -> (f32, 
         &egui_markdown_style::global_style(ui.ctx()),
         crate::theme::editor_font_size(ui.ctx()),
     );
-    (galley.size().y.max(floor) + 4.0, caret_row.min.y + 2.0)
+    // 内距已全零(LP2-6):外框高 = galley 高,光标行顶 = galley 行顶。
+    (galley.size().y.max(floor), caret_row.min.y)
 }
 
 /// 块内「可见内容末尾」的块内字符偏移：块源码尾部的换行（含块间空行
@@ -1208,6 +1263,7 @@ pub fn ui(
     show_focus: bool,
     base_dir: Option<&std::path::Path>,
     heal: bool,
+    badge_gutter: bool,
     keymap: &crate::keymap::Keymap,
     outbox: &mut Vec<Message>,
 ) -> egui::Response {
@@ -1311,21 +1367,38 @@ pub fn ui(
     // 逐 handler 记占位区,ScrollArea 之后统一消费。
     let emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>> = Default::default();
 
-    // ScrollArea 状态键:ScrollArea 在 begin() 里以 `panel.make_persistent_id(
+    // ScrollArea 状态键:ScrollArea 在 begin() 里以 `ui.make_persistent_id(
     // IdSalt::new(id_salt))` 派生 —— **必须经 IdSalt 包一层**,裸 `Id` 直接进
     // `make_persistent_id` 哈希的是 Id 本体,与 IdSalt 的哈希不同源,得到的
     // 是另一个键(2026-10-19 实测踩过:State::load 恒 MISS,#111 B 的
-    // estimate_drift 落账因此一直静默无效)。内容闭包里的 `ui` 是子 Ui、
-    // id 链不同 —— 锚定读写必须用 panel 级派生的同一个键,先在此处取好。
+    // estimate_drift 落账因此一直静默无效)。且 make_persistent_id 随 **Ui
+    // 链**变:LP2-6 把 ScrollArea 挪进了徽标槽子 Ui,状态键必须同样从子
+    // Ui 派生 —— 从 panel 派生会写到旧键上,锚定补偿/残差校正全部静默
+    // 失效(2026-10-21 实测:点击锚定测试 offset 纹丝不动)。旧键下的持久
+    // 滚动位置随本次换键作废一次,属可接受迁移成本。
+    // 徽标槽(LP2-6):写作栏内容整体右移 [`BADGE_GUTTER`],左缘空槽给类型
+    // 徽标(H1–H6/代码/引用…与块首行对齐,点击可切换标题级别)。禅定/对照
+    // 列传 false,gutter=0 时子 Ui 矩形与面板重合;块 id 全部显式派生,不
+    // 受父子链变化影响。
+    let gutter = if badge_gutter { BADGE_GUTTER } else { 0.0 };
+    let area_rect = panel.available_rect_before_wrap();
+    let mut content = panel.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_max(
+                egui::pos2(area_rect.left() + gutter, area_rect.top()),
+                area_rect.max,
+            ))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
     let scroll_state_id =
-        panel.make_persistent_id(egui::IdSalt::new(editor_id.with("live-scroll")));
+        content.make_persistent_id(egui::IdSalt::new(editor_id.with("live-scroll")));
     let scrolled =
         egui::ScrollArea::vertical()
             // id 必须带 `editor_id`:同一文档可能被两个实例渲染(主写作列 +
             // 只读对照列),写死常量会让两列的滚动状态缠在一起。
             .id_salt(editor_id.with("live-scroll"))
             .auto_shrink([false, false])
-            .show(panel, |ui| {
+            .show(&mut content, |ui| {
                 // 块间节奏完全由 [`block_gap`] 前距决定(与右栏预览同口径,
                 // 2026-10-10):egui 出厂 item_spacing.y = 3px 会叠加在演算值
                 // 上,归零让前距成为唯一间距源。
@@ -1463,11 +1536,9 @@ pub fn ui(
                         .link_handler(&rich_handler)
                         .estimated_height(ui);
                         let estimate = estimate.max(1.0);
-                        // 占位高度含块内边距(Frame NONE 内距 4×2 与真实臂同款),
-                        // 估高器算的是 galley 高,不含 TextEdit 内距;真实渲染块
-                        // 的框高 = galley 高 + 上下 2px。补齐这两像素让占位与
-                        // 实测的差值只剩估高误差本身。
-                        let placeholder = estimate + 4.0;
+                        // TextEdit 内距已全零(LP2-6):真实渲染块的框高 ==
+                        // galley 高,占位即估高,与实测的差值只剩估高误差本身。
+                        let placeholder = estimate;
                         let rect = egui::Rect::from_min_size(
                             ui.cursor().min,
                             egui::vec2(ui.available_width(), placeholder),
@@ -1536,6 +1607,13 @@ pub fn ui(
                         let lines = block_text[..visible_bytes].lines().count().max(1);
                         // 类型徽标文案提前判定(&'static str,不留 block_text 借用)
                         let badge = block_badge_label(block_text);
+                        // 徽标交互判定提前算(&'static str/枚举,不留块文本
+                        // 借用 —— buffer 要独占 editor)
+                        let kind = block_kind(block_text);
+                        let first_line = block_text.lines().next().unwrap_or("");
+                        let plain_cycle = badge.is_none()
+                            && kind == BlockKind::Text
+                            && list_prefix(first_line).is_none();
                         let mut buffer = BlockBuffer {
                             buffer: editor,
                             range: range.clone(),
@@ -1572,16 +1650,12 @@ pub fn ui(
                             // Widget 块等宽回退。见 [`active_block_job`]。
                             .layouter(&mut layouter);
                         // 活动块无输入框式外框(2026-10-10 mac 精修全平台化,
-                        // #169):只留上下内距;水平内距归零(LP2-5)—— 富渲染
-                        // 文字从块左缘 0 起,TextEdit 若留左右内距,整块内容
-                        // 相对富渲染右移 4px(用户实测「普通文本轻微右移」)。
+                        // #169):内距全部归零 —— 水平归零是 LP2-5 的「活动块
+                        // 与富渲染绝对同 x」;垂直归零是 LP2-6 的「点击进标题
+                        // 不再下坠」:文档顶部滚动被钳位、锚定补偿修不掉,
+                        // 原上下各 2px 让块切源码整体下坠 4px(用户实测)。
                         // 光标/选区/IME 通路不变
-                        let edit = edit.frame(egui::Frame::NONE.inner_margin(egui::Margin {
-                            left: 0,
-                            right: 0,
-                            top: 2,
-                            bottom: 2,
-                        }));
+                        let edit = edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::ZERO));
                         // 行距同源(#157):TextEdit 行盒高 = 等宽行高 + 本间距,
                         // 拨到与预览正文行盒(`body_line_height`)等高 —— 配合
                         // 幻影行裁剪,普通段落切形态**逐行等高**,高度零变化。
@@ -1608,30 +1682,62 @@ pub fn ui(
                                 output.response.response.rect.height(),
                             )
                         });
-                        // 类型徽标(#158):H1–H6/代码/表格/引用/分隔线/图片
-                        // 悬在块顶的块间空隙(首块钳回视口顶),纯绘制不参与
-                        // 命中 —— 「特殊功能地方编辑时显示」。
-                        if let Some(badge) = badge {
-                            let chip_h = 15.0;
+                        // 类型徽标(LP2-6,取代 #158 的「块顶空隙」画法):
+                        // H1–H6/代码/表格/引用/分隔线/图片悬在**左侧徽标槽**
+                        // 内、与块首行对齐 —— 悬在块顶会顶着上一块的空隙
+                        // (用户实测「标签显示有明显向下位移」)。标题徽标可
+                        // 点击循环 H1→…→H6→正文,普通段落显示幽灵 H1(点击
+                        // 升级);widget 徽标只显示。
+                        // 标题/普通段落可点:循环切换级别;widget 徽标只显示
+                        let clickable = kind == BlockKind::Heading || plain_cycle;
+                        if badge.is_some() || plain_cycle {
                             let clip = ui.clip_rect();
                             let block_rect = output.response.response.rect;
-                            let y = (block_rect.top() - chip_h - 3.0).max(clip.top() + 1.0);
-                            let painter = ui.painter();
+                            // 槽在内容左缘之外;绘制裁剪扩到槽区(galley 画在
+                            // 内容 Ui 里,默认裁剪不含槽)
+                            let gutter_clip = egui::Rect::from_min_max(
+                                egui::pos2(block_rect.left() - BADGE_GUTTER, clip.top()),
+                                egui::pos2(block_rect.left(), clip.bottom()),
+                            );
+                            let painter = ui.painter().with_clip_rect(gutter_clip);
+                            let label = badge.unwrap_or("H1");
+                            let ghost = badge.is_none();
+                            let chip_h = 18.0;
                             let galley = painter.layout_no_wrap(
-                                badge.to_owned(),
+                                label.to_owned(),
                                 egui::FontId::monospace(10.0),
                                 ui.visuals().weak_text_color(),
                             );
                             let chip = egui::Rect::from_min_size(
-                                egui::pos2(block_rect.left(), y),
+                                egui::pos2(
+                                    block_rect.left() - BADGE_GUTTER + 4.0,
+                                    block_rect.top() + 1.0,
+                                ),
                                 egui::vec2(galley.size().x + 10.0, chip_h),
                             );
-                            painter.rect_filled(chip, 3.0, ui.visuals().faint_bg_color);
+                            let bg = if ghost {
+                                egui::Color32::TRANSPARENT
+                            } else {
+                                ui.visuals().faint_bg_color
+                            };
+                            painter.rect_filled(chip, 3.0, bg);
                             painter.galley(
-                                egui::pos2(chip.left() + 5.0, y + (chip_h - galley.size().y) * 0.5),
+                                egui::pos2(chip.left() + 5.0, chip.center().y - galley.size().y * 0.5),
                                 galley,
                                 ui.visuals().weak_text_color(),
                             );
+                            if clickable {
+                                let response = ui.allocate_rect(chip, egui::Sense::click());
+                                if response.clicked() {
+                                    let caret_local = output
+                                        .state
+                                        .cursor
+                                        .char_range()
+                                        .map(|range| range.primary.index.0)
+                                        .unwrap_or(0);
+                                    cycle_block_heading(editor, live, index, caret_local);
+                                }
+                            }
                         }
                         // 右键菜单(context-menu-plan §3 M1):活动块与源码
                         // 编辑器同一挂点,条目表共用;块内坐标落光标见
@@ -2228,8 +2334,9 @@ pub fn ui(
                                                 .heal(heal)
                                                 .defer_offscreen_highlight(true)
                                                 .link_handler(&old_handler)
-                                                .estimated_height(ui)
-                                                    + 4.0;
+                                                .estimated_height(ui);
+                                                // 内距已全零(LP2-6):估高即源码框高,
+                                                // 不再加 TextEdit 上下内距。
                                                 estimate - old_src_h
                                             }
                                             _ => 0.0,
@@ -3233,6 +3340,7 @@ mod tests {
                 false,
                 None,
                 false,
+                false,
                 &crate::keymap::Keymap::builtin(),
                 &mut outbox,
             );
@@ -3401,6 +3509,7 @@ mod tests {
                     false,
                     false,
                     None,
+                    false,
                     false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
@@ -3591,6 +3700,162 @@ mod tests {
         assert!(
             (active_delta - rich_delta).abs() < 0.75,
             "列表项活动态内容列应与富渲染同位:富渲染差 {rich_delta:.2}px,活动态差 {active_delta:.2}px"
+        );
+    }
+
+    // —— LP2-6 徽标槽与标题级别点击切换 ——
+
+    /// 级别循环:H1→H2→…→H6→正文→H1;光标按前缀差平移;列表项不动。
+    #[test]
+    fn cycle_block_heading_walks_levels_and_back_to_plain() {
+        let mut editor = EditorBuffer::new("# 标题内容\n\n- 列表项\n\n正文段落\n");
+        let mut live = LiveState::default();
+        live.sync(&editor, None);
+        let mut caret = 4usize; // 块内字符 4 = 「内」之前
+        macro_rules! block_text {
+            ($i:expr) => {
+                BlockBuffer::slice(editor.text(), &live.blocks[$i].clone()).to_owned()
+            };
+        }
+
+        // H1→H2:前缀 +1 字符,光标平移;块表随修订号重算
+        cycle_block_heading(&mut editor, &mut live, 0, caret);
+        live.sync(&editor, None);
+        assert_eq!(block_text!(0), "## 标题内容\n\n");
+        assert_eq!(live.pending_caret, Some((0, 5)), "光标随前缀平移");
+        // H2→H6 连点四次到 H6
+        for level in 3..=6 {
+            caret = live.pending_caret.unwrap().1;
+            cycle_block_heading(&mut editor, &mut live, 0, caret);
+            live.sync(&editor, None);
+            let expect = format!("{} 标题内容\n\n", "#".repeat(level));
+            assert_eq!(block_text!(0), expect);
+        }
+        // H6→正文:前缀剥掉,光标 -7(9→2)
+        caret = live.pending_caret.unwrap().1;
+        cycle_block_heading(&mut editor, &mut live, 0, caret);
+        live.sync(&editor, None);
+        assert_eq!(block_text!(0), "标题内容\n\n");
+        assert_eq!(live.pending_caret, Some((0, 2)), "剥前缀后光标平移");
+        // 正文→H1
+        caret = live.pending_caret.unwrap().1;
+        cycle_block_heading(&mut editor, &mut live, 0, caret);
+        live.sync(&editor, None);
+        assert_eq!(block_text!(0), "# 标题内容\n\n");
+        assert_eq!(live.pending_caret, Some((0, 4)));
+        assert!(!live.caret_follow, "切换不拽视口");
+
+        // 列表项:徽标本就不显示,函数对它不动
+        let list_index = live
+            .block_containing(editor.text().find("列表项").unwrap())
+            .unwrap();
+        let before = block_text!(list_index);
+        cycle_block_heading(&mut editor, &mut live, list_index, 0);
+        assert_eq!(block_text!(list_index), before, "列表项不可升级");
+    }
+
+    /// 全帧:点活动块标题的左侧徽标 → 源码前缀 H1→H2,块保持活动、光标
+    /// 保持落点。徽标芯片在内容左缘 - 徽标槽 + 4(gutter=true 的帧)。
+    #[test]
+    fn live_badge_click_cycles_heading_level() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("# 标题一\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+
+        // 徽标槽只在写作栏开启(LP2-6):本测试的帧带 gutter=true。
+        let run = |events: Vec<egui::Event>,
+                   editor: &mut EditorBuffer,
+                   preview: &mut PreviewState,
+                   cursor: &mut OutlineCursor,
+                   live: &mut LiveState|
+         -> Vec<(String, egui::Rect)> {
+            let mut outbox = Vec::new();
+            let mut selection = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    super::ui(
+                        ui,
+                        editor,
+                        preview,
+                        &AiState::default(),
+                        cursor,
+                        &mut selection,
+                        live,
+                        egui::Id::new("badge-cycle-test"),
+                        false,
+                        false,
+                        None,
+                        false,
+                        true,
+                        &crate::keymap::Keymap::builtin(),
+                        &mut outbox,
+                    );
+                },
+            );
+            let texts: Vec<(String, egui::Rect)> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(t) => Some((
+                        t.galley.text().to_owned(),
+                        egui::Rect::from_min_size(t.pos, t.galley.size()),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            output.drop_without_applying_deltas();
+            texts
+        };
+
+        // 进编辑:直接指定活动块(点进块等价路径已由其它测试覆盖)
+        live.active = Some(0);
+        live.browse_only = false;
+        live.pending_caret = Some((0, 2));
+        let _ = run(
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let texts = run(
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let edit_rect = texts
+            .iter()
+            .find(|(t, _)| t == "# 标题一")
+            .map(|(_, r)| *r)
+            .expect("活动块 TextEdit 形状(槽内容左缘 = 其左缘)");
+        let chip = egui::pos2(
+            edit_rect.left() - crate::live::BADGE_GUTTER + 10.0,
+            edit_rect.top() + 10.0,
+        );
+        for events in click_events(chip) {
+            let _ = run(events, &mut editor, &mut preview, &mut cursor, &mut live);
+        }
+        assert_eq!(editor.text(), "## 标题一\n", "点击徽标后 H1→H2");
+        assert_eq!(live.active, Some(0), "块保持活动");
+        // pending_caret 在点击帧内即被活动块落地消费(设计如此),光标从
+        // TextEdit state 验证:字符 2 → 3(前缀 +1)
+        let state = egui::widgets::text_edit::TextEditState::load(
+            &ctx,
+            egui::Id::new("badge-cycle-test").with(("live-block", 0)),
+        )
+        .expect("活动块 TextEdit state");
+        assert_eq!(
+            state.cursor.char_range().map(|r| r.primary.index.0),
+            Some(3),
+            "光标随前缀平移"
         );
     }
 
@@ -4368,6 +4633,7 @@ mod tests {
                     false,
                     None,
                     false,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
@@ -5045,6 +5311,7 @@ mod tests {
                     show_focus,
                     None,
                     false,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 )
@@ -5597,6 +5864,10 @@ mod tests {
         // 会被 clamp 吃掉 —— 中段点击才是锚定的主战场。
         let filler = "乙段:这一段只是填充正文,".repeat(6);
         let target_para = "靶段:这一段只是被点击的正文,".repeat(5);
+        // 塌缩位移源 = H1 下的代码 fence(块 1):内距归零(LP2-6)后普通
+        // 段落与标题的源码↔富渲染高度已相等(补偿量归零是改善不是回归),
+        // 唯代码块富渲染带复制头/内距,与源码态保持真实高度差 —— 补偿场
+        // 景用它当位移源。
         let mut text =
             format!("# 标题\n\n```text\n filler \n```\n\n{filler}\n\n```text\n filler \n```\n");
         for i in 0..10 {
@@ -5612,12 +5883,12 @@ mod tests {
         let mut editor = EditorBuffer::new(&text);
         let mut preview = PreviewState::new(&editor);
         let mut cursor = OutlineCursor::default();
-        // 活动块 = 文档头标题(源码形态):先在源头制造一次塌缩位移
+        // 活动块 = 代码 fence(块 1,源码形态):塌缩位移源,见文档注释
         let mut live = LiveState {
-            active: Some(0),
+            active: Some(1),
             ..LiveState::default()
         };
-        live.pending_caret = Some((0, 0));
+        live.pending_caret = Some((1, 0));
         let mut outbox = Vec::new();
         let mut selection = None;
         // 返回 (全部文本形状 rect, 滚动探针偏移, live::ui 响应矩形 = 活动
@@ -5664,6 +5935,7 @@ mod tests {
                         false,
                         false,
                         None,
+                        false,
                         false,
                         &crate::keymap::Keymap::builtin(),
                         &mut outbox,
@@ -6097,7 +6369,8 @@ mod tests {
             "激活标题块挂 H1 徽标"
         );
 
-        // 普通段落激活:不挂徽标
+        // 普通段落激活:挂幽灵 H1(LP2-6,点击升级的入口),但无实体块型
+        // 徽标(代码/引用/表格等同族)
         live.active = Some(1);
         live.pending_caret = Some((1, 0));
         let frame = live_frame(
@@ -6109,11 +6382,15 @@ mod tests {
             &mut live,
         );
         assert!(
+            frame.texts.iter().any(|(t, _)| t == "H1"),
+            "普通段落挂幽灵 H1(点击升级入口)"
+        );
+        assert!(
             !frame
                 .texts
                 .iter()
-                .any(|(t, _)| matches!(t.as_str(), "H1" | "H2" | "代码" | "引用" | "表格")),
-            "普通段落无类型徽标"
+                .any(|(t, _)| matches!(t.as_str(), "代码" | "引用" | "表格" | "图片" | "分隔线")),
+            "普通段落无实体块型徽标"
         );
     }
 
@@ -6159,6 +6436,7 @@ mod tests {
                         false,
                         false,
                         None,
+                        false,
                         false,
                         &crate::keymap::Keymap::builtin(),
                         &mut outbox,
@@ -7094,6 +7372,7 @@ mod tests {
                     show_focus,
                     None,
                     false,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
@@ -7333,6 +7612,7 @@ mod tests {
                     focus,
                     None,
                     false,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
@@ -7520,6 +7800,7 @@ mod tests {
                 false,
                 None,
                 false,
+                false,
                 &crate::keymap::Keymap::builtin(),
                 &mut outbox,
             );
@@ -7651,6 +7932,7 @@ mod tests {
                 false,
                 false,
                 None,
+                false,
                 false,
                 &crate::keymap::Keymap::builtin(),
                 &mut outbox,
@@ -7848,6 +8130,7 @@ mod tests {
                     false,
                     Some(dir.as_path()),
                     false,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
@@ -7921,6 +8204,7 @@ mod tests {
                     false,
                     None,
                     heal,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
@@ -8015,6 +8299,7 @@ mod tests {
                         false,
                         false,
                         None,
+                        false,
                         false,
                         &crate::keymap::Keymap::builtin(),
                         &mut outbox,
@@ -8129,6 +8414,7 @@ mod tests {
                             false,
                             None,
                             false,
+                            false,
                             &crate::keymap::Keymap::builtin(),
                             &mut outbox,
                         );
@@ -8215,6 +8501,7 @@ mod tests {
                             false,
                             None,
                             false,
+                            false,
                             &crate::keymap::Keymap::builtin(),
                             &mut outbox,
                         );
@@ -8286,6 +8573,7 @@ mod tests {
                     false,
                     None,
                     false,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
@@ -8356,6 +8644,7 @@ mod tests {
                         false,
                         None,
                         false,
+                        false,
                         &crate::keymap::Keymap::builtin(),
                         &mut outbox,
                     );
@@ -8416,6 +8705,7 @@ mod tests {
                         false,
                         false,
                         None,
+                        false,
                         false,
                         &crate::keymap::Keymap::builtin(),
                         &mut outbox,
@@ -8518,6 +8808,7 @@ mod tests {
                     false,
                     None,
                     false,
+                    false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
                 );
@@ -8617,6 +8908,7 @@ mod tests {
                             false,
                             false,
                             None,
+                            false,
                             false,
                             &crate::keymap::Keymap::builtin(),
                             &mut outbox,

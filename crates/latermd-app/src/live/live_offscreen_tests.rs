@@ -91,6 +91,7 @@ fn offscreen_blocks_are_placeholder_not_shaped() {
                         false,
                         None,
                         false,
+                        false,
                         &crate::keymap::Keymap::builtin(),
                         &mut outbox,
                     );
@@ -188,6 +189,7 @@ fn offscreen_anchored_scroll_does_not_drift_in_steady_state() {
                     false,
                     false,
                     None,
+                    false,
                     false,
                     &crate::keymap::Keymap::builtin(),
                     &mut outbox,
