@@ -1733,12 +1733,27 @@ pub fn ui(
                                 egui::pos2(block_rect.left(), clip.bottom()),
                             );
                             let painter = ui.painter().with_clip_rect(gutter_clip);
+                            // 纵向锚到**第一行 galley 行盒**,不能用 TextEdit
+                            // 外框顶:标题行字号被放大时,外框顶与行顶的差会变
+                            // 大,手柄就会被抬到上一行(用户实测「徽标槽不再同
+                            // 一行,往上了好多」)。第一行行盒与标题/正文排版作业
+                            // 同源,因此 H1–H6、正文和代码块都同一基线。
+                            let first_row = output.galley.rows.first();
+                            let first_row_top = first_row
+                                .map(|row| output.galley_pos.y + row.min_y())
+                                .unwrap_or(block_rect.top());
+                            let first_row_bottom = first_row
+                                .map(|row| output.galley_pos.y + row.max_y())
+                                .unwrap_or(block_rect.top() + 14.0);
+                            let chip_h = 14.0;
+                            let chip_y = first_row_top
+                                + ((first_row_bottom - first_row_top - chip_h) * 0.5).max(0.0);
                             let chip = egui::Rect::from_min_size(
                                 egui::pos2(
                                     block_rect.left() - BADGE_GUTTER + 3.0,
-                                    block_rect.top() + 1.0,
+                                    chip_y,
                                 ),
-                                egui::vec2(12.0, 14.0),
+                                egui::vec2(12.0, chip_h),
                             );
                             painter.rect_filled(chip, 3.0, egui::Color32::TRANSPARENT);
                             let dot = ui.visuals().weak_text_color();
