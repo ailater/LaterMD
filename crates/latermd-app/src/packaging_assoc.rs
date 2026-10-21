@@ -29,10 +29,15 @@ fn repo_root() -> PathBuf {
 
 /// 读一份打包配置文件;读不到直接失败 —— 「文件没了」是最彻底的关联
 /// 退化,不该退化成"跳过断言"。
+///
+/// 顺带剥掉 UTF-8 BOM:`latermd.iss` 存的是带 BOM 的 UTF-8(见
+/// `inno_script_is_utf8_with_bom`),而 `read_to_string` 会把 BOM 当成正文
+/// 的第一个字符,让「首行以 X 开头」这类判据莫名其妙地红。
 fn read_packaging(relative: &str) -> String {
     let path = repo_root().join(relative);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("读不到 {}:{error}", path.display()))
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("读不到 {}:{error}", path.display()));
+    raw.trim_start_matches('\u{feff}').to_owned()
 }
 
 /// 与 `latermd_search::MARKDOWN_EXTENSIONS` 对齐的关联扩展名。
@@ -41,6 +46,32 @@ fn read_packaging(relative: &str) -> String {
 /// 与运行时那张表交叉核对(见 `extensions_match_runtime_table`)——
 /// 两份独立写出来才能互相验,抄同一处等于没验。
 const EXPECTED_EXTENSIONS: [&str; 2] = ["md", "markdown"];
+
+/// 取出一条 `[Tasks]` 记录里 `Flags:` 参数的**逐个 token**(空列表 = 没写)。
+///
+/// 按 `;` 切参数再找 `Flags:` 那段,而不是 `line.contains("Flags: checked")`
+/// 那种子串判断 —— 子串会把 `unchecked` / `checkedonce` 一起算进去。
+fn inno_flags_of_line(line: &str) -> Vec<String> {
+    line.split(';')
+        .filter_map(|parameter| parameter.trim().strip_prefix("Flags:"))
+        .flat_map(|flags| flags.split_whitespace())
+        .map(|flag| flag.to_owned())
+        .collect()
+}
+
+/// Inno Setup 6 文档里 `[Tasks]` 段 `Flags` 的**全部**合法取值。
+/// 少一个都会被 iscc 判成 `Parameter "Flags" includes an unknown flag`
+/// 并中止编译;多一个(`checked`)是本项目 v0.0.7 真实踩过的坑。
+///
+/// 出处:jrsoftware.org/ishelp `topic_taskssection.htm` 的 Flags 参数表。
+const INNO_TASK_FLAGS: [&str; 6] = [
+    "checkablealone",
+    "checkedonce",
+    "dontinheritcheck",
+    "exclusive",
+    "restart",
+    "unchecked",
+];
 
 /// 运行时那张表的真源(`MARKDOWN_EXTENSIONS` 是唯一事实源,这里读它)。
 fn runtime_extensions() -> Vec<String> {
@@ -162,6 +193,12 @@ fn windows_inno_setup_registers_both_extensions_under_hkcu() {
     );
 
     // 关联做成安装向导里的可选项,且默认勾上。
+    //
+    // 「默认勾选」的**正确表达是不写 Flags** —— Inno 的任务默认就是勾选,
+    // 而 `[Tasks]` 段的 Flags 白名单里**没有 `checked`** 这个值
+    // (见 `inno_task_flags_only_use_documented_flags`)。所以这里判据是
+    // 「没有 unchecked」,而不是「有 checked」:后者会把 `unchecked` 也算成
+    // 满足(子串),恒真;而它期待的写法恰恰是让 iscc 编译失败的那个。
     assert!(
         iss.contains("Name: \"mdassoc\""),
         "应有 mdassoc 任务项(让用户能拒绝关联,不必手改注册表)"
@@ -171,8 +208,10 @@ fn windows_inno_setup_registers_both_extensions_under_hkcu() {
         .find(|line| line.starts_with("Name: \"mdassoc\""))
         .expect("已断言存在");
     assert!(
-        task_line.contains("checked"),
-        "关联应默认勾选(用户可取消):{task_line}"
+        !inno_flags_of_line(task_line)
+            .iter()
+            .any(|flag| flag == "unchecked"),
+        "关联应默认勾选(用户可取消勾选再重装):{task_line}"
     );
 
     // 全部写 HKCU:配合 PrivilegesRequired=lowest 不需要 UAC,也不与
@@ -192,6 +231,92 @@ fn windows_inno_setup_registers_both_extensions_under_hkcu() {
     assert!(
         !registry_section.contains("Root: HKLM;") && !registry_section.contains("Root: HKA;"),
         "[Registry] 段不该出现 HKLM/HKA:会要管理员权限,与按用户装冲突"
+    );
+}
+
+/// 守 `.iss` 里 `[Tasks]` 段的 Flags 只用文档白名单里的值。
+///
+/// 为什么单独立一条:v0.0.7(2026-10-18)把 Windows 安装器整包发没了 ——
+/// `mdassoc` 任务写了 `Flags: checked`,iscc 报 `Parameter "Flags" includes
+/// an unknown flag` 后中止,`release.yml` 的 `windows-installer` job 变红,
+/// Release 里只剩 zip 与裸 exe。而**本机是 Linux,没有 iscc**,这条错在本机
+/// 完全测不出来;当时 `packaging_assoc.rs` 里那条守门还在**主动要求**这个
+/// 非法写法(`contains("checked")`),于是「测试全绿」与「发布物缺失」并存。
+///
+/// 这条判据与被断言的实现无关:白名单抄自 Inno Setup 官方文档,不是从当前
+/// .iss 里反推的,所以「.iss 改出一个新写法」它会红,「.iss 保持现状」它绿。
+#[test]
+fn inno_task_flags_only_use_documented_flags() {
+    let iss = read_packaging("packaging/windows/latermd.iss");
+
+    // 只扫 [Tasks] 段:[Files]/[Run]/[Icons] 段的 Flags 是各自独立的
+    // 参数集(ignoreversion / nowait / skipifsilent 等),混进来会误报。
+    let tasks_section = iss
+        .split_once("[Tasks]")
+        .map(|(_, rest)| {
+            // 段落在下一个 `[` 开头的行处结束
+            rest.lines()
+                .take_while(|line| !line.trim_start().starts_with('['))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_else(|| panic!(".iss 缺 [Tasks] 段"));
+    assert!(
+        tasks_section.contains("Name:"),
+        "[Tasks] 段里一条任务都没有 —— 扫描范围退化成空集,下面会恒绿"
+    );
+
+    for line in tasks_section.lines().filter(|line| !line.trim().is_empty()) {
+        // 注释与空行不在 Flags 白名单管辖内(注释里会写「unchecked」等字样)
+        if line.trim_start().starts_with(';') {
+            continue;
+        }
+        for flag in inno_flags_of_line(line) {
+            assert!(
+                INNO_TASK_FLAGS.contains(&flag.as_str()),
+                "[Tasks] 用了文档里不存在的 flag `{flag}`:iscc 会报 \
+                 `Parameter \"Flags\" includes an unknown flag` 并中止编译,\
+                 整个安装器发不出来(合法值只有 {}),行:{line}",
+                INNO_TASK_FLAGS.join(" / ")
+            );
+        }
+    }
+}
+
+/// `.iss` 必须是带 BOM 的 UTF-8,且 `read_packaging` 确实把 BOM 剥掉了。
+///
+/// Inno Setup 6.3 之前不带 BOM 一律按 ANSI 读脚本,本文件 `[Tasks]` 段的
+/// Description 里有中文,会被读成乱码显示在安装向导的「选择附加任务」页上
+/// (6.3 起才支持无 BOM;而 GitHub runner 上预装的 iscc 版本会随镜像漂移,
+/// 不能假定 ≥6.3)。
+///
+/// 顺带守 `read_packaging` 的 BOM 剥离:文件带 BOM 而读取端不剥,任何
+/// 「首行以 X 开头」的判据都会莫名其妙地红(首字符是 U+FEFF)。这条判据
+/// 读的是**字节**判存在性、**文本**判已剥离,两头都要。
+#[test]
+fn inno_script_is_utf8_with_bom() {
+    let path = repo_root().join("packaging/windows/latermd.iss");
+    let bytes =
+        std::fs::read(&path).unwrap_or_else(|error| panic!("读不到 {}:{error}", path.display()));
+    assert!(
+        bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+        "latermd.iss 缺 UTF-8 BOM:Inno Setup 6.3 之前按 ANSI 读脚本,\
+         [Tasks] 段 Description 里的中文会在安装向导上显示成乱码"
+    );
+    let body = &bytes[3..];
+    assert!(std::str::from_utf8(body).is_ok(), "BOM 之后不是合法 UTF-8");
+
+    // 读取端必须剥掉,否则首行派生的判据全被 U+FEFF 顶掉一个字符
+    let text = read_packaging("packaging/windows/latermd.iss");
+    assert!(
+        !text.starts_with('\u{feff}'),
+        "read_packaging 没剥 BOM:首行以 U+FEFF 开头,\
+         `starts_with(\"...\")` 类判据会全红"
+    );
+    assert_eq!(
+        text,
+        String::from_utf8(body.to_vec()).expect("上面已验过 UTF-8"),
+        "剥 BOM 后应与文件内容逐字节一致(剥多了别的字符)"
     );
 }
 
