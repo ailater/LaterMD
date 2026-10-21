@@ -731,9 +731,16 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
             format,
         };
 
-    // Widget(代码/表格/引用/分隔线/图片):等宽回退 —— 对齐代码列与表格
-    // 列仍是刚需,与既有源码编辑一致;行盒高保持 #157 的同源口径。
-    if block_kind(text) == BlockKind::Widget {
+    // 首行分类提前取出:引用块需要独立的多行排版,不能落进代码/表格等
+    // Widget 的等宽整块回退。
+    let first_line_end = text.find('\n').unwrap_or(text.len());
+    let first_line = &text[..first_line_end];
+    let trimmed = first_line.trim_start();
+    let is_quote = trimmed.starts_with('>');
+
+    // Widget(代码/表格/分隔线/图片):等宽回退 —— 对齐代码列与表格列。
+    // 引用单独走下方的正文族多行分支,保留每个物理换行和 `> ` 前缀。
+    if block_kind(text) == BlockKind::Widget && !is_quote {
         let mut mono = egui::TextFormat::simple(mono_font, text_color);
         mono.line_height = Some(body_lh);
         job.sections.push(section(0..text.len(), mono));
@@ -742,9 +749,6 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
 
     // ATX 标题首行(与 [`block_kind`] 同判):`#{1,6}` + 空格,缩进行保守
     // 不当标题排版。
-    let first_line_end = text.find('\n').unwrap_or(text.len());
-    let first_line = &text[..first_line_end];
-    let trimmed = first_line.trim_start();
     let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
     let is_heading = (1..=6).contains(&hashes)
         && trimmed.as_bytes().get(hashes) == Some(&b' ')
@@ -761,6 +765,57 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
         inline_code: style.inline_code.clone(),
         highlight_bg: crate::ui::rich_widgets::highlight_bg_color(ui.visuals()),
     };
+    if is_quote {
+        // 引用活动态(LP2-8):富渲染的 Blockquote 是多行正文,源码侧也必须
+        // 保留物理换行;之前把引用当 Widget 后虽喂入原文,测试/排版口径
+        // 仍按等宽整块处理,点击后视觉上压成一行并触发高度跳变。
+        // `> ` 前缀幽灵化,正文继续走 LP2-4 内联成形。
+        let mut line_start = 0usize;
+        for line in text.split_inclusive('\n') {
+            let line_end = line_start + line.len();
+            let content_end = line.strip_suffix('\n').map_or(line.len(), str::len);
+            let line_body = &line[..content_end];
+            let prefix_len = line_body
+                .find('>')
+                .map(|at| at + 1 + usize::from(line_body.as_bytes().get(at + 1) == Some(&b' ')))
+                .unwrap_or(0);
+            if prefix_len > 0 {
+                let mut ghost = egui::TextFormat::simple(
+                    egui::FontId::new(font_size, body_family.clone()),
+                    egui::Color32::from_rgba_unmultiplied(
+                        text_color.r(),
+                        text_color.g(),
+                        text_color.b(),
+                        110,
+                    ),
+                );
+                ghost.line_height = Some(body_lh);
+                job.sections
+                    .push(section(line_start..line_start + prefix_len, ghost));
+            }
+            let body_start = line_start + prefix_len;
+            let body_end = line_start + content_end;
+            if body_start < body_end {
+                let mut body = egui::TextFormat::simple(
+                    egui::FontId::new(font_size, body_family.clone()),
+                    text_color,
+                );
+                body.line_height = Some(body_lh);
+                push_inline_styled_sections(&mut job, body_start..body_end, &body, &styles, &paint);
+            }
+            if content_end < line.len() {
+                let mut newline = egui::TextFormat::simple(
+                    egui::FontId::new(font_size, body_family.clone()),
+                    text_color,
+                );
+                newline.line_height = Some(body_lh);
+                job.sections
+                    .push(section(line_start + content_end..line_end, newline));
+            }
+            line_start = line_end;
+        }
+        return job;
+    }
     if is_heading {
         let marker_len = hashes + 1;
         let scale = style.heading.scales[(hashes.min(6) - 1).min(5)];
@@ -2871,6 +2926,36 @@ mod tests {
         assert_eq!(delimiter.color, expected.text);
         assert_eq!(delimiter.background, egui::Color32::TRANSPARENT);
         assert!(!delimiter.italics);
+    }
+
+    /// 多行引用活动态保留物理换行,`> ` 前缀弱化、正文使用预览正文字体。
+    /// 这是 LP2-8 的核心回归:引用不能再落进 Widget 单行等宽路径。
+    #[test]
+    fn active_block_multiline_quote_keeps_rows_and_prefix() {
+        let text = "> 第一行引用\n> 第二行 `代码`\n> 第三行引用";
+        let (job, expected) = styled_job(text);
+        let galley = egui::Context::default();
+        let ctx = egui::Context::default();
+        let mut rows = 0usize;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job.clone()));
+            rows = galley.rows.len();
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(rows, 3, "三行引用必须保持三行");
+        assert_eq!(job.text, text);
+        assert_eq!(job.sections.first().unwrap().format.color.a(), 110);
+        assert_eq!(
+            job.sections
+                .iter()
+                .find(|section| section.byte_range.start.0 >= 2)
+                .unwrap()
+                .format
+                .color,
+            expected.text,
+            "引用正文保持正文色"
+        );
+        let _ = galley;
     }
 
     /// 纯正文与未配平构造:单 section、零成形 —— LP2-4 之前的行为逐字节
