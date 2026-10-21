@@ -19,6 +19,8 @@
 
 use std::ops::Range;
 
+use latermd_md::{inline_style_spans, InlineStyleKind, InlineStyleSpan};
+
 /// 格式动作。十七个,与工具条四组按钮一一对应。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FormatAction {
@@ -184,6 +186,72 @@ const TABLE_SKELETON: &str = "| 列 1 | 列 2 |\n| --- | --- |\n|  |  |\n|  |  |
 /// 链接 placeholders:新建链接时 url 占位成 `https://`,让用户直接覆写。
 const LINK_URL: &str = "https://";
 
+/// 行内格式的**语义化 toggle**(LP2-10):选区落在同类型行内 span 的构造
+/// 内(含定界符,部分选中也算)、或完整覆盖它的,拆掉该 span 的定界符;
+/// 不命中返回 `None`,调用方回落到既有包裹路径。选区同时压到多个 span
+/// 时取**最小构造**(最内层)。
+///
+/// 之前的 toggle 只认「选区紧贴定界符」,选中部分内容或连定界符一起选
+/// 都会再包一层 —— 用户实测「选中行内代码再点图标反而叠两层」。本函数
+/// 判定基于 [`inline_style_spans`](同渲染一套 pulldown options),与渲染
+/// 同语义:未配平的定界符不产 span,自然走包裹。
+fn unwrap_inline_kind(
+    text: &str,
+    sel: Range<usize>,
+    kinds: &[InlineStyleKind],
+) -> Option<(String, Range<usize>)> {
+    let bytes = text.as_bytes();
+    let char_at = |byte: usize| text[..byte.min(text.len())].chars().count();
+    let delim = |kind: InlineStyleKind, byte: u8| match kind {
+        InlineStyleKind::Code => byte == b'`',
+        InlineStyleKind::Strong | InlineStyleKind::Emphasis => byte == b'*' || byte == b'_',
+        InlineStyleKind::Strikethrough => byte == b'~',
+        InlineStyleKind::Highlight => byte == b'=',
+        InlineStyleKind::LinkText => false,
+    };
+    let mut best: Option<(Range<usize>, usize, usize, InlineStyleSpan)> = None;
+    for span in inline_style_spans(text) {
+        if !kinds.contains(&span.kind) {
+            continue;
+        }
+        let mut open = span.range.start;
+        while open > 0 && delim(span.kind, bytes[open - 1]) {
+            open -= 1;
+        }
+        let mut close = span.range.end;
+        while close < bytes.len() && delim(span.kind, bytes[close]) {
+            close += 1;
+        }
+        // 两侧都得真有定界符;少一边说明定界符被用户改坏,别动它
+        if open == span.range.start || close == span.range.end {
+            continue;
+        }
+        let (c_start, c_end) = (char_at(open), char_at(close));
+        let covers_construct = c_start >= sel.start.min(sel.end) && c_end <= sel.end.max(sel.start);
+        let within_construct = sel.start >= c_start && sel.end <= c_end;
+        if !(within_construct || covers_construct) {
+            continue;
+        }
+        let smaller = best
+            .as_ref()
+            .map(|(_, _, _, best_span)| span.range.len() < best_span.range.len())
+            .unwrap_or(true);
+        if smaller {
+            best = Some((open..close, c_start, c_end, span));
+        }
+    }
+    let (construct, .., span) = best?;
+    let mut out = String::with_capacity(text.len() - (construct.end - construct.start));
+    out.push_str(&text[..construct.start]);
+    out.push_str(&text[span.range.start..span.range.end]);
+    out.push_str(&text[construct.end..]);
+    // 新选区 = 新文本中的**内容**区(定界符已剥):内容顶到构造起点,
+    // 长度 = 原内容字符数 —— 直接用新文本重算,规避旧文本偏移换算。
+    let content_start = char_at(construct.start);
+    let content_end = content_start + text[span.range.start..span.range.end].chars().count();
+    Some((out, content_start..content_end))
+}
+
 /// 图片 placeholder:同 `LINK_URL`,工具条/快捷键直触(不经对话框)时用它。
 ///
 /// 与链接共用同一个字面量而非另定常量:两者的「待覆写占位」语义一样,
@@ -196,12 +264,16 @@ const IMAGE_URL: &str = LINK_URL;
 /// 行内类一律落在「内容处」,方便接着打字或叠加别的格式。
 pub fn apply(action: FormatAction, text: &str, sel: Range<usize>) -> (String, Range<usize>) {
     use FormatAction::*;
-    let view = View::new(text, sel);
+    let view = View::new(text, sel.clone());
     match action {
-        Bold => view.wrap("**", "**"),
-        Italic => view.wrap("*", "*"),
-        Strike => view.wrap("~~", "~~"),
-        InlineCode => view.wrap("`", "`"),
+        Bold => unwrap_inline_kind(text, sel, &[InlineStyleKind::Strong])
+            .unwrap_or_else(|| view.wrap("**", "**")),
+        Italic => unwrap_inline_kind(text, sel, &[InlineStyleKind::Emphasis])
+            .unwrap_or_else(|| view.wrap("*", "*")),
+        Strike => unwrap_inline_kind(text, sel, &[InlineStyleKind::Strikethrough])
+            .unwrap_or_else(|| view.wrap("~~", "~~")),
+        InlineCode => unwrap_inline_kind(text, sel, &[InlineStyleKind::Code])
+            .unwrap_or_else(|| view.wrap("`", "`")),
         Link => view.link(),
         H1 => view.set_prefix("# "),
         H2 => view.set_prefix("## "),
@@ -555,21 +627,30 @@ mod tests {
         assert_eq!(out, "**abc**");
         assert_eq!(sel, 2..5, "新选区覆盖包裹后的内容");
 
+        // LP2-10:选中内容(不含标记)再点加粗也走语义化 toggle 拆标记,
+        // 新选区 = 新文本中的内容区(定界符已剥,内容顶到构造起点)
         let (out, sel) = bold("**abc**", 2..5);
-        assert_eq!(out, "abc", "已被同一对标记紧贴包裹 → 去包裹");
-        assert_eq!(sel, 0..3);
+        assert_eq!(out, "abc", "选区落在加粗构造内 → 拆掉标记");
+        assert_eq!(sel, 0..3, "新选区 = 内容区");
     }
 
-    /// 并未被包裹时继续包裹:`**a**` 里框住 `a` 再点加粗会得到嵌套而非
-    /// 脱衣服 —— 这与"再点一次取消加粗"的直觉相反,所以 UI 侧要求新选区
-    /// 覆盖包裹后的**整段**(含标记),下一次点击才是 toggle off。
+    /// 并未被包裹时继续包裹:`**abc**` 里框住 `a` 再点加粗拆掉这层加粗
+    /// (LP2-10 语义化 toggle,「再点一次取消」直觉成立);未配平的孤立
+    /// 定界符不产 span,继续包裹。
     #[test]
     fn nested_selection_wraps_again() {
+        // 选区含定界符(整段):同样拆这层,不叠外层
         let (out, sel) = bold("**abc**", 0..7);
-        assert_eq!(out, "****abc****");
-        assert_eq!(sel, 2..9, "整段被再包一层,下次点是去掉外层");
-        let (out, _) = bold(&out, sel);
-        assert_eq!(out, "**abc**", "再点一次脱掉外层");
+        assert_eq!(out, "abc", "选区覆盖整段(含标记)→ 拆掉这层");
+        assert_eq!(sel, 0..3, "新选区 = 内容区");
+        // 未配平(`**` 只剩单侧):不产 span,继续包裹
+        let (out, sel) = bold("**abc", 0..5);
+        assert_eq!(out, "****abc**", "未配平构造走包裹");
+        assert_eq!(sel, 2..7, "包裹路径的新选区覆盖内容+闭标记");
+        // 已配平再点不再叠第二层:选区含构造即拆
+        let (out, sel) = bold("**abc**", 2..5);
+        assert_eq!(out, "abc", "已配平构造,选区在内 → 拆");
+        assert_eq!(sel, 0..3);
     }
 
     /// CJK:全部走字符偏移,不在多字节序列中间切。
@@ -580,8 +661,28 @@ mod tests {
         assert_eq!(sel, 3..5);
 
         let (out, sel) = apply(FormatAction::InlineCode, "中文 `代码` 混排", 4..6);
-        assert_eq!(out, "中文 代码 混排", "选区被同标记紧贴包裹 → toggle off");
+        assert_eq!(out, "中文 代码 混排", "选区在行内代码构造内 → 拆掉反引号");
         assert_eq!(sel, 3..5, "去包裹后选区仍是那两个字");
+    }
+
+    /// LP2-10 语义化 toggle 的判定面:部分选中拆整对;嵌套构造拆内层
+    /// (本动作对应的那层);选区在构造外不动它(走包裹)。
+    #[test]
+    fn inline_toggle_partial_and_cross_construct() {
+        // 部分选中:只选「代码」的一半,点行内代码图标 → 整对拆掉
+        let (out, sel) = apply(FormatAction::InlineCode, "看 `代码` 尾", 3..4);
+        assert_eq!(out, "看 代码 尾", "部分选中拆整对");
+        assert_eq!(sel, 2..4, "新选区 = 新文本中的内容区");
+
+        // 嵌套(粗体套代码):选区含两层定界符 → 拆本动作对应层(代码)
+        let (out, sel) = apply(FormatAction::InlineCode, "**`x`**", 0..7);
+        assert_eq!(out, "**x**", "拆代码层");
+        assert_eq!(sel, 2..3);
+
+        // 选区在构造外:不动,走包裹(选中「看」字,反引号只包它)
+        let (out, sel) = apply(FormatAction::InlineCode, "看 `代码` 尾", 0..1);
+        assert_eq!(out, "`看` `代码` 尾", "选区在构造外 → 包裹选中文字");
+        assert_eq!(sel, 1..2);
     }
 
     /// 标题:作用于选区覆盖的所有整行;已是该前缀 → 去掉;是别的 → 替换。
