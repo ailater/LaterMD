@@ -1185,6 +1185,10 @@ pub enum Message {
     /// 带值消息([`Message::FocusModeToggled`])分立;归约同样即时写
     /// settings.json。
     ToggleFocusMode,
+    /// 选区 AI 浮标开关设值(#61 配置面):外观页复选框产出,落
+    /// `theme.show_selection_ai` 并即时写 settings.json(minimap 开关
+    /// 同款通路;关闭后同样两个动作仍可从右键菜单发起)。
+    SelectionAiToggled(bool),
     /// 禅定导航显示方式切换(#57 M2):外观页三态选择产出,落
     /// `theme.zen_nav` 并即时写 settings.json(与 minimap 开关同款通路)。
     /// 归约同时复位会话级悬停态:新模式从干净状态起算(常显不继承旧会话
@@ -1455,6 +1459,10 @@ impl State {
             }
             Message::TypewriterToggled(on) => {
                 self.theme.show_typewriter = on;
+                self.persist_theme();
+            }
+            Message::SelectionAiToggled(on) => {
+                self.theme.show_selection_ai = on;
                 self.persist_theme();
             }
             Message::ToggleTypewriter => {
@@ -6088,6 +6096,37 @@ mod tests {
         assert!(reloaded.show_typewriter, "重启后仍为开");
         assert_eq!(reloaded.editor_font_size, font_before, "排版偏好不受影响");
         assert!(reloaded.show_minimap, "minimap 开关不受影响");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #61 配置面:选区 AI 浮标开关消息归约落 `theme.show_selection_ai`
+    /// 并即时写 settings.json;重启(load_from)后值仍在。出厂默认开
+    /// (浮标是选区 AI 的唯一鼠标入口);旧 settings.json 缺字段由
+    /// struct 级 serde(default) 走 `Default`(同为开),升级零变化。
+    #[test]
+    fn selection_ai_toggle_updates_field_and_persists() {
+        let dir = temp_path("selection-ai-toggle");
+        let mut state = State {
+            settings_dir: Some(dir.clone()),
+            ..State::default()
+        };
+        assert!(state.theme.show_selection_ai, "出厂默认开");
+
+        state.apply(Message::SelectionAiToggled(false));
+        assert!(!state.theme.show_selection_ai);
+        state.apply(Message::SelectionAiToggled(true));
+        assert!(state.theme.show_selection_ai, "往返翻回开");
+        state.apply(Message::SelectionAiToggled(false));
+
+        let reloaded = ThemeSettings::load_from(&dir).unwrap();
+        assert!(!reloaded.show_selection_ai, "重启后仍为关");
+        assert!(reloaded.show_minimap, "minimap 开关不受影响");
+        // 旧档缺字段回落 Default:开
+        let legacy_dir = dir.join("legacy");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join("settings.json"), r#"{"mode":"light"}"#).unwrap();
+        let upgraded = ThemeSettings::load_from(&legacy_dir).unwrap();
+        assert!(upgraded.show_selection_ai, "旧档缺字段应回落默认开");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

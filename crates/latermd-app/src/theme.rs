@@ -162,6 +162,9 @@ pub enum TitleWidthMode {
 }
 
 impl TitleWidthMode {
+    /// 设置页可选项顺序(缩短 → 完整,与标签条右键菜单条目同序)。
+    pub const ALL: [TitleWidthMode; 2] = [Self::Short, Self::Full];
+
     /// 右键菜单条目文案(菜单显示名与本枚举同源,不再各写一份字面量)。
     pub fn label(self) -> &'static str {
         match self {
@@ -328,6 +331,13 @@ pub struct ThemeSettings {
     /// decisions-pending #122)。仅 Live 模式生效:源码是单个 TextEdit,
     /// 分段淡化不接线(边界同登记 #122)。
     pub show_focus_mode: bool,
+    /// 选区 AI 浮标开关(#61 M1 的配置面):选中文字后在选区尾端浮出
+    /// 「AI 续写 / AI 润色」小标识。全局偏好,照 #55 minimap 开关同款通路
+    /// 落 settings.json(旧档缺字段由 struct 级 `#[serde(default)]` 兜底)。
+    /// 默认**开** —— 浮标是选区 AI 的唯一鼠标入口;关闭后同样两个动作仍
+    /// 可从右键菜单发起,浮标与命中区一个形状都不注册(走 show 的隐藏
+    /// 路径,与无选区同口径清探针)。
+    pub show_selection_ai: bool,
     /// 禅定模式左缘标签导航的显示方式(#57 M2):全局偏好,照 #55 minimap
     /// 开关先例落 settings.json(旧档缺字段由 struct 级 `#[serde(default)]`
     /// 兜底回悬停)。关闭档在禅定帧走零路径(不进任何绘制分支)。
@@ -372,6 +382,7 @@ impl Default for ThemeSettings {
             minimap_auto: true,
             show_typewriter: false,
             show_focus_mode: false,
+            show_selection_ai: true,
             zen_nav: ZenNavMode::default(),
             default_view_mode: DefaultViewMode::default(),
             overrides: None,

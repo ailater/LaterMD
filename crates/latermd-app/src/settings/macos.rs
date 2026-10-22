@@ -405,6 +405,15 @@ pub(super) fn appearance(
             outbox.push(Message::FocusModeToggled(!theme.show_focus_mode));
         }
         rule(ui);
+        if toggle(
+            ui,
+            "选区 AI 浮标",
+            "选中文字后浮出「AI 续写 / AI 润色」入口",
+            theme.show_selection_ai,
+        ) {
+            outbox.push(Message::SelectionAiToggled(!theme.show_selection_ai));
+        }
+        rule(ui);
         row(ui, "禅定导航", |ui| {
             let modes = ZenNavMode::ALL;
             let labels: Vec<_> = modes.iter().map(|mode| mode.label()).collect();

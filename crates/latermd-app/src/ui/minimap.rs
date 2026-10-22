@@ -1063,6 +1063,7 @@ mod tests {
                     // 打字机/专注关:本模块测试验 minimap 自身路径
                     false,
                     false,
+                    true,
                     None,
                     false,
                     &crate::keymap::Keymap::builtin(),
@@ -2756,6 +2757,7 @@ mod tests {
                     true,
                     false,
                     false,
+                    true,
                     None,
                     false,
                     &crate::keymap::Keymap::builtin(),

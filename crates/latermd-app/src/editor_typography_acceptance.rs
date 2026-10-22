@@ -750,6 +750,7 @@ fn gutter_digits_stay_aligned_under_line_spacing_projection() {
                 false,
                 false,
                 false,
+                true,
                 None,
                 false,
                 &crate::keymap::Keymap::builtin(),
