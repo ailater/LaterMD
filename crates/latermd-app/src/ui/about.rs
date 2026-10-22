@@ -19,10 +19,11 @@
 //! 润色确认浮窗同款)。三条出口都汇成 `crate::state::Message::AboutClosed`
 //! 在归约落地 —— 本模块只绘制与发消息,不碰状态(铁律)。
 
+use crate::repaint::RepaintNotifier;
 use crate::state::Message;
 use eframe::egui;
 use std::cmp::Ordering;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -122,7 +123,7 @@ impl Default for UpdateCheckState {
 }
 
 impl UpdateCheckState {
-    /// 是否有检查在途(驱动按钮禁用 + 持续重绘)。
+    /// 是否有检查在途，供按钮禁用；完成帧由结果通知主动唤醒。
     pub fn is_checking(&self) -> bool {
         self.rx.is_some()
     }
@@ -130,13 +131,25 @@ impl UpdateCheckState {
     /// 发起(归约侧调用):清旧结果、换接收端并经装配点 spawn。在途时
     /// 忽略(UI 已禁用按钮,防御);spawn 失败当场按失败收尾,不留卡死
     /// 的「检查中」。
+    #[cfg(test)]
     pub(crate) fn start(&mut self) {
+        self.start_with_repaint(RepaintNotifier::default());
+    }
+
+    /// 发起版本检查并在网络结果转交给 UI channel 后主动唤醒一帧。检查
+    /// 结果来自 GitHub Release，显示状态仍由消息归约统一更新。
+    pub(crate) fn start_with_repaint(&mut self, repaint: RepaintNotifier) {
         if self.rx.is_some() {
             return;
         }
         self.phase = UpdatePhase::Idle;
         self.saw_result = false;
-        let (tx, rx) = mpsc::channel();
+        let Ok((tx, rx)) = repaint.notifying_channel("latermd-update-repaint") else {
+            self.phase = UpdatePhase::Failed {
+                error: "检查更新失败:无法启动通知线程".to_owned(),
+            };
+            return;
+        };
         self.rx = Some(rx);
         if (self.spawner)(tx).is_none() {
             self.rx = None;

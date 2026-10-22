@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use crate::repaint::RepaintNotifier;
 use latermd_search::{backlinks, BacklinkOutcome, MAX_HITS};
 // 面板行的载荷类型,消费方(`ui::sidebar`)从本模块取(与 `crate::search`
 // re-export latermd_search 类型的同款分工)
@@ -85,7 +86,19 @@ impl BacklinkState {
     /// 防抖到点发起(`Message::BacklinksRequested` 的归约):根与文档都
     /// 在才扫;否则复位(目标缺失时面板靠 `ui` 层的引导提示,不扫)。
     /// spawn 失败当场落 Failed,不留卡死的「扫描中」。
+    #[cfg(test)]
     pub fn start(&mut self, root: Option<&Path>, doc: Option<&Path>) {
+        self.start_with_repaint(root, doc, RepaintNotifier::default());
+    }
+
+    /// 发起扫描并在单条扫描结果入队后唤醒 UI。根与文档来自当前工作区，
+    /// 结果仍由 [`Self::poll`] 按序号验新鲜度后写入面板状态。
+    pub fn start_with_repaint(
+        &mut self,
+        root: Option<&Path>,
+        doc: Option<&Path>,
+        repaint: RepaintNotifier,
+    ) {
         self.debounce_due = None;
         let (Some(root), Some(doc)) = (root, doc) else {
             self.reset();
@@ -102,7 +115,9 @@ impl BacklinkState {
             .name("latermd-backlinks".to_owned())
             .spawn(move || {
                 let outcome = backlinks(&root, &doc, || false, MAX_HITS);
-                let _ = tx.send((seq, outcome));
+                if tx.send((seq, outcome)).is_ok() {
+                    repaint.notify();
+                }
             });
         match spawn {
             Ok(_join) => {
@@ -142,6 +157,7 @@ impl BacklinkState {
     }
 
     /// 是否仍在等待扫描(进行中或防抖排程中;驱动重绘的判据)。
+    #[cfg(test)]
     pub fn is_scanning(&self) -> bool {
         self.status == BacklinkStatus::Scanning || self.debounce_due.is_some()
     }

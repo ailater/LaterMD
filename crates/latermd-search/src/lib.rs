@@ -404,6 +404,10 @@ enum Event {
     Done { gen: u64 },
 }
 
+/// 搜索结果入队后的轻量通知回调。核心搜索层不知道具体 UI；应用层可用它
+/// 唤醒事件循环，无头调用则传空回调。
+pub type SearchNotify = Arc<dyn Fn() + Send + Sync>;
+
 /// 后台搜索服务。同一时刻只有一个「当前」搜索:再次 `spawn` 或 `cancel`
 /// 都会让前一代即刻作废。调用方(UI 归约)单线程持有,本类型不为并发
 /// 调用设计。
@@ -427,6 +431,16 @@ impl SearchService {
     /// 发起一次搜索;旧搜索即刻作废。正则在发起线程编译,非法模式同步
     /// 报错、不进后台线程。
     pub fn spawn(&mut self, query: SearchQuery) -> Result<(), SearchError> {
+        self.spawn_with_notify(query, Arc::new(|| {}))
+    }
+
+    /// 发起搜索并在每条当前结果成功入队后通知调用方。查询来自侧边栏，
+    /// 回调由应用层提供；返回值仍只表示正则编译或线程启动是否成功。
+    pub fn spawn_with_notify(
+        &mut self,
+        query: SearchQuery,
+        notify: SearchNotify,
+    ) -> Result<(), SearchError> {
         let regex = compile(&query)?;
         // fetch_add 返回旧值,新代 = 旧值 + 1;旧线程下个检查点即退出
         let gen = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -434,7 +448,7 @@ impl SearchService {
         let tx = self.tx.clone();
         thread::Builder::new()
             .name("latermd-search".into())
-            .spawn(move || run(query, regex, gen, shared, tx))
+            .spawn(move || run(query, regex, gen, shared, tx, notify))
             .map_err(SearchError::Spawn)?;
         Ok(())
     }
@@ -472,16 +486,27 @@ impl Default for SearchService {
 }
 
 /// 后台线程主体。
-fn run(query: SearchQuery, regex: Regex, gen: u64, shared: Arc<Shared>, tx: SyncSender<Event>) {
+fn run(
+    query: SearchQuery,
+    regex: Regex,
+    gen: u64,
+    shared: Arc<Shared>,
+    tx: SyncSender<Event>,
+    notify: SearchNotify,
+) {
     let superseded = || shared.generation.load(Ordering::SeqCst) != gen;
     let mut alive = true;
     scan(&query.root, &regex, superseded, |result| {
         // 接收端已随服务销毁则停止(不是截断,故返回后不置 truncated)
         alive = tx.send(Event::Hit { gen, result }).is_ok();
+        if alive {
+            // 只有 UI 确实能收到的结果才唤醒，接收端已销毁时直接结束。
+            notify();
+        }
         alive
     });
-    if alive {
-        let _ = tx.send(Event::Done { gen });
+    if alive && tx.send(Event::Done { gen }).is_ok() {
+        notify();
     }
 }
 
@@ -992,6 +1017,30 @@ mod tests {
             ],
             "第一代命中(a.md:2「普通一行」)不允许混入"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 主动通知与事件生产保持同一口径：每条成功入队的命中/结束事件都会
+    /// 至少触发一次回调，UI 因而无需在搜索期间持续轮询。
+    #[test]
+    fn spawn_with_notify_wakes_when_results_arrive() {
+        let root = sample_vault("notify");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = Arc::clone(&calls);
+        let mut service = SearchService::new();
+        service
+            .spawn_with_notify(
+                query(&root, "latermd", true),
+                Arc::new(move || {
+                    sink.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .unwrap();
+
+        let (hits, done) = drain(&mut service);
+        assert!(done);
+        assert!(!hits.is_empty());
+        assert!(calls.load(Ordering::SeqCst) >= 1, "结果入队后应通知调用方");
         let _ = std::fs::remove_dir_all(&root);
     }
 

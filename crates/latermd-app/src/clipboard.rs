@@ -29,6 +29,7 @@
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
+use crate::repaint::RepaintNotifier;
 use crate::state::Message;
 
 /// 一次剪贴板读取的结果载荷:PNG 字节(成功)或面向用户的错误文案。
@@ -36,7 +37,7 @@ type ClipResult = Result<Vec<u8>, String>;
 
 /// 剪贴板图片状态机:一次「发起 → 后台读 → 收流」的生命周期。
 ///
-/// 发起([`Self::start`])在归约(Ctrl+V 且剪贴板无文本时),收流
+/// 发起([`Self::start_with_repaint`])在归约(Ctrl+V 且剪贴板无文本时),收流
 /// ([`Self::poll`])每帧归约里跑,结果翻成 [`Message::ImagePasteFinished`]。
 #[derive(Default)]
 pub struct ClipboardState {
@@ -46,8 +47,9 @@ pub struct ClipboardState {
 }
 
 impl ClipboardState {
-    /// 是否有读取在途(驱动持续重绘;重入防护由「读剪贴板前先看
+    /// 是否有读取在途(测试断言与重入防护由「读剪贴板前先看
     /// `rx`」承担,见 [`Self::start`] 的返回值)。
+    #[cfg(test)]
     pub fn is_reading(&self) -> bool {
         self.rx.is_some()
     }
@@ -56,7 +58,14 @@ impl ClipboardState {
     /// 返回。已在读取中则**替换**旧 channel(旧线程的结果无处可去,与
     /// `BedState::start_with` 换接收端同手法)—— 粘贴是高频动作,等旧
     /// 结果不如直接以最新一次为准。
+    #[cfg(test)]
     pub fn start(&mut self) {
+        self.start_with_repaint(RepaintNotifier::default());
+    }
+
+    /// 发起后台读取并在 PNG 编码结果入队后唤醒 UI。剪贴板内容来自用户
+    /// 当前系统剪贴板，返回结果只交给归约侧落资源文件和插入 Markdown。
+    pub fn start_with_repaint(&mut self, repaint: RepaintNotifier) {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         let spawn = std::thread::Builder::new()
@@ -64,7 +73,9 @@ impl ClipboardState {
             .spawn(move || {
                 let result = read_clipboard_image();
                 // 发送失败(已被更新的读取替换)即静默退出,不滞留
-                let _ = tx.send(result);
+                if tx.send(result).is_ok() {
+                    repaint.notify();
+                }
             });
         if spawn.is_err() {
             // 线程都起不来:当场收口,不留卡死的「读取中」

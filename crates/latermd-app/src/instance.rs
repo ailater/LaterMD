@@ -371,11 +371,14 @@ fn path_bytes(path: &Path) -> Vec<u8> {
 #[cfg(windows)]
 fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
-    if bytes.len() % 2 != 0 {
+    // Windows 路径帧按 UTF-16LE 两字节一组；尾部有余数说明帧损坏，不能
+    // 猜测补字节，否则会把路径静默解码成另一个文件。
+    let (pairs, remainder) = bytes.as_chunks::<2>();
+    if !remainder.is_empty() {
         return None;
     }
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
+    let units: Vec<u16> = pairs
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     Some(PathBuf::from(std::ffi::OsString::from_wide(&units)))

@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 use latermd_mcp::{CallCounts, McpConfig, Server, SharedRoot};
 
+use crate::repaint::RepaintNotifier;
+
 /// 服务状态:设置页状态行与底部状态栏的唯一数据源。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum McpStatus {
@@ -83,12 +85,19 @@ impl Default for McpState {
 impl McpState {
     /// 应用新配置:**先停后起**(端口或工具开关变化都必须换线程重建 server)。
     /// 落盘由归约侧负责(本模块不碰磁盘,便于无头测试)。
+    #[cfg(test)]
     pub fn apply_config(&mut self, config: McpConfig) {
+        self.apply_config_with_repaint(config, RepaintNotifier::default());
+    }
+
+    /// 应用配置并让后台绑定结果主动唤醒 UI。配置来自设置页或启动恢复；
+    /// 返回的监听状态和错误仍由 [`Self::poll`] 在 UI 线程落地。
+    pub fn apply_config_with_repaint(&mut self, config: McpConfig, repaint: RepaintNotifier) {
         self.stop();
         self.config = config;
         self.config.normalize();
         if self.config.enabled {
-            self.start();
+            self.start(repaint);
         } else {
             self.status = McpStatus::Disabled;
         }
@@ -141,7 +150,7 @@ impl McpState {
 
     /// 起后台线程。绑定失败不在这里报 —— 结果走 channel,由 [`Self::poll`]
     /// 落到状态行(让 UI 看到真实原因)。
-    fn start(&mut self) {
+    fn start(&mut self, repaint: RepaintNotifier) {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         self.ready = Some(rx);
@@ -158,7 +167,9 @@ impl McpState {
                 match latermd_mcp::transport::http::bind(port) {
                     Ok(listener) => {
                         let server = Server::with_root_handle(root, config);
-                        let _ = tx.send(Ok(server.counts()));
+                        if tx.send(Ok(server.counts())).is_ok() {
+                            repaint.notify();
+                        }
                         if let Err(error) =
                             latermd_mcp::transport::http::serve_with(listener, server, flag)
                         {
@@ -167,7 +178,12 @@ impl McpState {
                     }
                     Err(error) => {
                         // 端口占用是最常见的一种:文案要带端口,便于用户改
-                        let _ = tx.send(Err(format!("{port} 端口无法绑定: {error}")));
+                        if tx
+                            .send(Err(format!("{port} 端口无法绑定: {error}")))
+                            .is_ok()
+                        {
+                            repaint.notify();
+                        }
                     }
                 }
             });
