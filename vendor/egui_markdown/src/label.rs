@@ -1352,7 +1352,7 @@ impl<'a> MarkdownLabel<'a> {
           after_block(&mut i, &mut text_start, end, ui);
         }
         #[cfg(feature = "images")]
-        Token::Image { alt, url, .. } => {
+        Token::Image { alt, url, title, .. } => {
           let had_content = text_start < i;
           self.flush_text_range(ui, md, font, color, text_start, i, style, true);
           before_block(had_content, ui);
@@ -1379,7 +1379,17 @@ impl<'a> MarkdownLabel<'a> {
             .max_width(ui.available_width())
             .fit_to_original_size(1.0)
             .show_loading_spinner(true);
-          let image_response = ui.add(image);
+          // Title convention (`types::CENTERED_IMAGE_TITLE`): a block image
+          // titled with the marker is centered horizontally. Titles render
+          // nowhere else, and the title already participates in the token
+          // hash, so toggling the marker rotates the block cache key. The
+          // centered layout only shifts x — block height bookkeeping
+          // (before_y / min_rect) is unchanged.
+          let image_response = if title.as_deref() == Some(crate::types::CENTERED_IMAGE_TITLE) {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| ui.add(image)).inner
+          } else {
+            ui.add(image)
+          };
           if let Some(handler) = &self.link_handler {
             handler.image_response(ui, alt.as_ref(), url.as_ref(), &image_response);
           }
@@ -2240,4 +2250,59 @@ pub fn glyph_at_index(galley: &Galley, index: u32) -> Option<(&Glyph, u32)> {
 /// Helpful to avoid painting underlines for trailing whitespace.
 pub fn last_non_whitespace_glyph(row: &Row) -> Option<&Glyph> {
   row.glyphs.iter().rfind(|glyph| !glyph.chr.is_whitespace())
+}
+
+#[cfg(all(test, feature = "images"))]
+mod tests {
+  use super::*;
+  use egui::RawInput;
+  use std::cell::Cell;
+
+  /// The widget `Response` rect of the first image, captured through the
+  /// `LinkHandler::image_response` hook (`block_span_rects` only records
+  /// the full-width block strip, which cannot discriminate centering).
+  struct CaptureRect(std::cell::Cell<Option<egui::Rect>>);
+
+  impl crate::link::LinkHandler for CaptureRect {
+    fn image_response(&self, _ui: &Ui, _alt: &str, _url: &str, response: &Response) {
+      self.0.set(Some(response.rect));
+    }
+  }
+
+  /// Title-centered convention (`types::CENTERED_IMAGE_TITLE`): a block
+  /// image carrying the marker title is horizontally centered in the
+  /// column; an unmarked (or differently-titled) image stays left. No
+  /// image loader is installed here, so egui draws its 24×24 loading
+  /// fallback — geometry is still valid evidence.
+  #[test]
+  fn titled_image_centers_and_untitled_stays_left() {
+    let ctx = egui::Context::default();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+    let image_rect = |text: &str| -> Rect {
+      let capture = CaptureRect(Cell::new(None));
+      let id = egui::Id::new(text);
+      let output = ctx.run_ui(RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+        MarkdownLabel::new(id, text).font(egui::FontId::monospace(14.0)).wrap().link_handler(&capture).show(ui);
+      });
+      output.drop_without_applying_deltas();
+      capture.0.take().expect("image response hook fired")
+    };
+
+    let centered = image_rect("![](x.png \"latermd:center\")");
+    assert!(
+      (centered.center().x - screen.center().x).abs() < 1.0,
+      "titled image should center in the column: rect {centered:?} vs width 400"
+    );
+
+    let left = image_rect("![](x.png)");
+    assert!(
+      left.center().x < screen.center().x - 100.0,
+      "untitled image should stay near the left edge: rect {left:?}"
+    );
+    let left_titled_other = image_rect("![](x.png \"tooltip\")");
+    assert!(
+      left_titled_other.center().x < screen.center().x - 100.0,
+      "an ordinary title must not trigger centering: rect {left_titled_other:?}"
+    );
+  }
 }
