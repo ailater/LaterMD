@@ -202,20 +202,21 @@ impl ZenNavMode {
     }
 }
 
-/// 启动时的默认视图模式(写作 / 源码 / 对照 / 上次选择)。只作用于启动
-/// 装载(`State::restore_layout`);会话内的模式切换仍实时记进布局存档,
-/// 供「上次选择」档恢复。
+/// 启动时的默认视图模式(写作 / 源码 / 对照 / 上次选择)。作用于启动装载
+/// (`State::restore_layout`)与新建文档(`FileCmd::New`);会话内的模式切换
+/// 仍实时记进布局存档,供「上次选择」档恢复。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DefaultViewMode {
-    /// 每次启动进入写作(Live 富渲染)。
+    /// 每次启动/新建进入写作(Live 富渲染)。
     Live,
-    /// 每次启动进入源码。
+    /// 每次启动/新建进入源码。
     Source,
-    /// 每次启动进入对照(源码 + 右侧只读列)。
+    /// 每次启动/新建进入对照(源码 + 右侧只读列)。
     Split,
-    /// 恢复上次退出时的视图(出厂默认 —— 与既有行为一致:布局存档没记
-    /// 模式时回落写作)。升级用户不被默默改行为,换档是显式选择。
+    /// 启动恢复上次退出时的视图;新建取创建时刻的会话档(出厂默认 ——
+    /// 与既有行为一致:布局存档没记模式时回落写作)。升级用户不被默默
+    /// 改行为,换档是显式选择。
     #[default]
     Last,
 }
@@ -331,7 +332,8 @@ pub struct ThemeSettings {
     /// 开关先例落 settings.json(旧档缺字段由 struct 级 `#[serde(default)]`
     /// 兜底回悬停)。关闭档在禅定帧走零路径(不进任何绘制分支)。
     pub zen_nav: ZenNavMode,
-    /// 启动默认视图模式(写作/源码/对照/上次选择):只作用于启动装载,
+    /// 启动默认视图模式(写作/源码/对照/上次选择):启动装载与新建文档
+    /// 共同遵循;
     /// 会话内切档不受限。出厂「上次选择」= 既有行为(升级用户零变化);
     /// 旧 settings.json 缺字段由 struct 级 `#[serde(default)]` 兜底。
     pub default_view_mode: DefaultViewMode,

@@ -135,7 +135,7 @@ pub struct GitPanelState {
     /// 单文件历史(「文件历史」分区);`None` = 还没查过(渲染层
     /// 给「右键文件 → 查看文件历史」引导)。
     pub file_history: Option<FileHistory>,
-    /// [`Self::sync_file_history`] 上次同步到的当前文档(相对仓库根);
+    /// [`Self::history_target`] 上次同步到的当前文档(相对仓库根);
     /// 文档没换就不动「文件历史」——保住右键「查看文件历史」等显式查询
     /// 不被轮询顶掉,换了文档才跟随加载新文档的历史。
     pub(crate) file_history_synced_doc: Option<String>,

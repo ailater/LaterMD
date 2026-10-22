@@ -126,6 +126,10 @@ pub struct TabState {
     pub live_right: LiveState,
     /// 新建空文档首帧请求编辑器焦点，消费一次后清除。
     pub focus_editor_on_next_frame: bool,
+    /// 同上,但落 Live 空文档块(`live-empty`):新建进写作档时新文档不落
+    /// 浏览态,「单击此处开始写作」提示不适用,首帧焦点直接交给空文档块。
+    /// 由 `live::ui` 消费(`ui/layout` 侧翻译,与源码焦点同款一次件)。
+    pub focus_live_on_next_frame: bool,
 }
 
 impl TabState {
@@ -157,6 +161,7 @@ impl TabState {
             live_right,
             editor,
             focus_editor_on_next_frame: false,
+            focus_live_on_next_frame: false,
         }
     }
 
