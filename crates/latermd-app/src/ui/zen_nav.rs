@@ -465,7 +465,7 @@ mod tests {
             })
             .collect();
         assert!(
-            painted.iter().any(|t| t.contains("未命名")),
+            painted.iter().any(|t| t.contains("Untitled")),
             "唤出帧画出标签行:{painted:?}"
         );
 
@@ -586,7 +586,7 @@ mod tests {
                 })
                 .collect();
             assert!(
-                painted.iter().any(|t| t.contains("未命名")),
+                painted.iter().any(|t| t.contains("Untitled")),
                 "常显画出标签行:{painted:?}"
             );
         }

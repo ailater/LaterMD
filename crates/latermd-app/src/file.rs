@@ -34,7 +34,7 @@ pub fn is_markdown_path(path: &Path) -> bool {
 }
 
 /// 未落盘文档在另存为对话框里的预填文件名。
-pub const UNTITLED_FILE_NAME: &str = "未命名.md";
+pub const UNTITLED_FILE_NAME: &str = "Untitled.md";
 
 /// 图片选择对话框接受的扩展名(docs/image-plan.md D 段白名单口径:预览
 /// 解码按这张清单开 `image` feature,对话框与解码同一张表)。

@@ -4686,9 +4686,9 @@ mod tests {
     #[test]
     fn title_tracks_document_and_dirty() {
         let mut app = LaterMdApp::default();
-        assert_eq!(reduce(&mut app, Vec::new()), vec!["LaterMD — 未命名"]);
+        assert_eq!(reduce(&mut app, Vec::new()), vec!["LaterMD — Untitled"]);
         app.state.tabs.current_mut().editor.insert_chars(0, "改动");
-        assert_eq!(reduce(&mut app, Vec::new()), vec!["LaterMD — 未命名*"]);
+        assert_eq!(reduce(&mut app, Vec::new()), vec!["LaterMD — Untitled*"]);
 
         // 空闲帧:标题未变,不再下发
         assert!(reduce(&mut app, Vec::new()).is_empty());
@@ -6605,7 +6605,7 @@ mod tests {
         let shapes = step(&mut app, Vec::new(), &probe);
         let labels = texts_in_rect(&shapes, nav);
         assert_eq!(labels.len(), 3, "一标签一行:{labels:?}");
-        assert!(labels.contains(&"未命名".to_owned()), "{labels:?}");
+        assert!(labels.contains(&"Untitled".to_owned()), "{labels:?}");
         assert!(
             labels.contains(&"甲.md*".to_owned()),
             "脏星画出来:{labels:?}"
@@ -9351,7 +9351,7 @@ mod tests {
 
         // 标题栏保留(理由见 `draw` 的入禅注释):文档名是它画的
         assert!(
-            zen.iter().any(|t| t.contains("未命名")),
+            zen.iter().any(|t| t.contains("Untitled")),
             "窗口 chrome 保留:{zen:?}"
         );
         // menubar / 状态栏 / 侧边栏 / 格式工具条的专属文案全部消失
