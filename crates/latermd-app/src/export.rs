@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 pub const HTML_EXTENSIONS: [&str; 2] = ["html", "htm"];
 
 /// 未落盘文档在导出对话框里的预填文件名。
-pub const UNTITLED_EXPORT_NAME: &str = "未命名.html";
+pub const UNTITLED_EXPORT_NAME: &str = "Untitled.html";
 
 /// 导出文件名预填:当前文档名换 `.html` 扩展;未落盘用 [`UNTITLED_EXPORT_NAME`]。
 pub fn default_name(document: Option<&Path>) -> String {
@@ -35,7 +35,7 @@ pub fn save_dialog(start_dir: &Path, default_name: &str) -> Option<PathBuf> {
 pub const PDF_EXTENSIONS: [&str; 1] = ["pdf"];
 
 /// 未落盘文档在 PDF 导出对话框里的预填文件名。
-pub const UNTITLED_PDF_EXPORT_NAME: &str = "未命名.pdf";
+pub const UNTITLED_PDF_EXPORT_NAME: &str = "Untitled.pdf";
 
 /// PDF 导出文件名预填:当前文档名换 `.pdf` 扩展;未落盘用
 /// [`UNTITLED_PDF_EXPORT_NAME`]。

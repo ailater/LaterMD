@@ -513,7 +513,7 @@ pub struct DocumentState {
 
 impl DocumentState {
     /// 未落盘文档的显示名;另存为对话框预填名见 [`file::UNTITLED_FILE_NAME`]。
-    const UNTITLED: &str = "未命名";
+    const UNTITLED: &str = "Untitled";
 
     /// 文件名显示基础名(未落盘为「未命名」),**不带** dirty 星。标签的
     /// 别名显示(#37 `TabState::label_base`)与重命名浮窗预填复用它。
@@ -4569,7 +4569,7 @@ mod tests {
             dirty: true,
             notice: None,
         };
-        assert_eq!(document.display_name(), "未命名*");
+        assert_eq!(document.display_name(), "Untitled*");
     }
 
     /// 文件树右键「重命名」(context-menu-plan §3 M2 验收 4):真实改名
