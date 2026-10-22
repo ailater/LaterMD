@@ -35,6 +35,10 @@ use ignore::WalkBuilder;
 // 非法 UTF-8 的行由 trim_line_terminator 的 lossy 兜底,匹配层不必是 str
 use regex::bytes::{Regex, RegexBuilder};
 
+/// 后台结果到达通知。调用方可用它唤醒事件循环；核心搜索层不依赖任何
+/// GUI 框架，也不通过回调传递搜索数据。
+pub type SearchNotify = Arc<dyn Fn() + Send + Sync>;
+
 /// 扩展名是否 Markdown 的唯一事实源(文件树、搜索、打开对话框共用)。
 pub const MARKDOWN_EXTENSIONS: [&str; 2] = ["md", "markdown"];
 
@@ -255,6 +259,26 @@ impl SearchService {
     /// 发起一次搜索;旧搜索即刻作废。正则在发起线程编译,非法模式同步
     /// 报错、不进后台线程。
     pub fn spawn(&mut self, query: SearchQuery) -> Result<(), SearchError> {
+        self.spawn_inner(query, None)
+    }
+
+    /// 发起一次搜索，并在每条当前线程产出的事件成功进入 channel 后通知
+    /// 消费方。UI 用此事件唤醒代替运行期间逐帧轮询；MCP 等同步消费者仍
+    /// 使用 [`Self::spawn`] 或 [`search_sync`]，不需要 GUI 回调。
+    pub fn spawn_with_notify(
+        &mut self,
+        query: SearchQuery,
+        notify: SearchNotify,
+    ) -> Result<(), SearchError> {
+        self.spawn_inner(query, Some(notify))
+    }
+
+    /// 两种后台入口的共同实现：编译正则、推进代际并启动唯一生产线程。
+    fn spawn_inner(
+        &mut self,
+        query: SearchQuery,
+        notify: Option<SearchNotify>,
+    ) -> Result<(), SearchError> {
         let regex = compile(&query)?;
         // fetch_add 返回旧值,新代 = 旧值 + 1;旧线程下个检查点即退出
         let gen = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -262,7 +286,7 @@ impl SearchService {
         let tx = self.tx.clone();
         thread::Builder::new()
             .name("latermd-search".into())
-            .spawn(move || run(query, regex, gen, shared, tx))
+            .spawn(move || run(query, regex, gen, shared, tx, notify))
             .map_err(SearchError::Spawn)?;
         Ok(())
     }
@@ -299,17 +323,34 @@ impl Default for SearchService {
     }
 }
 
-/// 后台线程主体。
-fn run(query: SearchQuery, regex: Regex, gen: u64, shared: Arc<Shared>, tx: SyncSender<Event>) {
+/// 后台搜索线程主体：接收已经编译好的查询与本次代际号，遍历文件后把
+/// 命中和完成事件写给调用方；若发现更晚一代请求则立即停止。`notify`
+/// 来自 UI 等异步消费者，每次事件成功入队后调用，用来唤醒下一次消费，
+/// 不参与搜索结果计算，也不会修改文件。
+fn run(
+    query: SearchQuery,
+    regex: Regex,
+    gen: u64,
+    shared: Arc<Shared>,
+    tx: SyncSender<Event>,
+    notify: Option<SearchNotify>,
+) {
     let superseded = || shared.generation.load(Ordering::SeqCst) != gen;
     let mut alive = true;
     scan(&query.root, &regex, superseded, |result| {
         // 接收端已随服务销毁则停止(不是截断,故返回后不置 truncated)
         alive = tx.send(Event::Hit { gen, result }).is_ok();
+        if alive {
+            if let Some(notify) = &notify {
+                notify();
+            }
+        }
         alive
     });
-    if alive {
-        let _ = tx.send(Event::Done { gen });
+    if alive && tx.send(Event::Done { gen }).is_ok() {
+        if let Some(notify) = &notify {
+            notify();
+        }
     }
 }
 
@@ -393,6 +434,7 @@ pub fn list_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
 
     /// 进程内唯一的临时目录;测试自删。
@@ -450,6 +492,32 @@ mod tests {
             }
         }
         (hits, done)
+    }
+
+    /// UI 入口的通知回调随 Hit/Done 到达而触发；数据仍只走 channel，
+    /// 回调不携带结果，也不会改变搜索代际语义。
+    #[test]
+    fn spawn_with_notify_wakes_the_consumer() {
+        let root = sample_vault("notify");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sink = Arc::clone(&calls);
+        let mut service = SearchService::new();
+        service
+            .spawn_with_notify(
+                query(&root, "LaterMD", false),
+                Arc::new(move || {
+                    sink.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .unwrap();
+
+        let (hits, done) = drain(&mut service);
+        assert!(done && !hits.is_empty());
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "至少一条命中和 Done 各通知一次"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 拍平成可比较集合(路径、行号、行文本)。

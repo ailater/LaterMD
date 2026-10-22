@@ -19,6 +19,10 @@ impl LaterMdApp {
             window_title,
             ..
         } = self;
+        // 后台生产者使用事件唤醒代替满帧轮询。先清合并标志再收 channel，
+        // drain 期间到达的新消息会重新请求下一帧，不会因竞态悬置。
+        state.bind_repaint_context(ctx);
+        state.begin_background_drain();
         // AI 后台流式收流:channel 里的 chunk 翻成 Message 并入本帧归约
         // (文本回编辑器只走 Message,后台线程不触碰 UI 状态)
         outbox.extend(state.poll_ai());
@@ -121,20 +125,15 @@ impl LaterMdApp {
         {
             state.apply(Message::SearchRequested);
         }
-        // 搜索的重绘驱动(egui 空闲不来帧,后台进度必须显式要帧):
-        // 去抖等待中按剩余时长要一帧,到点由上一段发起;流式结果进行中
-        // 持续要帧,`Done` 落回 Finished 后自然停。
+        // 搜索去抖仍按到期时刻要一帧；真正开始后由后台线程在命中/完成
+        // 事件入队时唤醒，不再在 Running 期间满帧轮询。
         if let Some(due) = state.search.debounce_due {
             ctx.request_repaint_after(due.saturating_duration_since(std::time::Instant::now()));
         }
-        if state.search.is_running() {
-            ctx.request_repaint();
-        }
         // Git 状态轮询:有文件树根且尚未降级才轮询(无根无事可刷;非 git
         // 目录零轮询——重探由换根/切 Git 页触发,egui 得以收敛到深度空闲,
-        // 这正是 search 去抖测试守护的不变量)。到点即刷(同步毫秒级,见
-        // `git_panel` 模块文档),并在到点前要一帧(空闲不来帧,轮询依赖
-        // 显式 repaint)。
+        // 这正是 search 去抖测试守护的不变量)。到点只发起后台单飞；未到点
+        // 预约到期帧，结果入队再由通知器唤醒，不满帧轮询。
         if state.file_tree.root.is_some() && state.git.error.is_none() {
             if state.git.due() {
                 state.refresh_git();
@@ -143,21 +142,8 @@ impl LaterMdApp {
                 ctx.request_repaint_after(state.git.until_refresh());
             }
         }
-        // AI 流式的重绘驱动:chunk 到达即要在下一帧收流归约,预览才跟得上
-        // 100ms/chunk 的节奏;AiDone 归约清标志后自然停。
-        if state.ai.is_streaming() {
-            ctx.request_repaint();
-        }
-        // 图床上传的重绘驱动同理:结果到达要在下一帧收流归约(空闲不来帧,
-        // 不显式要帧结果会悬到下一次无关重绘);收尾清接收端后自然停。
-        if state.bed.is_uploading() {
-            ctx.request_repaint();
-        }
-        // 剪贴板图片读取的重绘驱动同理(D 段):结果到达要在下一帧收流
-        // 归约;收尾清接收端后自然停。
-        if state.clipboard.is_reading() {
-            ctx.request_repaint();
-        }
+        // AI、commit、Git、图床、剪贴板和 MCP 均在生产者成功发送结果后
+        // 通过 RepaintNotifier 唤醒；此处不再按“任务在途”持续请求帧。
 
         // 窗口标题只在变化时下发,避免每帧一次原生 set_title
         let title = state.tabs.current().document.window_title();
@@ -1291,6 +1277,9 @@ mod tests {
 
         let mut app = LaterMdApp::default();
         app.state.file_tree.root = Some(root.clone());
+        // 本测试只量搜索去抖的 repaint；标记非 Git 根，避免合法的 3 秒
+        // Git 定时刷新混入 viewport delay。
+        app.state.git.error = Some("测试中停用 Git 轮询".to_owned());
         app.state.search.debounce_due =
             Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
 
@@ -1547,8 +1536,8 @@ mod tests {
         dir
     }
 
-    /// Git 轮询在归约侧到点即刷:有根 + due 过期的一帧 reduce 后改动列表
-    /// 就位;无根时到点也不刷(不空转)。
+    /// Git 轮询在归约侧到点即发起后台单飞；结果线程唤醒后由后续 reduce
+    /// 换入。无根时到点也不启动任务(不空转)。
     #[test]
     fn git_poll_refreshes_when_due_with_root() {
         let dir = dirty_repo("git-poll");
@@ -1559,7 +1548,14 @@ mod tests {
         let ctx = egui::Context::default();
         let output = ctx.run_ui(RawInput::default(), |ui| app.reduce(ui.ctx()));
         output.drop_without_applying_deltas();
-        assert_eq!(app.state.git.entries.len(), 1, "到点帧已刷新");
+        assert!(app.state.git.is_refreshing(), "到点帧已发起后台刷新");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.state.git.is_refreshing() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let output = ctx.run_ui(RawInput::default(), |ui| app.reduce(ui.ctx()));
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(app.state.git.entries.len(), 1, "后台结果已换入");
         assert!(!app.state.git.due(), "刷新顺延了下一周期");
 
         // 无根 + 到点:不刷(无根不轮询)

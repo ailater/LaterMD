@@ -1,9 +1,9 @@
 //! 读取仓库未提交改动(菜单「AI: 生成 commit message」的数据源)。
 //!
 //! P2 才引入 `latermd-git`(git2);这里用 `std::process::Command` 直接跑
-//! `git diff`,staged 优先、无 staged 回落 working tree。子进程在归约里
-//! 同步执行:本地 diff 是毫秒级操作,不值得为它上后台线程。untracked
-//! 文件不出现在 `git diff` 里,按任务口径不做。
+//! `git diff`,staged 优先、无 staged 回落 working tree。调用方把整条
+//! commit 建议流水线放在后台线程，因此大型仓库和真实网络请求都不阻塞
+//! UI 归约。untracked 文件不出现在 `git diff` 里,按任务口径不做。
 
 use std::path::Path;
 use std::process::Command;

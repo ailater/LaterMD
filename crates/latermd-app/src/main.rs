@@ -29,6 +29,7 @@ mod keymap;
 mod layout;
 mod live;
 mod mcp;
+mod repaint;
 mod search;
 mod settings;
 mod state;
@@ -157,6 +158,9 @@ fn main() -> eframe::Result<()> {
                 }
             }
             let mut app = LaterMdApp::new(theme, file_tree, layout);
+            // MCP 可能在偏好装载时就启动；通知器使用共享内部状态，绑定后
+            // 启动阶段已经拿到的 clone 也能在端口就绪时立即唤醒首帧。
+            app.state.bind_repaint_context(&cc.egui_ctx);
             app.frameless = !native_chrome;
             app.state.system_theme = system;
             app.state.system_theme_ok = system.is_some();

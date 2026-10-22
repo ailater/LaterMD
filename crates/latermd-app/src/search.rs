@@ -14,6 +14,8 @@
 use std::path::Path;
 use std::time::Instant;
 
+use crate::repaint::RepaintNotifier;
+
 pub use latermd_search::{
     SearchError, SearchEvent, SearchQuery, SearchResult, SearchService, MAX_HITS,
 };
@@ -94,8 +96,8 @@ impl SearchState {
     }
 
     /// 去抖到点发起(`Message::SearchRequested` 的归约)。空模式与非法
-    /// 正则同步处理,不进后台线程。
-    pub fn start(&mut self, root: &Path) {
+    /// 正则同步处理,不进后台线程；命中和完成事件用 `repaint` 唤醒 UI。
+    pub fn start(&mut self, root: &Path, repaint: RepaintNotifier) {
         self.debounce_due = None;
         if self.query.is_empty() {
             return;
@@ -107,7 +109,7 @@ impl SearchState {
         };
         self.hits.clear();
         self.truncated = false;
-        match self.service.spawn(query) {
+        match self.service.spawn_with_notify(query, repaint.callback()) {
             Ok(()) => self.status = SearchStatus::Running,
             Err(SearchError::InvalidPattern(msg)) => self.status = SearchStatus::Invalid(msg),
             Err(error) => self.status = SearchStatus::Invalid(error.to_string()),
@@ -136,7 +138,8 @@ impl SearchState {
         }
     }
 
-    /// 结果是否仍在流入(驱动下一帧重绘的判据)。
+    /// 结果是否仍在流入。仅供测试等待；生产界面由事件通知唤醒。
+    #[cfg(test)]
     pub fn is_running(&self) -> bool {
         self.status == SearchStatus::Running
     }
@@ -168,7 +171,7 @@ mod tests {
             query: "latermd".into(),
             ..SearchState::default()
         };
-        search.start(&root);
+        search.start(&root, RepaintNotifier::default());
         assert_eq!(search.status, SearchStatus::Running);
 
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -203,7 +206,7 @@ mod tests {
         assert_eq!(search.status, SearchStatus::Idle);
 
         // 空模式:start 是无操作,计时清空
-        search.start(&root);
+        search.start(&root, RepaintNotifier::default());
         assert_eq!(search.debounce_due, None);
         assert_eq!(search.status, SearchStatus::Idle);
         assert!(search.hits.is_empty());
@@ -211,13 +214,13 @@ mod tests {
         // 非法正则:同步 Invalid,不进后台
         search.query = "(".into();
         search.input_changed(Duration::from_millis(300));
-        search.start(&root);
+        search.start(&root, RepaintNotifier::default());
         assert!(matches!(search.status, SearchStatus::Invalid(_)));
         assert_eq!(search.service.try_recv(), None, "发起失败不应有事件");
 
         // 合法模式:Running,自然结束落 Finished,命中保留在缓存
         search.query = "LaterMD".into();
-        search.start(&root);
+        search.start(&root, RepaintNotifier::default());
         assert_eq!(search.status, SearchStatus::Running);
         let deadline = Instant::now() + Duration::from_secs(10);
         while search.is_running() && Instant::now() < deadline {

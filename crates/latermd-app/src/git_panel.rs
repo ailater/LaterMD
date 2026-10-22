@@ -3,9 +3,8 @@
 //!
 //! - **刷新时机**:节流轮询,而非每帧 `git status`。间隔 [`REFRESH_INTERVAL`]
 //!   (3s),由归约侧(`ui::layout::reduce`)到点触发;换根、切到 Git 页与
-//!   回滚完成走同一入口立即刷新。同步执行——git status/log 是毫秒级本地
-//!   读,与 `git_diff.rs` 同一取舍,不值得上后台线程(大仓库冷缓存若实测
-//!   掉帧,再挪线程,接口不变)。
+//!   回滚完成走同一入口。status/log/diff 在线程里单飞读取，结果携带请求
+//!   序号回到归约，换根或重复请求不会让旧快照覆盖新状态。
 //! - **条数上限**:改动列表截断在 [`latermd_git::DEFAULT_STATUS_LIMIT`]
 //!   (500,与文件树/搜索的截断先例同量级),超出计 `truncated`、渲染提示
 //!   行;被截断文件无角标、不可选中/回滚。防的是超大仓库的无界列表卡帧
@@ -19,13 +18,32 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use latermd_git::{CommitInfo, FileStatus, StatusKind};
 
+use crate::repaint::RepaintNotifier;
+
 /// Git 状态自动刷新间隔。3s 在「角标足够新」与「零感开销」之间取中:
 /// 每次刷新是两次毫秒级本地读(status + log),空闲时每 3s 唤醒一帧。
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+
+/// 后台读取成功后的完整 Git 快照。只包含可跨线程移动的值，不携带
+/// repository 句柄；UI 线程应用它时仍保留确认模态等交互状态。
+#[derive(Debug)]
+struct GitSnapshot {
+    repo_root: PathBuf,
+    entries: Vec<FileStatus>,
+    truncated: usize,
+    badges: HashMap<PathBuf, StatusKind>,
+    commits: Vec<CommitInfo>,
+    fetched_at: i64,
+    selected: Option<String>,
+    diff: String,
+}
+
+type RefreshResult = (u64, Result<GitSnapshot, String>);
 
 /// Git 面板状态:一次刷新的快照(status/log/diff 缓存)+ 确认式回滚。
 ///
@@ -60,6 +78,14 @@ pub struct GitPanelState {
     pub confirm_checkout: Option<String>,
     /// 下次自动刷新时刻;到点由归约侧轮询触发(见模块文档)。
     pub refresh_due: Instant,
+    /// 最新一次刷新请求序号；后台结果必须匹配才允许覆盖当前快照。
+    refresh_seq: u64,
+    /// 当前单飞任务的接收端；`Some` 表示已有一次磁盘读取在途。
+    refresh_rx: Option<Receiver<RefreshResult>>,
+    /// 与 `refresh_rx` 配对的请求序号，断连时仍能按原请求判断是否过期。
+    refresh_running_seq: Option<u64>,
+    /// 单飞期间收到的新请求只保留最新根，当前任务结束后立即补跑。
+    queued_root: Option<PathBuf>,
 }
 
 impl Default for GitPanelState {
@@ -77,6 +103,10 @@ impl Default for GitPanelState {
             diff: String::new(),
             confirm_checkout: None,
             refresh_due: Instant::now(),
+            refresh_seq: 0,
+            refresh_rx: None,
+            refresh_running_seq: None,
+            queued_root: None,
         }
     }
 }
@@ -85,6 +115,7 @@ impl GitPanelState {
     /// 立即刷新(轮询到点、换根、切到 Git 页、回滚完成共用):discover →
     /// status → log,任一步失败即降级并把旧快照作废;`tree_root` 为
     /// `None` 时静默清空。选中项若已离开改动列表(外部提交/回滚)一并失效。
+    #[cfg(test)]
     pub fn refresh(&mut self, tree_root: Option<&Path>) {
         self.refresh_due = Instant::now() + REFRESH_INTERVAL;
         self.fetched_at = unix_now();
@@ -127,6 +158,101 @@ impl GitPanelState {
             latermd_git::log(&repo_root, latermd_git::DEFAULT_LOG_LIMIT).unwrap_or_default();
     }
 
+    /// 请求后台刷新。输入是文件树根的拥有值，避免线程借用 UI 状态；同一
+    /// 时刻只跑一个任务，在途期间的新请求覆盖 `queued_root`，完成后补跑
+    /// 最新一次。无根时立即作废在途结果并清空快照。
+    pub fn request_refresh(&mut self, tree_root: Option<PathBuf>, repaint: RepaintNotifier) {
+        self.refresh_due = Instant::now() + REFRESH_INTERVAL;
+        self.refresh_seq = self.refresh_seq.wrapping_add(1);
+        let Some(root) = tree_root else {
+            self.refresh_rx = None;
+            self.refresh_running_seq = None;
+            self.queued_root = None;
+            self.degrade(None);
+            return;
+        };
+        if self.refresh_rx.is_some() {
+            self.queued_root = Some(root);
+            return;
+        }
+        self.spawn_refresh(root, repaint);
+    }
+
+    /// 文件树换根时立即清掉旧仓库的列表、角标与选中项。新的读取仍走
+    /// [`Self::request_refresh`]；清空只防止后台结果返回前短暂展示旧根。
+    pub fn invalidate_snapshot(&mut self) {
+        self.degrade(None);
+    }
+
+    /// 非阻塞接收后台 Git 快照。匹配最新序号才应用；旧结果只用于结束
+    /// 当前单飞任务，然后若有排队根则立刻启动最新请求。
+    pub fn poll_refresh(&mut self, repaint: RepaintNotifier) {
+        let received = match self.refresh_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(TryRecvError::Disconnected)) => self
+                .refresh_running_seq
+                .map(|seq| (seq, Err("Git 后台刷新意外中断".to_owned()))),
+            Some(Err(TryRecvError::Empty)) | None => None,
+        };
+        let Some((seq, result)) = received else {
+            return;
+        };
+        self.refresh_rx = None;
+        self.refresh_running_seq = None;
+        if seq == self.refresh_seq {
+            match result {
+                Ok(snapshot) => self.apply_snapshot(snapshot),
+                Err(error) => self.degrade(Some(error)),
+            }
+        }
+        if let Some(root) = self.queued_root.take() {
+            self.spawn_refresh(root, repaint);
+        }
+    }
+
+    /// 是否已有 Git 读取任务在途。仅供状态/测试观察，不驱动逐帧重绘。
+    #[cfg(test)]
+    pub fn is_refreshing(&self) -> bool {
+        self.refresh_rx.is_some()
+    }
+
+    /// 启动单个后台读取任务。请求序号、选中文件在启动时定格；worker 只
+    /// 构造值快照，发送成功后唤醒 UI，不触碰当前 `GitPanelState`。
+    fn spawn_refresh(&mut self, root: PathBuf, repaint: RepaintNotifier) {
+        let seq = self.refresh_seq;
+        let selected = self.selected.clone();
+        let (tx, rx) = mpsc::channel();
+        self.refresh_rx = Some(rx);
+        self.refresh_running_seq = Some(seq);
+        let spawned = std::thread::Builder::new()
+            .name("latermd-git-refresh".into())
+            .spawn(move || {
+                let result = read_snapshot(&root, selected);
+                if tx.send((seq, result)).is_ok() {
+                    repaint.notify();
+                }
+            });
+        if let Err(error) = spawned {
+            self.refresh_rx = None;
+            self.refresh_running_seq = None;
+            self.degrade(Some(format!("Git 刷新线程启动失败: {error}")));
+        }
+    }
+
+    /// 将后台读取的拥有值一次性换入 UI 快照。选中项与 diff 已在同一份
+    /// 仓库快照里校验，避免分别读取造成状态撕裂。
+    fn apply_snapshot(&mut self, snapshot: GitSnapshot) {
+        self.repo_root = Some(snapshot.repo_root);
+        self.error = None;
+        self.entries = snapshot.entries;
+        self.truncated = snapshot.truncated;
+        self.badges = snapshot.badges;
+        self.commits = snapshot.commits;
+        self.fetched_at = snapshot.fetched_at;
+        self.selected = snapshot.selected;
+        self.diff = snapshot.diff;
+    }
+
     /// 选中改动列表里的一个文件(`Message::GitFileSelected` 的归约):
     /// 选中并读 diff。不在当前列表里的路径(过期消息)忽略。
     pub fn select(&mut self, path: &str) {
@@ -150,15 +276,13 @@ impl GitPanelState {
         self.confirm_checkout = None;
     }
 
-    /// 确认模态的「回滚」(`Message::GitCheckoutConfirmed` 的归约):执行
-    /// latermd-git 唯一的写操作并立即刷新状态;模态总是关闭(成功失败都
-    /// 不再挂着)。失败返回文案给调用方进提示行,刷新照做保真。
-    pub fn confirm_checkout(&mut self, tree_root: Option<&Path>) -> Option<String> {
+    /// 确认模态的「回滚」(`Message::GitCheckoutConfirmed` 的归约):只执行
+    /// latermd-git 唯一的写操作并关闭模态。调用方随后发起后台刷新；失败
+    /// 文案返回提示行，但同样要刷新以反映磁盘真实状态。
+    pub fn confirm_checkout(&mut self) -> Option<String> {
         let path = self.confirm_checkout.take()?;
         let root = self.repo_root.clone()?;
-        let error = latermd_git::checkout_file(&root, &path).err();
-        self.refresh(tree_root);
-        error
+        latermd_git::checkout_file(&root, &path).err()
     }
 
     /// 文件树角标查询:绝对路径在改动列表中的状态码。
@@ -208,6 +332,33 @@ impl GitPanelState {
     }
 }
 
+/// 在后台线程读取一次一致的 status/log/diff 快照。`selected` 只有仍在
+/// 最新改动列表中才保留；diff 失败文案继续进入只读区，沿用原有口径。
+fn read_snapshot(root: &Path, selected: Option<String>) -> Result<GitSnapshot, String> {
+    let repo_root = latermd_git::discover(root)?;
+    let status = latermd_git::status(&repo_root, latermd_git::DEFAULT_STATUS_LIMIT)?;
+    let badges = status
+        .entries
+        .iter()
+        .map(|entry| (repo_root.join(&entry.path), entry.code))
+        .collect();
+    let selected = selected.filter(|path| status.entries.iter().any(|entry| &entry.path == path));
+    let diff = selected
+        .as_deref()
+        .map(|path| latermd_git::diff_file(&repo_root, path).unwrap_or_else(|error| error))
+        .unwrap_or_default();
+    Ok(GitSnapshot {
+        repo_root: repo_root.clone(),
+        entries: status.entries,
+        truncated: status.truncated,
+        badges,
+        commits: latermd_git::log(&repo_root, latermd_git::DEFAULT_LOG_LIMIT).unwrap_or_default(),
+        fetched_at: unix_now(),
+        selected,
+        diff,
+    })
+}
+
 /// 当前 Unix 秒;系统时钟早于 epoch(不可能的病态)按 0。
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -248,6 +399,40 @@ mod tests {
             "git {args:?} 失败: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// 收完后台刷新及其排队补跑；测试仍使用真实线程与 channel，只用短暂
+    /// sleep 让出调度，不把生产实现改回同步路径。
+    fn drain_background_refresh(git: &mut GitPanelState) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while git.is_refreshing() && Instant::now() < deadline {
+            git.poll_refresh(RepaintNotifier::default());
+            if git.is_refreshing() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        assert!(!git.is_refreshing(), "Git 后台刷新应在时限内收口");
+    }
+
+    /// 后台单飞与过期保护：连续请求两个根时最终只允许第二个仓库快照
+    /// 落地，第一项即使先完成也不能覆盖最新根。
+    #[test]
+    fn background_refresh_keeps_latest_requested_root() {
+        let first = temp_repo("async-first");
+        let second = temp_repo("async-second");
+        std::fs::write(first.join("first.md"), "一\n").unwrap();
+        std::fs::write(second.join("second.md"), "二\n").unwrap();
+
+        let mut git = GitPanelState::default();
+        git.request_refresh(Some(first.clone()), RepaintNotifier::default());
+        git.request_refresh(Some(second.clone()), RepaintNotifier::default());
+        drain_background_refresh(&mut git);
+
+        assert_eq!(git.repo_root.as_deref(), Some(second.as_path()));
+        assert!(git.entries.iter().any(|entry| entry.path == "second.md"));
+        assert!(git.entries.iter().all(|entry| entry.path != "first.md"));
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
     }
 
     /// 刷新填充:改动列表、绝对路径角标与历史;子目录作根同样命中(discover)。
@@ -374,9 +559,14 @@ mod tests {
             .contains("乱改"));
 
         git.request_checkout("a.md".to_owned());
-        assert_eq!(git.confirm_checkout(Some(&dir)), None, "成功无错误文案");
+        assert_eq!(git.confirm_checkout(), None, "成功无错误文案");
+        // 生产路径在确认归约后发起后台刷新；本单元测试只验证同步 checkout
+        // 与快照口径，故显式刷新一次再断言列表。
+        git.refresh(Some(&dir));
         assert_eq!(
-            std::fs::read_to_string(dir.join("a.md")).unwrap(),
+            std::fs::read_to_string(dir.join("a.md"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "HEAD 版本\n",
             "确认后恢复 HEAD"
         );

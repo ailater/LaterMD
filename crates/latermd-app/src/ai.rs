@@ -6,25 +6,31 @@
 //! (`crate::search`)同款「发起 / 接收 / 收尾」三原语,但文本回编辑器必须
 //! 经 Message(铁律三:AI 修改在文本/AST 层,后台线程不触碰 UI 状态)。
 //!
-//! 不引入 tokio:100ms/chunk 的节奏下 `std::sync::mpsc` + 每帧
-//! `request_repaint` 足够(roadmap 阶段 1 附加验证 6 的既定结论)。
+//! 不引入 tokio:provider 线程仍用 `std::sync::mpsc`；应用侧桥接线程在
+//! chunk 入队后通过 [`RepaintNotifier`] 唤醒 egui，等待期间不逐帧轮询。
 //!
 //! **provider 可切换**(docs/ui-polish.md §6):[`AiRuntime`] 在 Mock 与
 //! OpenAI 兼容端点之间二选一,由 [`AiConfig`] + API key 现场装配,保存配置
 //! 即时生效、无需重启。
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
 use latermd_ai::{AiProvider, Chunk, MockProvider, OpenAiProvider, OpenAiSettings};
 
 use crate::ai_config::AiConfig;
+use crate::repaint::RepaintNotifier;
 use crate::state::Message;
+
+/// AI commit 后台任务回传：请求序号 + 发起标签 + 建议或错误。
+type CommitResult = (u64, u64, Result<String, String>);
 
 /// 生效的 provider 运行时。
 ///
 /// 枚举而非 trait 对象:只有两种实现,编译期穷尽匹配比动态分发更省事,
 /// 也让「Mock 的同步合成」这类独有方法不必塞进公共 trait。
+#[derive(Clone)]
 pub enum AiRuntime {
     /// 内置演示 provider:不联网。
     Mock(MockProvider),
@@ -91,6 +97,10 @@ pub struct AiState {
     /// 当前生效的 AI 配置(端点/模型/采样参数……)。与 `runtime` 同源:
     /// 保存配置即重新装配 runtime,两者不会各说各话。
     pub(crate) config: AiConfig,
+    /// 最新一次 commit 建议请求序号；后台结果必须匹配才允许落状态。
+    commit_seq: u64,
+    /// commit 建议后台任务的一次性结果；`Some` 表示任务仍在进行。
+    commit_rx: Option<Receiver<CommitResult>>,
 }
 
 impl Default for AiState {
@@ -101,6 +111,8 @@ impl Default for AiState {
             streaming: false,
             last_prompt: None,
             config: AiConfig::default(),
+            commit_seq: 0,
+            commit_rx: None,
         }
     }
 }
@@ -147,21 +159,81 @@ impl AiState {
 
     /// 发起一次流式续写。已在流式中则忽略(防重入),返回是否真的发起了。
     ///
-    /// provider 在自己的后台线程里按节奏发块,本方法同步返回;channel 无界,
-    /// UI 侧只在每帧归约里 `try_recv`,永不阻塞。
-    pub fn start(&mut self, prompt: &str) -> bool {
+    /// provider 在自己的后台线程里按节奏发块,本方法同步返回；桥接线程
+    /// 把 chunk 转入 UI channel 并合并唤醒，UI 侧 `try_recv` 永不阻塞。
+    pub fn start(&mut self, prompt: &str, repaint: RepaintNotifier) -> bool {
         if self.streaming {
             return false;
         }
-        let (tx, rx) = mpsc::channel();
-        let worker: JoinHandle<()> = self.runtime.stream_complete(prompt, tx);
+        // provider 保持既有 Sender 契约；桥接线程在转交每个 chunk 后唤醒
+        // egui。UI 关闭接收端时桥接退出并丢掉 provider_rx，取消语义不变。
+        let (provider_tx, provider_rx) = mpsc::channel();
+        let worker: JoinHandle<()> = self.runtime.stream_complete(prompt, provider_tx);
         // 不 join:接收端在 `finish` 时 drop,worker 下一次 send 失败即退出
         // (latermd-ai 的取消约定);与搜索服务同款,不滞留句柄。
         drop(worker);
-        self.rx = Some(rx);
+        let (ui_tx, ui_rx) = mpsc::channel();
+        let bridge = std::thread::Builder::new()
+            .name("latermd-ai-ui-bridge".into())
+            .spawn(move || {
+                while let Ok(chunk) = provider_rx.recv() {
+                    let done = chunk.done;
+                    if ui_tx.send(chunk).is_err() {
+                        break;
+                    }
+                    repaint.notify();
+                    if done {
+                        break;
+                    }
+                }
+            });
+        if bridge.is_err() {
+            return false;
+        }
+        self.rx = Some(ui_rx);
         self.streaming = true;
         self.last_prompt = Some(prompt.to_owned());
         true
+    }
+
+    /// 发起 commit message 后台任务。输入目录来自当前文档或文件树根；
+    /// worker 完成“采 diff → 拼 prompt → HTTP/Mock 补全”后只发结果并唤醒
+    /// UI，不接触标签或提示状态。已有任务时返回 `Ok(false)` 防重入。
+    pub fn start_commit(
+        &mut self,
+        dir: PathBuf,
+        tab_id: u64,
+        repaint: RepaintNotifier,
+    ) -> Result<bool, String> {
+        if self.commit_rx.is_some() {
+            return Ok(false);
+        }
+        self.commit_seq = self.commit_seq.wrapping_add(1);
+        let seq = self.commit_seq;
+        let runtime = self.runtime.clone();
+        let (tx, rx) = mpsc::channel();
+        self.commit_rx = Some(rx);
+        let spawned = std::thread::Builder::new()
+            .name("latermd-ai-commit".into())
+            .spawn(move || {
+                // Git 子进程与真实 Provider 的阻塞 HTTP 都留在本线程；结果
+                // 回到 reducer 后才允许更新建议浮窗或提示行。
+                let result = crate::git_diff::uncommitted_diff(&dir).and_then(|diff| {
+                    if diff.trim().is_empty() {
+                        return Err("没有未提交的改动,无需生成 commit message".to_owned());
+                    }
+                    let prompt = latermd_ai::commit_message_prompt(&diff);
+                    runtime.commit_subject(&prompt)
+                });
+                if tx.send((seq, tab_id, result)).is_ok() {
+                    repaint.notify();
+                }
+            });
+        if let Err(error) = spawned {
+            self.commit_rx = None;
+            return Err(format!("AI commit 后台线程启动失败:{error}"));
+        }
+        Ok(true)
     }
 
     /// 非阻塞收空 channel,chunk 翻成消息。成功结束发 [`Message::AiDone`];
@@ -172,31 +244,51 @@ impl AiState {
     /// channel 断开却没等到收尾块(worker 异常退出)也按失败收尾:流式
     /// 标志绝不能卡死,否则后续触发会被防重入永远拦下。
     pub fn poll(&mut self) -> Vec<Message> {
-        let Some(rx) = self.rx.as_ref() else {
-            return Vec::new();
-        };
         let mut messages = Vec::new();
-        loop {
+        if let Some(rx) = self.rx.as_ref() {
+            loop {
+                match rx.try_recv() {
+                    Ok(chunk) if !chunk.done => {
+                        messages.push(Message::AiChunk { delta: chunk.delta })
+                    }
+                    Ok(chunk) => {
+                        if chunk.delta.is_empty() {
+                            messages.push(Message::AiDone);
+                        } else {
+                            messages.push(Message::AiFailed(chunk.delta));
+                        }
+                        break; // 结束块是流的最后一条
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        let terminated = messages
+                            .iter()
+                            .any(|m| matches!(m, Message::AiDone | Message::AiFailed(_)));
+                        if !terminated {
+                            messages.push(Message::AiFailed("AI 流意外中断".into()));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(rx) = self.commit_rx.as_ref() {
             match rx.try_recv() {
-                Ok(chunk) if !chunk.done => messages.push(Message::AiChunk { delta: chunk.delta }),
-                Ok(chunk) => {
-                    if chunk.delta.is_empty() {
-                        messages.push(Message::AiDone);
-                    } else {
-                        messages.push(Message::AiFailed(chunk.delta));
-                    }
-                    break; // 结束块是流的最后一条
+                Ok((seq, tab_id, result)) => messages.push(Message::AiCommitFinished {
+                    seq,
+                    tab_id,
+                    result,
+                }),
+                Err(TryRecvError::Disconnected) => {
+                    messages.push(Message::AiCommitFinished {
+                        seq: self.commit_seq,
+                        // 断连时没有任务载荷；0 不会命中真实标签，reducer
+                        // 只收口任务，不把错误写进用户正在看的其他文档。
+                        tab_id: 0,
+                        result: Err("AI commit 后台任务意外中断".to_owned()),
+                    });
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    let terminated = messages
-                        .iter()
-                        .any(|m| matches!(m, Message::AiDone | Message::AiFailed(_)));
-                    if !terminated {
-                        messages.push(Message::AiFailed("AI 流意外中断".into()));
-                    }
-                    break;
-                }
+                Err(TryRecvError::Empty) => {}
             }
         }
         messages
@@ -209,9 +301,24 @@ impl AiState {
         self.streaming = false;
     }
 
-    /// 是否有流在途(驱动流式期间持续重绘)。
+    /// 是否有流在途。用于防重入和界面状态；重绘由 chunk 入队通知驱动。
     pub fn is_streaming(&self) -> bool {
         self.streaming
+    }
+
+    /// commit 建议是否仍在后台生成；菜单重复触发据此防重入。
+    pub fn is_commit_running(&self) -> bool {
+        self.commit_rx.is_some()
+    }
+
+    /// 收口 commit 后台任务。只有与最新请求序号一致的结果才清接收端并
+    /// 返回 true；迟到结果返回 false，调用方不得写建议或提示状态。
+    pub fn finish_commit(&mut self, seq: u64) -> bool {
+        if seq != self.commit_seq || self.commit_rx.is_none() {
+            return false;
+        }
+        self.commit_rx = None;
+        true
     }
 
     /// 清掉「最近一次发起的 prompt」(指令卡状态随之回到未执行)。只在两个
@@ -248,7 +355,7 @@ mod tests {
             runtime: AiRuntime::Mock(MockProvider::with_interval(Duration::ZERO)),
             ..AiState::default()
         };
-        assert!(ai.start("帮我续写这段设计文档"));
+        assert!(ai.start("帮我续写这段设计文档", RepaintNotifier::default()));
         assert!(ai.is_streaming());
 
         let mut messages = Vec::new();
@@ -280,11 +387,14 @@ mod tests {
     #[test]
     fn start_while_streaming_is_ignored() {
         let mut ai = AiState::default();
-        assert!(ai.start("随便写点什么"));
-        assert!(!ai.start("第二次触发"), "流式中再触发被忽略");
+        assert!(ai.start("随便写点什么", RepaintNotifier::default()));
+        assert!(
+            !ai.start("第二次触发", RepaintNotifier::default()),
+            "流式中再触发被忽略"
+        );
         // 收尾后可再次发起
         ai.finish();
-        assert!(ai.start("收尾后重新发起"));
+        assert!(ai.start("收尾后重新发起", RepaintNotifier::default()));
     }
 
     /// 失败契约:done 且 delta 非空的块翻成 AiFailed(人工注入 channel,
@@ -297,6 +407,8 @@ mod tests {
             streaming: true,
             last_prompt: None,
             config: AiConfig::default(),
+            commit_seq: 0,
+            commit_rx: None,
         };
         let (tx, rx) = mpsc::channel();
         tx.send(Chunk {
@@ -319,6 +431,8 @@ mod tests {
             streaming: true,
             last_prompt: None,
             config: AiConfig::default(),
+            commit_seq: 0,
+            commit_rx: None,
         };
         let (tx, rx) = mpsc::channel();
         tx.send(Chunk {
@@ -356,7 +470,7 @@ mod tests {
     fn poll_without_channel_is_empty_and_finish_clears_state() {
         let mut ai = AiState::default();
         assert!(ai.poll().is_empty());
-        ai.start("x");
+        ai.start("x", RepaintNotifier::default());
         ai.finish();
         assert!(!ai.is_streaming());
         assert!(ai.poll().is_empty(), "finish 丢弃接收端,不再产出消息");

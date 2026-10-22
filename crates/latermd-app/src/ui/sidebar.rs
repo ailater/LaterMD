@@ -1029,15 +1029,11 @@ mod tests {
         );
 
         // 降级态(非 git 仓库)、空历史与截断态:只渲染降级文案/提示行,不 panic
-        let degraded = GitPanelState {
-            error: Some("当前目录不是 Git 仓库".to_owned()),
-            ..GitPanelState::default()
-        };
+        let mut degraded = GitPanelState::default();
+        degraded.error = Some("当前目录不是 Git 仓库".to_owned());
         let empty = GitPanelState::default();
-        let truncated = GitPanelState {
-            truncated: 7,
-            ..GitPanelState::default()
-        };
+        let mut truncated = GitPanelState::default();
+        truncated.truncated = 7;
         ctx.run_ui(RawInput::default(), |ui| {
             git_panel(ui, &degraded, &mut Vec::new());
         })

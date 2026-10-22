@@ -469,13 +469,10 @@ mod tests {
 
     /// 造一个指定流式/最近 prompt 的 AI 状态(卡片状态的三个输入)。
     fn ai_state(streaming: bool, last_prompt: Option<&str>) -> AiState {
-        AiState {
-            runtime: crate::ai::AiRuntime::Mock(latermd_ai::MockProvider::new()),
-            rx: None,
-            streaming,
-            last_prompt: last_prompt.map(str::to_owned),
-            config: crate::ai_config::AiConfig::default(),
-        }
+        let mut ai = AiState::default();
+        ai.streaming = streaming;
+        ai.last_prompt = last_prompt.map(str::to_owned);
+        ai
     }
 
     /// handler 三态:ai:// 链接解析暂存且被拦截;非 ai:// 前缀不拦截(返回

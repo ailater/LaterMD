@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use latermd_bed::{BedProfile, BedUploader, UreqUploader};
 
+use crate::repaint::RepaintNotifier;
 use crate::state::Message;
 
 /// profile 列表落盘文件(与 settings.json 同目录)。
@@ -104,7 +105,7 @@ impl BedState {
             .map_err(|source| format!("{}: {source}", path.display()))
     }
 
-    /// 是否有上传在途(驱动持续重绘 + UI 禁用按钮)。
+    /// 是否有上传在途(UI 禁用按钮用；重绘由结果发送后的通知驱动)。
     pub fn is_uploading(&self) -> bool {
         self.rx.is_some()
     }
@@ -116,15 +117,23 @@ impl BedState {
 
     /// 发起上传(生产入口):spawn 后台线程跑 [`UreqUploader`],立即返回。
     /// 不做在途判断 —— 新请求直接把序号+1,旧线程的结果到达即被丢弃;
-    /// UI 侧在上传中禁用按钮,这里的宽容只是防御。
+    /// `repaint` 在最新或旧任务成功入队时只负责唤醒，序号仍由归约校验。
     pub fn start(
         &mut self,
         profile: BedProfile,
         path: PathBuf,
         purpose: BedUploadPurpose,
         tab: Option<u64>,
+        repaint: RepaintNotifier,
     ) {
-        self.start_with(profile, path, purpose, tab, Arc::new(UreqUploader::new()));
+        self.start_with(
+            profile,
+            path,
+            purpose,
+            tab,
+            Arc::new(UreqUploader::new()),
+            repaint,
+        );
     }
 
     /// [`BedState::start`] 的注入版:测试塞假 uploader,免真实网络。
@@ -135,6 +144,7 @@ impl BedState {
         purpose: BedUploadPurpose,
         tab: Option<u64>,
         uploader: Arc<dyn BedUploader>,
+        repaint: RepaintNotifier,
     ) {
         self.upload_seq += 1;
         let seq = self.upload_seq;
@@ -149,7 +159,10 @@ impl BedState {
             .name("latermd-bed-upload".to_owned())
             .spawn(move || {
                 let result = run_upload(uploader.as_ref(), &profile, &path);
-                let _ = tx.send((seq, result));
+                if tx.send((seq, result)).is_ok() {
+                    // 网络上传结束才唤醒 UI；上传等待期间不再持续重绘。
+                    repaint.notify();
+                }
             });
         if spawn.is_err() {
             // 线程都起不来:当场按失败收尾,不留卡死的「上传中」
@@ -342,6 +355,7 @@ mod tests {
             },
             None,
             mock.clone(),
+            RepaintNotifier::default(),
         );
         assert!(bed.is_uploading());
         assert_eq!(
@@ -376,6 +390,7 @@ mod tests {
             },
             None,
             MockUploader::shared(),
+            RepaintNotifier::default(),
         );
         bed.start_with(
             profile("p-1"),
@@ -385,6 +400,7 @@ mod tests {
             },
             None,
             MockUploader::shared(),
+            RepaintNotifier::default(),
         );
         assert!(bed.is_uploading());
         // 只等一条结果(第二条的);第一条即使已发出也被替换丢弃
@@ -453,6 +469,7 @@ mod tests {
             },
             None,
             MockUploader::shared(),
+            RepaintNotifier::default(),
         );
         assert_eq!(
             wait_finished(&mut bed),

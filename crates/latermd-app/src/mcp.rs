@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 use latermd_mcp::{CallCounts, McpConfig, Server, SharedRoot};
 
+use crate::repaint::RepaintNotifier;
+
 /// 服务状态:设置页状态行与底部状态栏的唯一数据源。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum McpStatus {
@@ -82,13 +84,13 @@ impl Default for McpState {
 
 impl McpState {
     /// 应用新配置:**先停后起**(端口或工具开关变化都必须换线程重建 server)。
-    /// 落盘由归约侧负责(本模块不碰磁盘,便于无头测试)。
-    pub fn apply_config(&mut self, config: McpConfig) {
+    /// 落盘由归约侧负责；`repaint` 让异步绑定结果到达时立即更新状态行。
+    pub fn apply_config(&mut self, config: McpConfig, repaint: RepaintNotifier) {
         self.stop();
         self.config = config;
         self.config.normalize();
         if self.config.enabled {
-            self.start();
+            self.start(repaint);
         } else {
             self.status = McpStatus::Disabled;
         }
@@ -139,9 +141,9 @@ impl McpState {
         }
     }
 
-    /// 起后台线程。绑定失败不在这里报 —— 结果走 channel,由 [`Self::poll`]
-    /// 落到状态行(让 UI 看到真实原因)。
-    fn start(&mut self) {
+    /// 起后台线程。绑定结果走 channel 并用 `repaint` 唤醒，随后由
+    /// [`Self::poll`] 落到状态行；线程不直接修改任何 UI 状态。
+    fn start(&mut self, repaint: RepaintNotifier) {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         self.ready = Some(rx);
@@ -158,7 +160,11 @@ impl McpState {
                 match latermd_mcp::transport::http::bind(port) {
                     Ok(listener) => {
                         let server = Server::with_root_handle(root, config);
-                        let _ = tx.send(Ok(server.counts()));
+                        if tx.send(Ok(server.counts())).is_ok() {
+                            // 端口绑定可能晚于启动动作产生的最后一帧；结果
+                            // 入队后主动唤醒，状态不会悬在“启动中”。
+                            repaint.notify();
+                        }
                         if let Err(error) =
                             latermd_mcp::transport::http::serve_with(listener, server, flag)
                         {
@@ -167,7 +173,12 @@ impl McpState {
                     }
                     Err(error) => {
                         // 端口占用是最常见的一种:文案要带端口,便于用户改
-                        let _ = tx.send(Err(format!("{port} 端口无法绑定: {error}")));
+                        if tx
+                            .send(Err(format!("{port} 端口无法绑定: {error}")))
+                            .is_ok()
+                        {
+                            repaint.notify();
+                        }
                     }
                 }
             });
@@ -213,7 +224,7 @@ mod tests {
     #[test]
     fn applying_disabled_config_does_not_start() {
         let mut state = McpState::default();
-        state.apply_config(McpConfig::default());
+        state.apply_config(McpConfig::default(), RepaintNotifier::default());
         assert_eq!(state.status, McpStatus::Disabled);
         assert!(state.stop.is_none());
     }
@@ -228,7 +239,7 @@ mod tests {
             http_port: 80,
             ..McpConfig::default()
         };
-        state.apply_config(config);
+        state.apply_config(config, RepaintNotifier::default());
         assert_eq!(state.config.http_port, *McpConfig::PORT_RANGE.start());
     }
 
