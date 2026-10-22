@@ -746,7 +746,7 @@ fn appearance_legacy(
                 }
             }
         });
-        ui.weak("应用启动时进入的视图；上次选择会恢复上次退出时的模式。");
+        ui.weak("应用启动与新建文档时进入的视图；上次选择跟随当前会话的模式。");
 
         settings_row(ui, "禅定模式", |ui| {
             for mode in ZenNavMode::ALL {

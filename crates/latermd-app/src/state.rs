@@ -3637,10 +3637,27 @@ impl State {
                 self.git.close_diff_workspace();
                 // 多标签:新建永远开新标签,当前标签的未保存稿不受影响
                 let index = self.spawn_tab(None, "");
-                // 新建是明确的写入意图:切到源码档并把插入点落入
-                // 空编辑器,用户按键即可开始,不受当前浏览/对照档遮挡。
-                self.set_render_mode(RenderMode::Source);
-                self.tabs.tabs[index].focus_editor_on_next_frame = true;
+                // 新建是明确的写入意图:按「默认模式」设置落档并把插入点落
+                // 入空编辑器,用户按键即可开始,不受当前浏览/对照档遮挡。
+                // 「上次选择」取创建时刻的会话档 —— 正在写作时新建,新文档
+                // 直接落在可写的空文档块,不再退回浏览态等单击。
+                let target = match self.theme.default_view_mode {
+                    crate::theme::DefaultViewMode::Live => RenderMode::Live,
+                    crate::theme::DefaultViewMode::Source => RenderMode::Source,
+                    crate::theme::DefaultViewMode::Split => RenderMode::Split,
+                    crate::theme::DefaultViewMode::Last => self.render_mode,
+                };
+                if target == RenderMode::Live {
+                    // 已在写作档时 set_render_mode 是 no-op,但新标签的
+                    // browse_only 出厂即浏览态,必须显式翻成写作。
+                    self.set_render_mode(RenderMode::Live);
+                    let tab = &mut self.tabs.tabs[index];
+                    tab.live.browse_only = false;
+                    tab.focus_live_on_next_frame = true;
+                } else {
+                    self.set_render_mode(target);
+                    self.tabs.tabs[index].focus_editor_on_next_frame = true;
+                }
             }
             FileCmd::Open => {
                 self.git.close_diff_workspace();
@@ -6602,6 +6619,46 @@ mod tests {
             Some((char_idx, char_idx)),
             "源码 TextEdit 收到 Live 插入点"
         );
+    }
+
+    /// 新建文档跟随「默认模式」设置(theme.rs `DefaultViewMode`):写作/
+    /// 源码/对照显式落档,「上次选择」取创建时刻的会话档。写作档的新文档
+    /// 直接可写(不落浏览态),焦点请求挂在空文档块上。
+    #[test]
+    fn new_document_follows_default_view_mode() {
+        // 出厂「上次选择」:Live 会话里新建 → 仍在写作,且新文档不落浏览态。
+        let mut state = State::default();
+        state.apply(Message::ToggleLivePreview);
+        assert_eq!(state.render_mode, RenderMode::Live);
+        state.apply(Message::FileCommand(FileCmd::New));
+        assert_eq!(state.render_mode, RenderMode::Live);
+        assert!(
+            !state.tabs.current().live.browse_only,
+            "新建直落写作态,不等单击"
+        );
+        assert!(
+            state.tabs.current().focus_live_on_next_frame,
+            "焦点请求落 Live 空文档块"
+        );
+        assert!(state.tabs.current().editor.text().is_empty(), "新标签为空");
+
+        // 显式源码:新建进源码,焦点走源码 TextEdit(既有行为)。
+        state.theme.default_view_mode = crate::theme::DefaultViewMode::Source;
+        state.apply(Message::FileCommand(FileCmd::New));
+        assert_eq!(state.render_mode, RenderMode::Source);
+        assert!(state.tabs.current().focus_editor_on_next_frame);
+
+        // 显式写作:当前在源码档也切进写作。
+        state.theme.default_view_mode = crate::theme::DefaultViewMode::Live;
+        state.apply(Message::FileCommand(FileCmd::New));
+        assert_eq!(state.render_mode, RenderMode::Live);
+        assert!(!state.tabs.current().live.browse_only);
+
+        // 显式对照:新建进分栏,中央即源码 TextEdit。
+        state.theme.default_view_mode = crate::theme::DefaultViewMode::Split;
+        state.apply(Message::FileCommand(FileCmd::New));
+        assert_eq!(state.render_mode, RenderMode::Split);
+        assert!(state.tabs.current().focus_editor_on_next_frame);
     }
 
     #[test]

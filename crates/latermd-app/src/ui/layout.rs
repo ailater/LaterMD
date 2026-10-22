@@ -855,6 +855,15 @@ impl LaterMdApp {
                     });
                     tab.focus_editor_on_next_frame = false;
                 }
+                if tab.focus_live_on_next_frame {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(
+                            crate::ui::editor::tab_editor_id(*id).with("live-focus-new"),
+                            true,
+                        )
+                    });
+                    tab.focus_live_on_next_frame = false;
+                }
                 crate::ui::editor::ui(
                     ui,
                     editor,

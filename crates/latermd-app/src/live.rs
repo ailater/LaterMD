@@ -1522,6 +1522,16 @@ pub fn ui(
                             .cursor
                             .char_range()
                             .map(|range| editor.char_to_byte(range.primary.index.0));
+                        // 新建直落写作(默认模式跟随):消费一次的焦点请求,
+                        // 首帧把焦点交给空文档块;点击进写作不走这里。
+                        if ui.ctx().data(|d| {
+                            d.get_temp::<bool>(editor_id.with("live-focus-new"))
+                                .unwrap_or(false)
+                        }) {
+                            ui.memory_mut(|mem| mem.request_focus(response_id));
+                            ui.ctx()
+                                .data_mut(|d| d.remove::<bool>(editor_id.with("live-focus-new")));
+                        }
                         // 右键菜单:空文档块与活动块同一挂点(条目表共用)。
                         // 排在 active_response 之前 —— 那条会移走 response。
                         crate::ui::editor_menu::attach(ui, &output, keymap, true, outbox);
