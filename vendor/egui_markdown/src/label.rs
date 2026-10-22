@@ -293,10 +293,11 @@ fn token_to_owned(t: &Token<'_>) -> Token<'static> {
     Token::ListMarker { marker, indent_level } => {
       Token::ListMarker { marker: cowstr_to_owned(marker), indent_level: *indent_level }
     }
-    Token::Image { alt, url, title } => Token::Image {
+    Token::Image { alt, url, title, link } => Token::Image {
       alt: cowstr_to_owned(alt),
       url: cowstr_to_owned(url),
       title: title.as_ref().map(|t| cowstr_to_owned(t)),
+      link: link.as_ref().map(|t| cowstr_to_owned(t)),
     },
     Token::Table(data) => Token::Table(crate::types::TableData {
       alignments: data.alignments.clone(),
@@ -1352,7 +1353,7 @@ impl<'a> MarkdownLabel<'a> {
           after_block(&mut i, &mut text_start, end, ui);
         }
         #[cfg(feature = "images")]
-        Token::Image { alt, url, title, .. } => {
+        Token::Image { alt, url, title, link } => {
           let had_content = text_start < i;
           self.flush_text_range(ui, md, font, color, text_start, i, style, true);
           before_block(had_content, ui);
@@ -1385,6 +1386,14 @@ impl<'a> MarkdownLabel<'a> {
           // hash, so toggling the marker rotates the block cache key. The
           // centered layout only shifts x — block height bookkeeping
           // (before_y / min_rect) is unchanged.
+          // An enclosing link (`[![alt](img)](target)`) makes the image
+          // clickable: egui::Image defaults to hover-only sense, so linked
+          // images upgrade to Sense::click and open the target in a new
+          // tab (same semantics as the non-images fallback link).
+          let image = match link.as_ref() {
+            Some(_) => image.sense(egui::Sense::click()),
+            None => image,
+          };
           let image_response = if title.as_deref() == Some(crate::types::CENTERED_IMAGE_TITLE) {
             ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| ui.add(image)).inner
           } else {
@@ -1392,6 +1401,11 @@ impl<'a> MarkdownLabel<'a> {
           };
           if let Some(handler) = &self.link_handler {
             handler.image_response(ui, alt.as_ref(), url.as_ref(), &image_response);
+          }
+          if let Some(link) = link.as_ref() {
+            if image_response.clicked() {
+              ui.ctx().open_url(egui::OpenUrl::new_tab(link.as_ref()));
+            }
           }
           record_widget_block(ui, self.id, md.spans[i].clone(), before_rect, ui.min_rect().bottom());
           cache_block_height(ui, block_sz_id, block_key(i), before_y);
@@ -2304,5 +2318,52 @@ mod tests {
       left_titled_other.center().x < screen.center().x - 100.0,
       "an ordinary title must not trigger centering: rect {left_titled_other:?}"
     );
+  }
+
+  /// 链接包裹的图片可点击:点击后 platform_output 产出 `OpenUrl`(新标签);
+  /// 裸图片不带 link,点击不产生任何打开命令。
+  #[test]
+  fn linked_image_click_opens_url_and_plain_does_not() {
+    let ctx = egui::Context::default();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+    let clicked_url = |text: &str| -> Option<String> {
+      let capture = CaptureRect(Cell::new(None));
+      let id = egui::Id::new(text);
+      // 首帧:渲染并量出图片矩形
+      let output = ctx.run_ui(RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+        MarkdownLabel::new(id, text).font(egui::FontId::monospace(14.0)).wrap().link_handler(&capture).show(ui);
+      });
+      output.drop_without_applying_deltas();
+      let rect = capture.0.take().expect("image response hook fired");
+      // 次帧:在图片中心注入一次完整点击
+      let press = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+      };
+      let center = rect.center();
+      let output = ctx.run_ui(
+        RawInput {
+          screen_rect: Some(screen),
+          events: vec![egui::Event::PointerMoved(center), press(center, true), press(center, false)],
+          ..Default::default()
+        },
+        |ui| {
+          MarkdownLabel::new(id, text).font(egui::FontId::monospace(14.0)).wrap().link_handler(&capture).show(ui);
+        },
+      );
+      output.platform_output.commands.iter().find_map(|command| match command {
+        egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+        _ => None,
+      })
+    };
+
+    assert_eq!(
+      clicked_url("[![Rust](badge.svg)](https://ci.example/rust.yml)").as_deref(),
+      Some("https://ci.example/rust.yml"),
+      "clicking a linked image should open the enclosing link"
+    );
+    assert_eq!(clicked_url("![](badge.svg)"), None, "plain images must not be clickable");
   }
 }

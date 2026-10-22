@@ -63,6 +63,10 @@ pub enum Token<'s> {
     url: CowStr<'s>,
     /// Optional hover title.
     title: Option<CowStr<'s>>,
+    /// Enclosing link URL when the image is the content of a Markdown
+    /// link (`[![alt](img)](target)`): the image widget becomes clickable
+    /// and opens this URL. `None` for plain images.
+    link: Option<CowStr<'s>>,
   },
   /// Table with headers, rows, and column alignments.
   Table(TableData<'s>),
@@ -168,10 +172,11 @@ impl<'s> Hash for Token<'s> {
         marker.as_ref().hash(state);
         indent_level.hash(state);
       }
-      Token::Image { alt, url, title } => {
+      Token::Image { alt, url, title, link } => {
         alt.as_ref().hash(state);
         url.as_ref().hash(state);
         title.as_ref().map(|t| t.as_ref()).hash(state);
+        link.as_ref().map(|t| t.as_ref()).hash(state);
       }
       Token::Table(data) => data.hash(state),
       Token::TaskListMarker { checked, indent_level } => {
@@ -250,11 +255,13 @@ mod size_tests {
   #[test]
   fn token_enum_size() {
     let size = std::mem::size_of::<Token<'_>>();
-    // Token is currently ~80 bytes due to Link/Image variants with 3 CowStr fields.
-    // Boxing those would reduce it to ~24 bytes but breaks the public API - note for
-    // future semver bump.
+    // Token is currently ~96 bytes due to Link/Image variants with 3-4
+    // CowStr fields (Image gained a `link` for linked-image support).
+    // Boxing those would reduce it but breaks the public API - note for
+    // future semver bump. 96 is the next 8-byte stride boundary: keep the
+    // ceiling here so any further CowStr-sized addition forces a re-audit.
     eprintln!("Token size: {size} bytes");
-    assert!(size <= 88, "Token grew unexpectedly: {size} bytes");
+    assert!(size <= 96, "Token grew unexpectedly: {size} bytes");
   }
 
   #[test]
