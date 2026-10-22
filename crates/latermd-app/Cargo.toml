@@ -24,11 +24,15 @@ eframe = "0.36.2"
 # egui::Image 的分支在该 feature 之后(上游自带,未改 vendor 一行);
 # http 由 vendored 的 images feature 联动开启,ehttp 的原生后端就是依赖
 # 树里已有的 ureq,不是第二套 HTTP 栈;svg(Badges 徽章生态全是 .svg,
-# resvg 0.45 早已钉在 lock)2026-10-22 随链接徽章用例开启
+# resvg 0.45 早已钉在 lock)2026-10-22 随链接徽章用例开启;svg_text 同日
+# 补开 —— shields/GitHub 徽章的文字是 <text> 元素(Verdana/DejaVu 链),
+# resvg 不开 text feature 只画形状不画字(真机:徽章底出来了、Rust/passing
+# 没有),开 resvg/text + system-fonts 由 fontdb 扫系统字体栅格化
 egui_extras = { version = "0.36.2", default-features = false, features = [
     "file",
     "image",
     "svg",
+    "svg_text",
 ] }
 # 图片解码格式开到 D 段白名单口径(PNG/JPEG/WebP/GIF);egui_extras 只透传
 # png,其余格式由这里直接开(image 已在依赖树:eframe 截图用)
