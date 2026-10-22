@@ -1769,10 +1769,11 @@ fn token_to_owned(token: &Token<'_>) -> Token<'static> {
             marker: cowstr_to_owned(marker),
             indent_level: *indent_level,
         },
-        Token::Image { alt, url, title } => Token::Image {
+        Token::Image { alt, url, title, link } => Token::Image {
             alt: cowstr_to_owned(alt),
             url: cowstr_to_owned(url),
             title: title.as_ref().map(cowstr_to_owned),
+            link: link.as_ref().map(cowstr_to_owned),
         },
         Token::Table(data) => Token::Table(TableData {
             alignments: data.alignments.clone(),

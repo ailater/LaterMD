@@ -22,10 +22,13 @@ path = "src/main.rs"
 eframe = "0.36.2"
 # 图片渲染(docs/image-plan.md B 段):vendored 层把 Token::Image 画成
 # egui::Image 的分支在该 feature 之后(上游自带,未改 vendor 一行);
-# http 随之开启,ehttp 的原生后端就是依赖树里已有的 ureq,不是第二套 HTTP 栈
+# http 由 vendored 的 images feature 联动开启,ehttp 的原生后端就是依赖
+# 树里已有的 ureq,不是第二套 HTTP 栈;svg(Badges 徽章生态全是 .svg,
+# resvg 0.45 早已钉在 lock)2026-10-22 随链接徽章用例开启
 egui_extras = { version = "0.36.2", default-features = false, features = [
     "file",
     "image",
+    "svg",
 ] }
 # 图片解码格式开到 D 段白名单口径(PNG/JPEG/WebP/GIF);egui_extras 只透传
 # png,其余格式由这里直接开(image 已在依赖树:eframe 截图用)
