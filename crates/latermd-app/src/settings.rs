@@ -405,10 +405,42 @@ pub fn dialog(
     } else {
         egui::Frame::window(ui.style()).fill(shell.content)
     };
+    // 全窗蒙层(关于窗/快捷键蒙层同款手法与色值):egui 的 Window 只在边缘
+    // 条带注册拖拽 widget,窗体空白背景(内距、卡片间隙)不拦点击 —— 无蒙层
+    // 时点窗内空白会穿透到下层编辑器文字。蒙层先画、窗后画盖在其上;点窗
+    // 外的蒙层底 = 关闭(与页脚「关闭」/×/Esc 同一返回通道),点窗内空白只
+    // 被蒙层吞掉、不关(防点缝隙误丢设置页),窗内外用上一帧落账的窗矩形
+    // 区分(temp 数据跨帧存活、不落盘)。
+    let ctx = ui.ctx().clone();
+    let screen = ctx.viewport_rect();
+    let mut scrim_click: Option<egui::Response> = None;
+    egui::Area::new(egui::Id::new("settings-scrim"))
+        .interactable(true)
+        .fixed_pos(egui::Pos2::ZERO)
+        .show(&ctx, |ui| {
+            let dark = ui.visuals().dark_mode;
+            let tint = if dark {
+                egui::Color32::from_black_alpha(crate::shortcut_overlay::SCRIM_ALPHA_DARK)
+            } else {
+                egui::Color32::from_white_alpha(crate::shortcut_overlay::SCRIM_ALPHA_LIGHT)
+            };
+            ui.painter()
+                .rect_filled(screen, egui::CornerRadius::ZERO, tint);
+            let response = ui.allocate_rect(screen, egui::Sense::click());
+            let outside_dialog = response.interact_pointer_pos().is_none_or(|pos| {
+                !ctx.data(|d| {
+                    d.get_temp::<egui::Rect>(egui::Id::new("settings-dialog").with("outer-rect"))
+                        .is_some_and(|rect| rect.contains(pos))
+                })
+            });
+            if response.clicked() && outside_dialog {
+                scrim_click = Some(response);
+            }
+        });
     // 显式 id(find/goto 浮层同款):egui 0.36 按标题文本派生 Area id,
     // 标题一改拖动位置记忆就丢;显式 id 让窗口状态与文案解耦,测试也
     // 能按名取 Area 矩形。初始位置(pivot + default_pos)走 centered_dialog。
-    crate::ui::workbench::centered_dialog(ui, "设置")
+    let window = crate::ui::workbench::centered_dialog(ui, "设置")
         .id(egui::Id::new("settings-dialog"))
         .default_size(crate::ui::tokens::SETTINGS_DEFAULT_SIZE)
         .min_size(if mac {
@@ -550,8 +582,18 @@ pub fn dialog(
                         });
                 });
         });
+    // 窗矩形落账:下一帧蒙层用它区分「窗内空白」与「窗外蒙层底」
+    // (`Area::end` 回填的是全窗矩形,含标题栏与边框)。
+    if let Some(window) = window {
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new("settings-dialog").with("outer-rect"),
+                window.response.rect,
+            )
+        });
+    }
     settings.open &= open;
-    close
+    scrim_click.or(close)
 }
 
 /// 外观页:主题三态 + 皮肤 + 密度 + 渲染后端只读。
@@ -1496,6 +1538,106 @@ mod tests {
             );
         });
         output.drop_without_applying_deltas();
+    }
+
+    /// 蒙层兜穿透:egui 的 Window 只在边缘条带注册拖拽,窗体空白背景不拦
+    /// 点击。全屏蒙层是唯一的拦截面 —— 点窗外的蒙层底(屏幕角落)= 请求
+    /// 关闭;上一帧落账窗矩形内的点击只被吞掉、不关(防点窗内缝隙误丢
+    /// 设置页)。守门矩形用测试显式播种,不赌真实窗几何。
+    #[test]
+    fn scrim_closes_outside_and_swallows_inside_window_clicks() {
+        use std::cell::Cell;
+
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.settings.open = true;
+
+        // 一帧对话:带可选的「移动+按下+抬起」点击事件,回报 dialog 是否
+        // 请求关闭(关闭通路与页脚「关闭」共用,调用方按 clicked 归约)。
+        let run = |state: &mut State, click: Option<egui::Pos2>, seed_rect: bool| {
+            let close = Cell::new(false);
+            let mut events = Vec::new();
+            if let Some(pos) = click {
+                let press = |pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                };
+                events.push(egui::Event::PointerMoved(pos));
+                events.push(press(true));
+                events.push(press(false));
+            }
+            let system_theme_ok = state.system_theme_ok;
+            let resolved = state.resolved_theme();
+            let State {
+                settings,
+                ai_key,
+                ai,
+                mcp,
+                bed,
+                keymap,
+                theme,
+                skins,
+                ..
+            } = state;
+            let mut outbox = Vec::new();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    if seed_rect {
+                        // 播种「全屏都是窗」的守门矩形:任何点击都算窗内。
+                        // rect 先取再进 data_mut —— viewport_rect 内部也要拿
+                        // 同一把写锁,嵌在闭包里是重入死锁。
+                        let rect = ui.ctx().viewport_rect();
+                        ui.data_mut(|d| {
+                            d.insert_temp(egui::Id::new("settings-dialog").with("outer-rect"), rect)
+                        });
+                    }
+                    close.set(
+                        dialog(
+                            ui,
+                            settings,
+                            theme,
+                            skins,
+                            system_theme_ok,
+                            resolved,
+                            keymap,
+                            ai,
+                            ai_key,
+                            mcp,
+                            bed,
+                            &mut outbox,
+                        )
+                        .is_some_and(|close| close.clicked()),
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+            close.get()
+        };
+
+        // 首帧预热(蒙层与窗注册):无交互不关。第二帧再跑一帧让窗从
+        // sizing pass 的临时矩形落定 —— 守门矩形要的是稳定值,首帧的
+        // provisional 矩形可能盖住全屏。
+        assert!(!run(&mut state, None, false), "无交互不请求关闭");
+        assert!(!run(&mut state, None, false), "预热帧同样不请求关闭");
+
+        // 点屏幕角落(窗矩形之外):请求关闭
+        let corner = ctx.viewport_rect().right_bottom() - egui::vec2(4.0, 4.0);
+        assert!(
+            run(&mut state, Some(corner), false),
+            "点击窗外蒙层底应请求关闭"
+        );
+
+        // 播种全屏守门矩形后点同一角落:算窗内点击,只吞不关
+        assert!(
+            !run(&mut state, Some(corner), true),
+            "窗矩形内的点击应被蒙层吞掉、不误关"
+        );
     }
 
     /// 五个分页各渲一帧不 panic(含 AI 页的禁用态、MCP 页的规划态与图片
