@@ -103,10 +103,16 @@ pub(crate) fn append_highlight_section(
 /// 是一个 `latermd_md::Rewrite`(与 wikilink 展开层**同一结构**),字符串
 /// 改写与偏移映射(`map_source_offset`)共用同一份,两处不漂移。
 pub(crate) fn image_rewrites(text: &str, base_dir: Option<&Path>) -> Vec<latermd_md::Rewrite> {
+    // div-center 块优先:整块改写,块内其它两路扫描的命中全部让位 ——
+    // 清单须升序且互不重叠(`OffsetMap::from_rewrites` 有 debug 断言),
+    // 整块 span 已覆盖内部的图片行/`<img>` 标签,后者必须滤掉。
+    let center = div_center_rewrites(text, base_dir);
+    let covered = |start: usize| center.iter().any(|rewrite| rewrite.span.contains(&start));
     let mut rewrites = Vec::new();
     if let Some(base_dir) = base_dir.filter(|dir| !dir.as_os_str().is_empty()) {
         rewrites = inline_image_dests(text)
             .into_iter()
+            .filter(|(span, _, _)| !covered(span.start))
             .filter(|(_, dest, _)| is_relative(dest))
             .map(|(span, dest, wrapped)| {
                 let mut uri = file_uri(base_dir, &dest);
@@ -124,8 +130,13 @@ pub(crate) fn image_rewrites(text: &str, base_dir: Option<&Path>) -> Vec<latermd
             .collect();
     }
     // 块级 HTML `<img>` 的形态改写与相对地址无关(未落盘也改形态),
-    // 不受 base_dir 早退约束;清单须按 span 升序,两路扫描合并后统一排。
-    rewrites.extend(html_img_rewrites(text, base_dir));
+    // 不受 base_dir 早退约束;清单须按 span 升序,三路扫描合并后统一排。
+    rewrites.extend(
+        html_img_rewrites(text, base_dir)
+            .into_iter()
+            .filter(|rewrite| !covered(rewrite.span.start)),
+    );
+    rewrites.extend(center);
     rewrites.sort_unstable_by_key(|rewrite| rewrite.span.start);
     rewrites
 }
@@ -214,16 +225,7 @@ pub(crate) fn html_img_rewrites(text: &str, base_dir: Option<&Path>) -> Vec<late
             if src.is_empty() {
                 return None;
             }
-            let dest = if is_relative(&src) {
-                match base_dir.filter(|dir| !dir.as_os_str().is_empty()) {
-                    Some(base) => file_uri(base, &src),
-                    // 文档未落盘拼不出绝对地址:仍改成 Markdown 形态,
-                    // 相对路径原样保留 —— 不出图但也不再裸露标签文本。
-                    None => src.clone(),
-                }
-            } else {
-                src.clone()
-            };
+            let dest = resolve_image_dest(&src, base_dir);
             let replacement = if dest.chars().any(char::is_whitespace) {
                 format!("![{alt}](<{dest}>)")
             } else {
@@ -232,6 +234,174 @@ pub(crate) fn html_img_rewrites(text: &str, base_dir: Option<&Path>) -> Vec<late
             Some(latermd_md::Rewrite { span, replacement })
         })
         .collect()
+}
+
+/// 相对图片目标按文档目录拼 `file://` 绝对 URI;文档未落盘(None)保持
+/// 相对 —— 不出图但形态仍转。html_img_rewrites 与 div_center_rewrites
+/// 同一份口径。
+fn resolve_image_dest(dest: &str, base_dir: Option<&Path>) -> String {
+    if is_relative(dest) {
+        match base_dir.filter(|dir| !dir.as_os_str().is_empty()) {
+            Some(base) => file_uri(base, dest),
+            None => dest.to_owned(),
+        }
+    } else {
+        dest.to_owned()
+    }
+}
+
+/// 「div/p align="center" 包裹的纯图片块」的改写清单(GitHub README 惯例):
+///
+/// ```text
+/// <div align="center">
+///   ![LaterMD](assets/logo.png)
+/// </div>
+/// ```
+///
+/// CommonMark 把 `<div>` 开启的 HTML 块当字面文本,块内的 Markdown 图片
+/// 不解析;vendored 渲染层因此把整块画成三行文字。本扫描把**整块**换成
+/// 带居中 title 的 Markdown 图片行(`![alt](dest "latermd:center")`,
+/// 约定见 vendored `types::CENTERED_IMAGE_TITLE`)—— 图片照常出,且按
+/// title 在渲染列内水平居中,`align="center"` 的表达意图得以落地。
+///
+/// 识别纪律:开标签 `<div…>` / `<p…>`,align 只认引号形式且值须为
+/// center;中间每一行(去首尾空白)必须整行是一张图片 —— Markdown 图片
+/// 或 `<img>` 标签 —— 至少一行;闭标签 `</div>` / `</p>` 与开标签同 tag;
+/// **空行即不认**(空行已把 HTML 块截断,语义不再是一个 div);围栏代码
+/// 块内不认(与 [`inline_image_dests`] 同款)。内容里的相对目标与
+/// [`html_img_rewrites`] 同口径按文档目录拼 `file://`。
+fn div_center_rewrites(text: &str, base_dir: Option<&Path>) -> Vec<latermd_md::Rewrite> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut offsets = Vec::with_capacity(lines.len());
+    let mut acc = 0;
+    for line in &lines {
+        offsets.push(acc);
+        acc += line.len();
+    }
+    let mut rewrites = Vec::new();
+    let mut in_code = false;
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code = !in_code;
+        }
+        if !in_code {
+            if let Some((consumed, images)) = match_div_center_block(&lines[index..]) {
+                let replacement = images
+                    .into_iter()
+                    .map(|(alt, dest)| {
+                        let dest = resolve_image_dest(&dest, base_dir);
+                        if dest.chars().any(char::is_whitespace) {
+                            format!(
+                                "![{alt}](<{dest}> \"{}\")",
+                                egui_markdown::types::CENTERED_IMAGE_TITLE
+                            )
+                        } else {
+                            format!(
+                                "![{alt}]({dest} \"{}\")",
+                                egui_markdown::types::CENTERED_IMAGE_TITLE
+                            )
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                rewrites.push(latermd_md::Rewrite {
+                    span: offsets[index]..offsets[index] + consumed,
+                    replacement,
+                });
+                // 消费掉的块内没有围栏(开/闭标签与图片行都不是 ```),状态不变。
+                index += consumed;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    rewrites
+}
+
+/// 从 `lines` 首行起配一个 div-center 块。命中返回**(消耗字节数, 图片
+/// (alt, dest) 清单)**;不命中返回 None —— 调用方按普通行继续走。
+fn match_div_center_block(lines: &[&str]) -> Option<(usize, Vec<(String, String)>)> {
+    let opener = lines.first()?.trim();
+    let rest_div = opener.strip_prefix("<div");
+    let rest_p = opener.strip_prefix("<p");
+    let (tag, body) = match (rest_div, rest_p) {
+        (Some(rest), _) => ("div", rest),
+        (_, Some(rest)) => ("p", rest),
+        (None, None) => return None,
+    };
+    // `<p` 后必须紧跟空白或 `>`(`<picture>`、`<param>` 不误配)。
+    if !body.starts_with([' ', '\t']) && !body.starts_with('>') {
+        return None;
+    }
+    let close = opener.rfind('>')?;
+    if close != opener.len() - 1 {
+        return None;
+    }
+    // body 已含收尾 `>`(strip 前缀后的余量),属性体去掉它再解析。
+    let attrs = &body[..body.len() - 1];
+    if quoted_attr(attrs, "align").as_deref() != Some("center") {
+        return None;
+    }
+    let mut images = Vec::new();
+    let mut consumed = lines[0].len();
+    for line in &lines[1..] {
+        let trimmed = line.trim();
+        if trimmed == format!("</{tag}>") {
+            if images.is_empty() {
+                return None;
+            }
+            // 闭标签只消费到行尾、不带换行 —— 换行留给后续内容,
+            // 替换串不与之粘连。
+            return Some((consumed + trimmed.len(), images));
+        }
+        if trimmed.is_empty() {
+            return None;
+        }
+        let image = markdown_image_line(trimmed).or_else(|| html_img_line(trimmed))?;
+        images.push(image);
+        consumed += line.len();
+    }
+    None
+}
+
+/// 行级「纯 Markdown 图片」判定:整行(已去首尾空白)是 `![alt](dest)`,
+/// 目标可选 `<…>` 包裹与 `"title"` 后缀。返回 (alt, dest)。
+fn markdown_image_line(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("![")?;
+    let close_alt = rest.find(']')?;
+    let alt = &rest[..close_alt];
+    let after = rest[close_alt + 1..].strip_prefix('(')?;
+    let (dest_range, dest, _wrapped) = dest_span(after, 0)?;
+    let mut tail = after[dest_range.end..].trim_start();
+    if let Some(quoted) = tail.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        tail = quoted[end + 1..].trim_start();
+    }
+    (tail == ")").then(|| (alt.to_owned(), dest))
+}
+
+/// 行级「纯 `<img>` 标签」判定:整行(已去首尾空白)是一个 `<img …>` /
+/// `<img … />` 标签,`>` 收尾且其后无内容。返回 (alt, dest);src 缺失或
+/// 为空不认(与 [`html_img_tags`] 同口径)。
+fn html_img_line(line: &str) -> Option<(String, String)> {
+    let body = line.strip_prefix("<img")?;
+    let close = body.rfind('>')?;
+    if close != body.len() - 1 {
+        return None;
+    }
+    // `<img` 后必须紧跟空白或 `>`(`<imgx>` 不误配)。
+    let attrs = &body[..close];
+    if !attrs.starts_with([' ', '\t']) {
+        return None;
+    }
+    let src = quoted_attr(attrs, "src")?;
+    if src.is_empty() {
+        return None;
+    }
+    let alt = quoted_attr(attrs, "alt").unwrap_or_default();
+    Some((alt, src))
 }
 
 /// 扫出块级 HTML 里的全部 `<img …>` 标签:`(整个标签的字节区间, src 值,
@@ -731,6 +901,90 @@ mod tests {
         assert_eq!(
             rewrite(doc, Some(base)),
             "前文\n\n![](file:///home/u/LaterMD/a.png)\n\n后文"
+        );
+    }
+
+    /// div/p align="center" 包裹的纯图片块:整块换成带居中 title 的
+    /// Markdown 图片行 —— CommonMark 本不解析 HTML 块内 Markdown,靠
+    /// 本层落地 GitHub README 的居中图写法(vendored 端按
+    /// `CENTERED_IMAGE_TITLE` title 居中)。
+    #[test]
+    fn div_center_block_becomes_centered_markdown_images() {
+        let base = Path::new("/home/u/docs");
+        // 基本形态:file:// 目标原样带上,title 挂居中约定值
+        let doc = "<div align=\"center\">\n  ![LaterMD](file:///x/i.png)\n</div>";
+        assert_eq!(
+            rewrite(doc, Some(base)),
+            "![LaterMD](file:///x/i.png \"latermd:center\")"
+        );
+        // `<img>` 标签内容与相对目标:标签转 Markdown,相对按文档目录拼 file://
+        let doc = "<p align=\"center\">\n  <img src=\"logo/i.png\" alt=\"标\">\n</p>";
+        assert_eq!(
+            rewrite(doc, Some(base)),
+            "![标](file:///home/u/docs/logo/i.png \"latermd:center\")"
+        );
+        // 多图各成一行;align 单引号 + 附加属性都认
+        let doc = "<div class=\"banner\" align='center'>\n![a](x.png)\n![b](y.png)\n</div>";
+        assert_eq!(
+            rewrite(doc, None),
+            "![a](x.png \"latermd:center\")\n![b](y.png \"latermd:center\")"
+        );
+        // 目标含空格:源里本就要 `<>` 包裹(裸空格目标是非法 Markdown),
+        // 替换串保持包裹
+        let doc = "<div align=\"center\">\n![a](<my img.png>)\n</div>";
+        assert_eq!(rewrite(doc, None), "![a](<my img.png> \"latermd:center\")");
+        // 块外的普通相对图片不受牵连,仍走内联改写(清单不重叠)
+        let doc = "<div align=\"center\">\n![a](x.png)\n</div>\n\n![b](y.png)";
+        assert_eq!(
+            rewrite(doc, Some(base)),
+            "![a](file:///home/u/docs/x.png \"latermd:center\")\n\n![b](file:///home/u/docs/y.png)"
+        );
+    }
+
+    /// div-center 扫描的边界:align 非 center、空行截断、空 div、非图片
+    /// 内容行、代码块内、闭标签缺位 —— 一律不改写(整块保持字面文本,
+    /// 与改写前的现状行为一致)。
+    #[test]
+    fn div_center_scan_boundaries() {
+        // align 非 center / 缺失
+        assert_eq!(
+            rewrite("<div align=\"left\">\n![a](x.png)\n</div>", None),
+            "<div align=\"left\">\n![a](x.png)\n</div>"
+        );
+        assert_eq!(
+            rewrite("<div>\n![a](x.png)\n</div>", None),
+            "<div>\n![a](x.png)\n</div>"
+        );
+        // 空行截断 HTML 块(语义已不是一个 div)
+        assert_eq!(
+            rewrite("<div align=\"center\">\n\n![a](x.png)\n</div>", None),
+            "<div align=\"center\">\n\n![a](x.png)\n</div>"
+        );
+        // 空 div / 中间夹了非图片文本行 / 开闭标签不同 tag
+        assert_eq!(
+            rewrite("<div align=\"center\">\n</div>", None),
+            "<div align=\"center\">\n</div>"
+        );
+        assert_eq!(
+            rewrite("<div align=\"center\">\n正文\n</div>", None),
+            "<div align=\"center\">\n正文\n</div>"
+        );
+        assert_eq!(
+            rewrite("<div align=\"center\">\n![a](x.png)\n</p>", None),
+            "<div align=\"center\">\n![a](x.png)\n</p>"
+        );
+        // 闭标签缺位(文件截断):不认
+        assert_eq!(
+            rewrite("<div align=\"center\">\n![a](x.png)", None),
+            "<div align=\"center\">\n![a](x.png)"
+        );
+        // 围栏代码块内的 div-center 是字面文本
+        let doc = "```\n<div align=\"center\">\n![a](x.png)\n</div>\n```";
+        assert_eq!(rewrite(doc, None), doc);
+        // 标签边界:`<picture>`、`<imgx>` 不是开/内容标签
+        assert_eq!(
+            rewrite("<picture>\n![a](x.png)\n</picture>", None),
+            "<picture>\n![a](x.png)\n</picture>"
         );
     }
 

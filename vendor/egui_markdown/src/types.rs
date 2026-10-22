@@ -5,6 +5,16 @@ use std::ops::Range;
 
 use pulldown_cmark::CowStr;
 
+/// Reserved image-title marker for centered rendering.
+///
+/// A block-level image whose `title` is exactly this value is rendered
+/// horizontally centered instead of left-aligned. Markdown image titles have
+/// no visual rendering of their own, so the title is a free channel for
+/// render hints; producers write it as `![alt](dest "latermd:center")`.
+/// The title participates in the token hash, so toggling the marker also
+/// invalidates per-block layout caches.
+pub const CENTERED_IMAGE_TITLE: &str = "latermd:center";
+
 /// A single parsed markdown token.
 #[derive(Debug, Clone)]
 pub enum Token<'s> {
