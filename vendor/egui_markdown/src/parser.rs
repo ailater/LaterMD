@@ -387,6 +387,7 @@ pub fn parse<'s>(s: &'s str) -> Markdown<'s> {
   let mut link_text = None;
   let mut link_href = None;
   let mut link_title: Option<CowStr> = None;
+  let mut link_had_image = false;
   let mut image_alt = None;
   let mut image_url = None;
   let mut image_title: Option<CowStr> = None;
@@ -732,6 +733,7 @@ pub fn parse<'s>(s: &'s str) -> Markdown<'s> {
         }
         Tag::Link { dest_url, title, .. } => {
           in_link = true;
+          link_had_image = false;
           link_href = Some(dest_url);
           link_title = if title.is_empty() { None } else { Some(title) };
         }
@@ -793,24 +795,38 @@ pub fn parse<'s>(s: &'s str) -> Markdown<'s> {
           in_link = false;
           let text = link_text.take().unwrap_or_else(|| CowStr::Boxed("".into()));
           if let Some(url) = link_href.take() {
-            push_token(
-              &mut tokens,
-              &mut spans,
-              &mut span_last_end,
-              Token::Link { text, href: url, title: link_title.take(), heading: current_style.heading },
-              &range,
-            );
+            // 内容是一张图片时,图片 token 已携带 link 并负责点击打开,
+            // 这里不再补一个零宽空文本 Link token。
+            if link_had_image {
+              link_had_image = false;
+              link_title.take();
+            } else {
+              push_token(
+                &mut tokens,
+                &mut spans,
+                &mut span_last_end,
+                Token::Link { text, href: url, title: link_title.take(), heading: current_style.heading },
+                &range,
+              );
+            }
           }
         }
         TagEnd::Image => {
           in_image = false;
           let alt = image_alt.take().unwrap_or_else(|| CowStr::Boxed("".into()));
           if let Some(url) = image_url.take() {
+            // 逮住包裹本图片的外层链接(`[![alt](img)](target)`):图片
+            // token 自带 link,点击即开;外层 Link 收束时不再补空链接
+            // token(见 TagEnd::Link 的 link_had_image 分支)。
+            let link = if in_link { link_href.clone() } else { None };
+            if link.is_some() {
+              link_had_image = true;
+            }
             push_token(
               &mut tokens,
               &mut spans,
               &mut span_last_end,
-              Token::Image { alt, url, title: image_title.take() },
+              Token::Image { alt, url, title: image_title.take(), link },
               &range,
             );
           }
@@ -839,6 +855,31 @@ mod tests {
   fn empty() {
     let md = parse("");
     assert!(md.tokens.is_empty());
+  }
+
+  /// 链接包裹图片(`[![alt](img)](target)`,README 徽章惯例):图片 token
+  /// 自带外层 link,外层不再补空文本 Link token;裸图片 link 为 None。
+  #[test]
+  fn linked_image_carries_link_and_plain_image_does_not() {
+    let md = parse("[![Rust](badge.svg)](https://ci.example/rust.yml)\n\n![alt](plain.png)");
+    let mut images = md.tokens.iter().filter(|t| matches!(t, Token::Image { .. }));
+    let Some(Token::Image { alt, url, link, .. }) = images.next() else {
+      panic!("first token should be the linked image");
+    };
+    assert_eq!(alt.as_ref(), "Rust");
+    assert_eq!(url.as_ref(), "badge.svg");
+    assert_eq!(link.as_ref().map(|l| l.as_ref()), Some("https://ci.example/rust.yml"));
+    let Some(Token::Image { alt, url, link, .. }) = images.next() else {
+      panic!("second token should be the plain image");
+    };
+    assert_eq!(alt.as_ref(), "alt");
+    assert_eq!(url.as_ref(), "plain.png");
+    assert!(link.is_none(), "plain image must stay unclickable");
+    assert!(images.next().is_none());
+    assert!(
+      !md.tokens.iter().any(|t| matches!(t, Token::Link { text, .. } if text.is_empty())),
+      "wrapped links must not leave an empty-text Link token behind"
+    );
   }
 
   #[test]

@@ -117,7 +117,7 @@ Message::ImageUploadRequested { profile_id, path }
 
 - `Ctrl+V` 图片字节 → 落 `.assets/` → 插相对路径。
 - 拖入图片文件 → 同上。
-- 白名单 PNG/JPEG/WebP/GIF，超 5MB 提示（沿用 #21 既定口径）。
+- 白名单 PNG/JPEG/WebP/GIF，超 5MB 提示（沿用 #21 既定口径）。**渲染侧 2026-10-22 增补 SVG**（`egui_extras/svg` 的 resvg）：badges/README 生态图片大量是 .svg，B 段预览需能出图；粘贴/拖拽落盘仍限位图四格式。
 
 ---
 
