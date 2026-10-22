@@ -775,6 +775,18 @@ fn appearance_legacy(
                 outbox.push(Message::FocusModeToggled(show_focus_mode));
             }
         });
+        // 选区 AI 浮标(#61 配置面):同款「回显副本 + changed() 即时发消息」。
+        // 关闭后同样两个动作仍可从右键菜单发起,浮标不再弹出。
+        settings_row(ui, "选区 AI 浮标", |ui| {
+            let mut show_selection_ai = theme.show_selection_ai;
+            let response = ui.checkbox(
+                &mut show_selection_ai,
+                "选中文字后浮出「AI 续写 / AI 润色」入口",
+            );
+            if response.changed() {
+                outbox.push(Message::SelectionAiToggled(show_selection_ai));
+            }
+        });
         // #57 M2:左缘标签导航三态,与主题/密度选择同款 selectable_label
         // (即时生效,非草稿模式 —— 显示偏好拨一下就该看到)。默认悬停,
         // 常显/关闭是显式选择(取舍见 decisions-pending #107)。
@@ -801,6 +813,20 @@ fn appearance_legacy(
             }
         });
         ui.weak("左缘标签导航:悬停=移近左缘唤出;常显=进入禅定即显示;关闭=不渲染。");
+
+        // 标签标题宽度(#37):此前只在标签条右键菜单,收进外观页(与
+        // 禅定导航同款 selectable_label 三态行)。
+        settings_row(ui, "标签标题", |ui| {
+            for mode in crate::theme::TitleWidthMode::ALL {
+                if ui
+                    .selectable_label(theme.tab_title_width == mode, mode.label())
+                    .clicked()
+                {
+                    outbox.push(Message::TabTitleWidthChanged(mode));
+                }
+            }
+        });
+        ui.weak("缩短=标签收窄到可用空间;完整=按完整标题测宽。");
     });
 
     card(ui, &shell, "渲染", |ui| {

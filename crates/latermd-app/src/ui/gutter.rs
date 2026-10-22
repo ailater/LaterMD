@@ -138,6 +138,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    true,
                     None,
                     false,
                     &crate::keymap::Keymap::builtin(),

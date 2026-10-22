@@ -889,6 +889,8 @@ impl LaterMdApp {
                     // 活动块,源码模式不接线 —— 边界见 decisions-pending #122;
                     // 关闭 = 现状零变化)。
                     state.theme.show_focus_mode,
+                    // 选区 AI 浮标开关(#61 配置面,全局偏好)。
+                    state.theme.show_selection_ai,
                     // live-unify-plan P1:相对图片锚定目录与流式 heal,
                     // 仅 Live 分支消费(见 editor::ui 文档)。
                     base_dir,
@@ -1403,6 +1405,8 @@ impl LaterMdApp {
                         crate::ui::editor::tab_editor_id(tab.id),
                         false,
                         false,
+                        // 禅定浏览态无活动块,浮标天然不弹,显式关
+                        false,
                         tab.document
                             .path
                             .as_deref()
@@ -1567,6 +1571,8 @@ fn compare_column_body(ui: &mut egui::Ui, app: &mut LaterMdApp) {
         &mut tab.live_right,
         crate::ui::editor::tab_right_editor_id(tab.id),
         false,
+        false,
+        // 只读对照列不可持焦,浮标天然不弹,显式关
         false,
         base_dir,
         heal,

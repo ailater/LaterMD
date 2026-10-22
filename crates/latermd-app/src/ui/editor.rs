@@ -218,6 +218,9 @@ pub fn ui(
     show_minimap: bool,
     show_typewriter: bool,
     show_focus: bool,
+    // 选区 AI 浮标开关(#61 配置面):false 时浮标不再弹出(show 走
+    // 无 anchor 的隐藏路径,探针同口径清零),右键菜单动作不受影响。
+    show_selection_ai: bool,
     base_dir: Option<&std::path::Path>,
     heal: bool,
     keymap: &crate::keymap::Keymap,
@@ -250,6 +253,7 @@ pub fn ui(
             editor_id,
             show_typewriter,
             show_focus,
+            show_selection_ai,
             base_dir,
             heal,
             // 主写作列开徽标槽(LP2-6):左缘 44px 悬类型徽标,点击切标题级别
@@ -947,15 +951,16 @@ pub fn ui(
             output.galley_pos + rect.max.to_vec2(),
         )
     });
-    let sel_anchor = if crate::ui::selection_ai::badge_visible(
-        sel_range,
-        focused,
-        // 拖选进行中不弹;按在浮标自己上(dragged_id = 浮标)不算拖选。
-        panel
-            .ctx()
-            .dragged_id()
-            .is_some_and(|id| !crate::ui::selection_ai::is_floater_id(editor_id, id)),
-    ) {
+    let sel_anchor = if show_selection_ai
+        && crate::ui::selection_ai::badge_visible(
+            sel_range,
+            focused,
+            // 拖选进行中不弹;按在浮标自己上(dragged_id = 浮标)不算拖选。
+            panel
+                .ctx()
+                .dragged_id()
+                .is_some_and(|id| !crate::ui::selection_ai::is_floater_id(editor_id, id)),
+        ) {
         sel_tail_anchor
     } else {
         None
@@ -1245,6 +1250,7 @@ mod tests {
                         false,
                         show_typewriter,
                         false,
+                        true,
                         None,
                         false,
                         &crate::keymap::Keymap::builtin(),

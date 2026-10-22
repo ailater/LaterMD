@@ -1340,6 +1340,9 @@ pub fn ui(
     editor_id: egui::Id,
     show_typewriter: bool,
     show_focus: bool,
+    // 选区 AI 浮标开关(#61 配置面):false 时浮标不弹(anchor 恒 None,
+    // show 走隐藏路径清探针),右键菜单动作不受影响。
+    show_selection_ai: bool,
     base_dir: Option<&std::path::Path>,
     heal: bool,
     badge_gutter: bool,
@@ -2664,15 +2667,16 @@ pub fn ui(
         }
     }
     let sel_focused = panel.ctx().memory(|mem| mem.has_focus(sel_ai_response_id));
-    let sel_anchor = if crate::ui::selection_ai::badge_visible(
-        sel_ai_selection,
-        sel_focused,
-        // 拖选进行中不弹;按在浮标自己上(dragged_id = 浮标)不算拖选。
-        panel
-            .ctx()
-            .dragged_id()
-            .is_some_and(|id| !crate::ui::selection_ai::is_floater_id(editor_id, id)),
-    ) {
+    let sel_anchor = if show_selection_ai
+        && crate::ui::selection_ai::badge_visible(
+            sel_ai_selection,
+            sel_focused,
+            // 拖选进行中不弹;按在浮标自己上(dragged_id = 浮标)不算拖选。
+            panel
+                .ctx()
+                .dragged_id()
+                .is_some_and(|id| !crate::ui::selection_ai::is_floater_id(editor_id, id)),
+        ) {
         sel_ai_anchor
     } else {
         None
@@ -3522,6 +3526,7 @@ mod tests {
                 egui::Id::new("live-test"),
                 false,
                 false,
+                true,
                 None,
                 false,
                 false,
@@ -3692,6 +3697,7 @@ mod tests {
                     egui::Id::new("live-copy-test"),
                     false,
                     false,
+                    true,
                     None,
                     false,
                     false,
@@ -3972,6 +3978,7 @@ mod tests {
                         egui::Id::new("badge-cycle-test"),
                         false,
                         false,
+                        true,
                         None,
                         false,
                         true,
@@ -4843,6 +4850,7 @@ mod tests {
                     egui::Id::new(FADE_EDITOR_ID),
                     false,
                     false,
+                    true,
                     None,
                     false,
                     false,
@@ -5523,6 +5531,7 @@ mod tests {
                     id,
                     show_typewriter,
                     show_focus,
+                    true,
                     None,
                     false,
                     false,
@@ -6146,6 +6155,7 @@ mod tests {
                         id,
                         false,
                         false,
+                        true,
                         None,
                         false,
                         false,
@@ -6640,6 +6650,7 @@ mod tests {
                         egui::Id::new("live-marker-edit"),
                         false,
                         false,
+                        true,
                         None,
                         false,
                         false,
@@ -7582,6 +7593,7 @@ mod tests {
                     egui::Id::new(FOCUS_EDITOR_ID),
                     false,
                     show_focus,
+                    true,
                     None,
                     false,
                     false,
@@ -7822,6 +7834,7 @@ mod tests {
                     egui::Id::new(FOCUS_EDITOR_ID),
                     typewriter,
                     focus,
+                    true,
                     None,
                     false,
                     false,
@@ -8010,6 +8023,7 @@ mod tests {
                 egui::Id::new("live-highlight-test"),
                 false,
                 false,
+                true,
                 None,
                 false,
                 false,
@@ -8143,6 +8157,7 @@ mod tests {
                 egui::Id::new("gap-test"),
                 false,
                 false,
+                true,
                 None,
                 false,
                 false,
@@ -8340,6 +8355,7 @@ mod tests {
                     egui::Id::new("live-img-test"),
                     false,
                     false,
+                    true,
                     Some(dir.as_path()),
                     false,
                     false,
@@ -8414,6 +8430,7 @@ mod tests {
                     egui::Id::new(id),
                     false,
                     false,
+                    true,
                     None,
                     heal,
                     false,
@@ -8510,6 +8527,7 @@ mod tests {
                         editor_id,
                         false,
                         false,
+                        true,
                         None,
                         false,
                         false,
@@ -8624,6 +8642,7 @@ mod tests {
                             id,
                             false,
                             false,
+                            true,
                             None,
                             false,
                             false,
@@ -8711,6 +8730,7 @@ mod tests {
                             id,
                             false,
                             false,
+                            true,
                             None,
                             false,
                             false,
@@ -8783,6 +8803,7 @@ mod tests {
                     egui::Id::new("live-ai-card"),
                     false,
                     false,
+                    true,
                     None,
                     false,
                     false,
@@ -8854,6 +8875,7 @@ mod tests {
                         editor_id,
                         false,
                         false,
+                        true,
                         None,
                         false,
                         false,
@@ -8916,6 +8938,7 @@ mod tests {
                         editor_id,
                         false,
                         false,
+                        true,
                         None,
                         false,
                         false,
@@ -9018,6 +9041,7 @@ mod tests {
                     id,
                     false,
                     false,
+                    true,
                     None,
                     false,
                     false,
@@ -9119,6 +9143,7 @@ mod tests {
                             id,
                             false,
                             false,
+                            true,
                             None,
                             false,
                             false,
