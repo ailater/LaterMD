@@ -59,8 +59,10 @@ pub mod types;
 pub use egui_markdown_style::{global_style, set_style};
 pub use label::MarkdownLabel;
 pub use label::{
-  block_rect_at_offset, block_span_rects, block_span_rects_present, char_index_at_pos, cursor_from_pos, glyph_at_index,
-  last_non_whitespace_glyph, row_rect_at_pos, section_anchors, BlockSpanRect, OverflowWrap, SectionAnchor,
+  block_rect_at_offset, block_span_rects, block_span_rects_present, char_index_at_pos, code_block_geometry,
+  cursor_from_pos, glyph_at_index, last_non_whitespace_glyph, render_code_block_with_options, row_rect_at_pos,
+  section_anchors, BlockSpanRect, CodeBlockGeometry, CodeBlockRenderOptions, CodeBodyRenderer, OverflowWrap,
+  SectionAnchor,
 };
 pub use layout::CodeThemeArg;
 pub use link::{LinkHandler, LinkStyle};
