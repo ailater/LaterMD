@@ -161,6 +161,12 @@ mod tests {
 
         tx.send(42_u8).unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok(42));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // recv 在值入队瞬间就返回，桥接线程的 notify() 在其后才执行，
+        // 两者之间是调度窗口（高核数机器上可稳定复现）；轮询等待回调落地
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while calls.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "转发成功后应唤醒 UI");
     }
 }
