@@ -3307,9 +3307,10 @@ struct ActiveTableFocus {
     cell_start_char: usize,
 }
 
-/// 活动表格:单元格原样编辑。逐行渲染 —— 表头行文字加色、数据行普通、
-/// 分隔行画一条横线(不可编辑);每个单元格一个单行 TextEdit,列宽取该列
-/// 最宽单元格的 galley 宽(与 vendored 表格同口径:按文本测量)。
+/// 活动表格:单元格原样编辑。渲染与浏览态同源 —— 同一条 vendored
+/// `render_table_with_options`,每个单元格替换为无框单行 TextEdit;
+/// 列宽/行高/内距全按浏览态测量,`min_width` 恒 0:进入编辑不撑满
+/// 整行、不撑高行,视觉上就是原地编辑(坤哥 2026-10-23 反馈)。
 ///
 /// `pending_caret` 落地:块内字符偏移映射到所在单元格,焦点与光标一并
 /// 写入(点击富渲染表格进编辑的落点通道不变)。返回聚焦单元格的产出供
@@ -3336,7 +3337,6 @@ fn draw_active_table(
     let style = egui_markdown_style::global_style(ui.ctx());
     let font_size = crate::theme::editor_font_size(ui.ctx());
     let font = egui::FontId::new(font_size, crate::fonts::preview_body_family(ui.ctx()));
-    let min_width = ui.available_width().max(0.0);
     let logical_rows: Vec<&ActiveTableRow> = rows.iter().filter(|row| !row.separator).collect();
     let mut land = None;
     if let Some((block, char_idx)) = live.pending_caret.take() {
@@ -3427,7 +3427,9 @@ fn draw_active_table(
         };
     let mut options = egui_markdown::table::TableRenderOptions {
         cell_renderer: Some(&mut cell_renderer),
-        min_width,
+        // 原地编辑:列宽只按内容测量,不借 min_width 撑满整行 ——
+        // 一旦撑满,点击编辑的瞬间整表突然变宽(坤哥截图反馈)。
+        min_width: 0.0,
     };
     let _geometry = egui_markdown::table::render_table_with_options(
         ui,
@@ -3454,7 +3456,11 @@ enum TableAction {
 }
 
 /// 表格悬停工具条：仅当指针位于表格块或工具条自身时显示，且不占布局高度。
-/// 加行/加列/删除由调用方在块文本借用结束后执行；复制直接写入剪贴板。
+/// 钉在表格左上角内侧(坤哥 2026-10-23 反馈):浮在上缘外会跟上一块抢
+/// 间距 —— 块间隙只有十来像素,盖不住 20px 的条,必然压住上一块的收尾;
+/// 盖住表头左端,换「上方的块纹丝不动」。极窄表允许条右缘略出表,悬空
+/// 在留白上不遮内容。加行/加列/删除由调用方在块文本借用结束后执行；
+/// 复制直接写入剪贴板。
 fn draw_table_toolbar(
     ui: &mut egui::Ui,
     block_text: &str,
@@ -3470,14 +3476,9 @@ fn draw_table_toolbar(
     let count = 4.0_f32;
     let gap = 2.0;
     let total_w = count * size.x + (count - 1.0) * gap;
-    let clip = ui.clip_rect();
-    // 默认浮在块上缘外;块贴视口顶时钳进视口内(盖住表头也比点不到强)
-    let mut top = block_rect.top() - size.y - 2.0;
-    if top < clip.top() {
-        top = block_rect.top() + 2.0;
-    }
+    // 内缩 3px:外框 expand(3.0) 后与表格左上角齐平
     let bar_rect = egui::Rect::from_min_size(
-        egui::pos2(block_rect.right() - total_w, top),
+        egui::pos2(block_rect.left() + 3.0, block_rect.top() + 3.0),
         egui::vec2(total_w, size.y),
     );
     let bar_hover = ui.rect_contains_pointer(block_rect) || ui.rect_contains_pointer(bar_rect);
@@ -5442,6 +5443,69 @@ mod tests {
             frame.toolbar_rects
         );
         assert!(frame.toolbar_rects[3].right() > frame.toolbar_rects[0].left());
+        // 钉在表格左上角:条起点不越过首个表头文字的左/上(取「a」
+        // 的墨迹矩形当表头左上参照),不得再飘到右上缘外。
+        assert!(
+            frame.toolbar_rects[0].left() <= table_rect.left(),
+            "工具条应起于表格左端:{:?} vs {:?}",
+            frame.toolbar_rects[0],
+            table_rect
+        );
+        assert!(
+            frame.toolbar_rects[0].top() <= table_rect.top() + 2.0,
+            "工具条应贴表格上缘:{:?} vs {:?}",
+            frame.toolbar_rects[0],
+            table_rect
+        );
+    }
+
+    /// 原地编辑:进入活动态后单元格墨迹位置与浏览态逐像素同位 ——
+    /// 列宽只按内容测量(min_width=0),不因编辑撑满整行、不因编辑
+    /// 撑高行(坤哥 2026-10-23 截图反馈)。
+    #[test]
+    fn active_table_keeps_browse_geometry() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("标题\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n正文\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let browse = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.trim() == "2")
+            .expect("浏览态渲染 2")
+            .1;
+        live.active = Some(1);
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let editing = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.trim() == "2")
+            .expect("编辑态仍渲染 2")
+            .1;
+        assert!(
+            (editing.left() - browse.left()).abs() < 2.0,
+            "列位置漂移(编辑态撑宽?):浏览 {browse:?} vs 编辑 {editing:?}"
+        );
+        assert!(
+            (editing.top() - browse.top()).abs() < 2.0,
+            "行位置漂移(编辑态撑高?):浏览 {browse:?} vs 编辑 {editing:?}"
+        );
     }
 
     /// 悬停工具条的加行按钮可用，且不会把表格切入源码编辑态。
