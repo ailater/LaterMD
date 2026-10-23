@@ -781,6 +781,35 @@ fn active_block_job(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::L
         job.break_on_newline = true;
         let mut mono = egui::TextFormat::simple(mono_font, text_color);
         mono.line_height = Some(body_lh);
+        // 围栏代码的活动态「原样」(#310 需求):代码框感 —— 首尾围栏行
+        // 淡成弱色(结构标记退后,内容仍是编辑主体);外框由 TextEdit 的
+        // frame 侧补(见活动臂 code_frame)。缩进代码/表格/分隔线维持整块
+        // 单色等宽。
+        if let Some((marker, open_len)) = fence_open(first_line) {
+            let content = text.trim_end_matches('\n');
+            if let Some(last_start) = content.rfind('\n').map(|at| at + 1) {
+                if is_fence_close(&text[last_start..], marker, open_len) {
+                    let weak = egui::Color32::from_rgba_unmultiplied(
+                        text_color.r(),
+                        text_color.g(),
+                        text_color.b(),
+                        110,
+                    );
+                    let mut fence_fmt = mono.clone();
+                    fence_fmt.color = weak;
+                    let open_end = first_line_end
+                        + usize::from(text.as_bytes().get(first_line_end) == Some(&b'\n'));
+                    // section 必须按字节序推送(epaint 有序性校验硬门槛)
+                    job.sections.push(section(0..open_end, fence_fmt.clone()));
+                    if last_start > open_end {
+                        job.sections.push(section(open_end..last_start, mono));
+                    }
+                    job.sections
+                        .push(section(last_start..text.len(), fence_fmt));
+                    return job;
+                }
+            }
+        }
         job.sections.push(section(0..text.len(), mono));
         return job;
     }
@@ -1538,7 +1567,15 @@ fn predict_source_layout(ui: &egui::Ui, text: &str, caret_char: usize) -> (f32, 
         crate::theme::editor_font_size(ui.ctx()),
     );
     // 内距已全零(LP2-6):外框高 = galley 高,光标行顶 = galley 行顶。
-    (galley.size().y.max(floor), caret_row.min.y)
+    // 例外:围栏代码的活动态带代码框(#310「原样编辑」,与活动臂的 frame
+    // 同常数)—— 高度加框,光标行顶加竖直内距。
+    let fenced = fence_open(text.lines().next().unwrap_or("")).is_some();
+    let (pad_v,) = (6.0_f32,);
+    let extra_h = if fenced { 2.0 * pad_v } else { 0.0 };
+    (
+        galley.size().y.max(floor) + extra_h,
+        caret_row.min.y + if fenced { pad_v } else { 0.0 },
+    )
 }
 
 /// 块内「可见内容末尾」的块内字符偏移：块源码尾部的换行（含块间空行
@@ -1957,7 +1994,44 @@ pub fn ui(
                         // 文本借用 —— buffer 要独占 editor,菜单闭包也要可变
                         // 借用 editor 做级别转换)
                         let kind = block_kind(block_text);
+                        // 围栏代码活动态的代码框感判定提前(此处 block_text
+                        // 借用尚未让位给 BlockBuffer 的 &mut editor)
+                        let code_frame = closeable_fence(block_text);
                         let first_line = block_text.lines().next().unwrap_or("");
+                        // 表格活动态:单元格原样编辑(#310 需求)—— 不塌成
+                        // 整块源码 TextEdit,单元格各自成单行编辑器,改动经
+                        // CellBuffer 直接落回共享缓冲。表头/数据行照表格形态,
+                        // 分隔行自动维护不可编辑。徽标/内联标记淡显/打字机是
+                        // 文本块特性,表格不走;此处 block_text 借用尚在,
+                        // 行宽/单元格几何都在函数内现测。
+                        if kind == BlockKind::Widget && table_rows(block_text).is_some() {
+                            // 表格文本用 owned 副本:block_text 借着 editor,
+                            // 单元格编辑要 &mut —— 借用让位在拷贝之后完成
+                            let owned = block_text.to_owned();
+                            let block_start = live.blocks[index].start;
+                            if let Some(focused) = draw_active_table(
+                                ui,
+                                editor,
+                                live,
+                                index,
+                                &owned,
+                                block_start,
+                                editor_id,
+                                keymap,
+                                outbox,
+                            ) {
+                                active_response = Some(focused.output.response.response.clone());
+                                crate::ui::editor_menu::attach(ui, &focused.output, keymap, true, outbox);
+                                // 光标回填(大纲/状态栏):聚焦单元格内光标的文档字节
+                                cursor.byte = focused
+                                    .output
+                                    .state
+                                    .cursor
+                                    .char_range()
+                                    .map(|r| editor.char_to_byte(focused.cell_start_char + r.primary.index.0));
+                            }
+                            continue;
+                        }
                         let plain_cycle = badge.is_none()
                             && kind == BlockKind::Text
                             && list_prefix(first_line).is_none();
@@ -2022,8 +2096,34 @@ pub fn ui(
                         // 与富渲染绝对同 x」;垂直归零是 LP2-6 的「点击进标题
                         // 不再下坠」:文档顶部滚动被钳位、锚定补偿修不掉,
                         // 原上下各 2px 让块切源码整体下坠 4px(用户实测)。
-                        // 光标/选区/IME 通路不变
-                        let edit = edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::ZERO));
+                        // 光标/选区/IME 通路不变。
+                        // 例外是围栏代码(#310「原样编辑」):活动态保留代码框
+                        // 感 —— 代码底 + 描边 + 圆角 + 内距,与富渲染的代码框
+                        // 同源(围栏行已淡显,见 [`active_block_job`]);锚定的
+                        // 高差由 frame 内距同步进 [`predict_source_layout`]。
+                        let code_pad_h = 10.0_f32;
+                        let code_pad_v = 6.0_f32;
+                        let edit = if code_frame {
+                            edit.frame(
+                                egui::Frame::NONE
+                                    .fill(ui.visuals().code_bg_color)
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                                    ))
+                                    .corner_radius(egui::CornerRadius::same(
+                                        crate::ui::tokens::RADIUS_SM as u8,
+                                    ))
+                                    .inner_margin(egui::Margin {
+                                        left: code_pad_h as i8,
+                                        right: code_pad_h as i8,
+                                        top: code_pad_v as i8,
+                                        bottom: code_pad_v as i8,
+                                    }),
+                            )
+                        } else {
+                            edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::ZERO))
+                        };
                         // 行距同源(#157):TextEdit 行盒高 = 等宽行高 + 本间距,
                         // 拨到与预览正文行盒(`body_line_height`)等高 —— 配合
                         // 幻影行裁剪,普通段落切形态**逐行等高**,高度零变化。
@@ -3056,6 +3156,264 @@ fn apply_pending_block_action(
     }
 }
 
+// ---------------------------------------------------------------- 表格活动态:单元格原样编辑
+//
+// (#310 需求,2026-10-23)活动表格不再塌成整块源码 TextEdit,而是渲染成
+// 仍在表格形态的单元格编辑器:每个单元格一个单行 TextEdit,改动经
+// [`CellBuffer`] 直接落回共享缓冲(与 [`BlockBuffer`] 同一通道,TextEdit
+// 内建 undo 单步可退)。分隔行自动维护、不可编辑;行列增删走 titlebar。
+
+/// 活动表格的一行。`cells` 的 `src` 是**块内字节区间**(管道之间的原始
+/// 单元格文本,含空白);分隔行无单元格。
+struct ActiveTableRow {
+    header: bool,
+    separator: bool,
+    cells: Vec<(String, Range<usize>)>,
+}
+
+/// 把表格块解析成行/单元格(带块内字节区间)。要求管道表格的规整形态
+/// (每行 ≥2 根管道);不合规格返回 None,活动态回落整块源码 TextEdit。
+fn table_rows(block: &str) -> Option<Vec<ActiveTableRow>> {
+    let content = block.trim_end_matches('\n');
+    if content.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('|') {
+            return None;
+        }
+        let separator = i == 1 && trimmed.trim_matches('|').contains('-');
+        if separator {
+            rows.push(ActiveTableRow {
+                header: false,
+                separator: true,
+                cells: Vec::new(),
+            });
+            continue;
+        }
+        let pipes: Vec<usize> = line
+            .char_indices()
+            .filter(|(_, c)| *c == '|')
+            .map(|(b, _)| b)
+            .collect();
+        if pipes.len() < 2 {
+            return None;
+        }
+        let cells = pipes
+            .windows(2)
+            .map(|w| {
+                let raw = &line[w[0] + 1..w[1]];
+                (raw.trim().to_owned(), w[0] + 1..w[1])
+            })
+            .collect();
+        rows.push(ActiveTableRow {
+            header: i == 0,
+            separator: false,
+            cells,
+        });
+    }
+    (rows.len() >= 2).then_some(rows)
+}
+
+/// 单元格的编辑代理:把共享缓冲的**一个单元格**暴露成 egui `TextBuffer`。
+/// 与 [`BlockBuffer`] 同一落盘通道;偏移全程用字符(单元格起点换算成文档
+/// 字符位后,单元格内偏移直接相加)。`len_chars` 随编辑自维护 —— 同一帧
+/// 内只有聚焦单元格会产生编辑,区间自洽。
+struct CellBuffer<'a> {
+    buffer: &'a mut EditorBuffer,
+    /// 单元格起点的文档字符偏移。
+    start_char: usize,
+    len_chars: usize,
+}
+
+impl egui::TextBuffer for CellBuffer<'_> {
+    fn is_mutable(&self) -> bool {
+        true
+    }
+
+    fn as_str(&self) -> &str {
+        let text = self.buffer.text();
+        let start = self.buffer.char_to_byte(self.start_char);
+        let end = self.buffer.char_to_byte(self.start_char + self.len_chars);
+        &text[start..end]
+    }
+
+    fn insert_text(&mut self, text: &str, char_index: egui::text::CharIndex) -> usize {
+        let at = self.start_char + char_index.0;
+        self.buffer.insert_chars(at, text);
+        self.len_chars += text.chars().count();
+        text.chars().count()
+    }
+
+    fn delete_char_range(&mut self, char_range: Range<egui::text::CharIndex>) {
+        let start = self.start_char + char_range.start.0;
+        self.buffer
+            .remove_chars(start..self.start_char + char_range.end.0);
+        self.len_chars -= char_range.end.0 - char_range.start.0;
+    }
+
+    fn type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<CellBuffer<'static>>()
+    }
+}
+
+/// 活动表格的渲染产出:聚焦单元格的 TextEdit 输出(右键菜单挂点 +
+/// 光标回填),无聚焦单元格时为 None。
+struct ActiveTableFocus {
+    output: egui::widgets::text_edit::TextEditOutput,
+    /// 聚焦单元格起点的文档字符偏移(块内光标 → 文档光标的换算基)。
+    cell_start_char: usize,
+}
+
+/// 活动表格:单元格原样编辑。逐行渲染 —— 表头行文字加色、数据行普通、
+/// 分隔行画一条横线(不可编辑);每个单元格一个单行 TextEdit,列宽取该列
+/// 最宽单元格的 galley 宽(与 vendored 表格同口径:按文本测量)。
+///
+/// `pending_caret` 落地:块内字符偏移映射到所在单元格,焦点与光标一并
+/// 写入(点击富渲染表格进编辑的落点通道不变)。返回聚焦单元格的产出供
+/// 右键菜单与光标回填;没有单元格持焦时返回 None。
+#[allow(clippy::too_many_arguments)]
+fn draw_active_table(
+    ui: &mut egui::Ui,
+    editor: &mut EditorBuffer,
+    live: &mut LiveState,
+    index: usize,
+    block_text: &str,
+    block_start_byte: usize,
+    editor_id: egui::Id,
+    keymap: &crate::keymap::Keymap,
+    outbox: &mut Vec<Message>,
+) -> Option<ActiveTableFocus> {
+    let _ = keymap;
+    let _ = outbox;
+    let rows = table_rows(block_text)?;
+    let font_size = crate::theme::editor_font_size(ui.ctx());
+    let body_family = crate::fonts::preview_body_family(ui.ctx());
+    let font = egui::FontId::new(font_size, body_family.clone());
+    let style = egui_markdown_style::global_style(ui.ctx());
+    let pad = &style.table.cell_padding;
+    let cell_pad_x = pad[0] + pad[2];
+    let grid_stroke = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+
+    // 列宽:该列最宽单元格 galley + 单元格内距,钳最小可点宽
+    let col_count = rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
+    let mut col_w = vec![48.0_f32; col_count];
+    for row in &rows {
+        for (c, (text, _)) in row.cells.iter().enumerate() {
+            let galley =
+                ui.painter()
+                    .layout_no_wrap(text.clone(), font.clone(), egui::Color32::WHITE);
+            col_w[c] = col_w[c].max(galley.size().x + cell_pad_x + 4.0);
+        }
+    }
+
+    // pending_caret 落点 → (行, 列, 单元格内字符):块内字符偏移逐行消耗
+    // (行字符数 = 行文本字符 + 1 个换行),再在行内按单元格字符宽找列。
+    let mut land: Option<(usize, usize, usize)> = None;
+    if let Some((block, char_idx)) = live.pending_caret {
+        if block == index {
+            let mut remain = char_idx;
+            for (r, row) in rows.iter().enumerate() {
+                let line = block_text.lines().nth(r).unwrap_or("");
+                let line_chars = line.chars().count() + 1;
+                if remain <= line_chars {
+                    let mut in_cell = remain;
+                    for (c, (_, src)) in row.cells.iter().enumerate() {
+                        let cell_chars = block_text[src.clone()].chars().count();
+                        if in_cell <= cell_chars {
+                            land = Some((r, c, in_cell));
+                            break;
+                        }
+                        in_cell -= cell_chars;
+                    }
+                    // 落点在管道/行内空白上(不属于任何单元格):钳到本行
+                    // 最后一个单元格的末尾,焦点不落空
+                    if land.is_none() {
+                        if let Some((_, src)) = row.cells.last() {
+                            let last = block_text[src.clone()].chars().count();
+                            land = Some((r, row.cells.len() - 1, last));
+                        }
+                    }
+                    break;
+                }
+                remain -= line_chars;
+            }
+            live.pending_caret = None;
+            live.caret_follow = false;
+        }
+    }
+
+    let block_start_char = editor.byte_to_char(block_start_byte);
+    let mut focus: Option<ActiveTableFocus> = None;
+    for (r, row) in rows.iter().enumerate() {
+        if row.separator {
+            // 分隔行:横线占位(不可编辑,列数变化时自动重排)
+            let total: f32 = col_w.iter().sum();
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(total, 6.0), egui::Sense::hover());
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left(), rect.center().y),
+                    egui::pos2(rect.right(), rect.center().y),
+                ],
+                egui::Stroke::new(1.5, grid_stroke.color),
+            );
+            continue;
+        }
+        for (c, (_, src)) in row.cells.iter().enumerate() {
+            let cell_id = editor_id.with(("live-tcell", index, r, c));
+            let cell_start_char = block_start_char + block_text[..src.start].chars().count();
+            let len_chars = block_text[src.clone()].chars().count();
+            let mut buffer = CellBuffer {
+                buffer: editor,
+                start_char: cell_start_char,
+                len_chars,
+            };
+            let mut cell = egui::TextEdit::singleline(&mut buffer)
+                .id(cell_id)
+                .font(egui::FontId::new(font_size, body_family.clone()))
+                .desired_width(col_w[c])
+                // 与活动块同款:编辑中不被普通控件收回焦点
+                .lock_focus(true);
+            if row.header {
+                cell = cell.text_color(ui.visuals().strong_text_color());
+            }
+            let output = cell.show(ui);
+            // 单元格右缘竖线,拼出网格感
+            let rect = output.response.response.rect;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.right(), rect.top()),
+                    egui::pos2(rect.right(), rect.bottom()),
+                ],
+                grid_stroke,
+            );
+            // pending_caret 落地:写光标 + 抢焦点(与活动块 TextEdit 同口径)
+            if let Some((lr, lc, lchar)) = land {
+                if (lr, lc) == (r, c) {
+                    let mut state = output.state.clone();
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(lchar),
+                        )));
+                    state.store(ui.ctx(), cell_id);
+                    ui.ctx().memory_mut(|mem| mem.request_focus(cell_id));
+                }
+            }
+            let focused = ui.ctx().memory(|mem| mem.has_focus(cell_id));
+            if focused {
+                focus = Some(ActiveTableFocus {
+                    output,
+                    cell_start_char,
+                });
+            }
+        }
+    }
+    focus
+}
+
 /// 表格 titlebar 的高度:与代码块头部同档(vendored
 /// `CODE_BLOCK_HEADER_HEIGHT` = 24)。「常驻 titlebar」形态的高度要进估高
 /// 臂的占位(`table_titlebar_h`),两处同源,别只改一处。
@@ -3102,10 +3460,23 @@ fn draw_table_titlebar(ui: &mut egui::Ui, block_text: &str) -> TableAction {
     let count = 4.0_f32;
     let gap = 2.0;
     let pad = 4.0_f32;
-    let bar_rect = egui::Rect::from_min_size(
-        ui.cursor().min,
-        egui::vec2(ui.available_width(), TABLE_TITLEBAR_H),
+    // 宽度跟表格实际宽:取块内最宽行的 galley 宽(vendored 表格列宽同样是
+    // 按单元格文本测量),加左右内距 —— 不铺满整行,窄表格的 titlebar 贴
+    // 着表格右缘。下限 = 图标带 + 标签的最小可读宽,上限 = 可用宽。
+    let font = egui::FontId::new(
+        crate::theme::editor_font_size(ui.ctx()),
+        crate::fonts::preview_body_family(ui.ctx()),
     );
+    let mut measured = 0.0_f32;
+    for line in block_text.trim_end_matches('\n').lines() {
+        let galley =
+            ui.painter()
+                .layout_no_wrap(line.to_owned(), font.clone(), egui::Color32::WHITE);
+        measured = measured.max(galley.size().x);
+    }
+    let min_w = count * size.x + (count - 1.0) * gap + 60.0;
+    let bar_w = measured.clamp(min_w, (ui.available_width() - pad).max(min_w)) + 2.0 * pad;
+    let bar_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bar_w, TABLE_TITLEBAR_H));
     // 占位推进游标:hover 感知即可 —— 空白处的点击让给「整块点击进编辑」
     let _ = ui.allocate_rect(bar_rect, egui::Sense::hover());
 
@@ -4939,6 +5310,127 @@ mod tests {
         // 这里直驱分派函数)
         apply_pending_block_action(&mut editor, &mut live, PendingBlockAction::CodeClose(2));
         assert_eq!(editor.text(), "# 标题\n\n正文段落。\n\nfn a(){}\n");
+    }
+
+    /// 表格行解析:单元格文本(trim 后)与块内字节区间;分隔行无单元格。
+    #[test]
+    fn table_rows_parses_cell_ranges() {
+        let rows = table_rows("| a | b |\n| --- | --- |\n| 1 | 2 |").unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].header);
+        assert_eq!(rows[0].cells[0].0, "a");
+        assert_eq!(rows[0].cells[1].0, "b");
+        assert_eq!(rows[0].cells[1].1, 5..8, "单元格区间 = 管道之间的原始文本");
+        assert!(rows[1].separator);
+        assert_eq!(rows[2].cells[0].0, "1");
+    }
+
+    /// 活动表格:pending_caret 落进单元格 → 聚焦该单元格 → 键入直接
+    /// splice 进共享缓冲的对应单元格(原样编辑,不塌成整块源码)。
+    #[test]
+    fn active_table_cell_edit_splices_source() {
+        let ctx = egui::Context::default();
+        let mut editor =
+            EditorBuffer::new("# 标题\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n正文\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(1),
+            ..LiveState::default()
+        };
+        // 落点 = 表头行 " b " 单元格内末尾(块内字符偏移 6 是 'b')
+        live.pending_caret = Some((1, 6));
+
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(frame.toolbar_rects.is_empty(), "活动表格不出 titlebar");
+        assert_eq!(live.pending_caret, None, "落点已消费");
+
+        // 聚焦单元格键入:splice 进 " b " 单元格,其余行列原样
+        live_frame(
+            &ctx,
+            vec![egui::Event::Text("X".to_owned())],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        // 原文 " b " 末尾插入 X → " b X"(尾随空格保留在 X 前)
+        assert!(
+            editor.text().contains("| a | b X|"),
+            "键入落进 b 单元格:{:?}",
+            editor.text()
+        );
+        assert!(
+            editor.text().contains("| 1 | 2 |"),
+            "其他行列不受影响:{:?}",
+            editor.text()
+        );
+        assert_eq!(live.active, Some(1), "编辑中块保持活动");
+    }
+
+    /// 活动表格回到富渲染:焦点离开后单元格文本如实渲染(编辑生效)。
+    #[test]
+    fn table_rows_roundtrip_after_cell_edit() {
+        let rows = table_rows("| a | b X |\n| --- | --- |").unwrap();
+        assert_eq!(rows[0].cells[1].0, "b X");
+    }
+
+    /// titlebar 宽度跟表格实际宽:宽屏下四枚图标贴在表格宽度附近,
+    /// 不铺满整行(悬浮/铺满两种旧形态的回归守门)。表格逐单元格出
+    /// 文本形状,拿不到整表矩形 —— 参照系用显式宽屏:旧形态的图标
+    /// 会贴到视口右缘(~1100+),新形态贴表格实测宽(窄表 ~200 内)。
+    #[test]
+    fn table_titlebar_width_follows_table() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("标题\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n正文\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let mut outbox = Vec::new();
+        let mut selection = None;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |panel| {
+                super::ui(
+                    panel,
+                    &mut editor,
+                    &mut preview,
+                    &AiState::default(),
+                    &mut cursor,
+                    &mut selection,
+                    &mut live,
+                    egui::Id::new("live-titlebar-width"),
+                    false,
+                    false,
+                    true,
+                    None,
+                    false,
+                    false,
+                    &crate::keymap::Keymap::builtin(),
+                    &mut outbox,
+                );
+            },
+        );
+        output.drop_without_applying_deltas();
+        // 帧号已前进,按「最后写入者即本帧」取原始探针
+        let rects = crate::ui::rich_widgets::table_toolbar_probe(&ctx);
+        assert_eq!(rects.len(), 4, "四枚图标:{rects:?}");
+        let icons_right = rects[3].right();
+        assert!(
+            icons_right < 400.0,
+            "titlebar 贴表格实测宽,不铺满 1200 宽视口:{icons_right}"
+        );
     }
 
     /// 表格 titlebar(常驻,代码块头部同款):静帧即在场,四枚图标贴右;
