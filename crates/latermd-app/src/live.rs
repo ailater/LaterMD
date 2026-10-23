@@ -3392,10 +3392,10 @@ fn draw_active_table(
                 .font(font.clone())
                 .desired_width(rect.width())
                 .frame(egui::Frame::NONE)
-                .margin(egui::Margin::symmetric(
-                    style.table.cell_padding[0] as i8,
-                    style.table.cell_padding[1] as i8,
-                ))
+                // TableBuilder 已经提供 cell padding；编辑器只填充
+                // callback 的 content rect，不能再叠一层 margin，否则
+                // 点击编辑会把空行/新增行额外撑高。
+                .margin(egui::Margin::ZERO)
                 .lock_focus(true);
             if header {
                 edit = edit.text_color(cell_ui.visuals().strong_text_color());
