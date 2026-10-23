@@ -1877,7 +1877,11 @@ pub fn ui(
                         .defer_offscreen_highlight(true)
                         .link_handler(&rich_handler)
                         .estimated_height(ui);
-                        let estimate = estimate.max(1.0);
+                        // 表格 titlebar 的 24px 不在 vendored 估高器认知里,
+                        // 手工补上 —— 占位与实测同源,滚动锚定不漂
+                        // (闸门与真实渲染臂的 [`table_titlebar_h`] 一致)。
+                        let estimate = estimate.max(1.0)
+                            + table_titlebar_h(kind, block_text, live, index);
                         // TextEdit 内距已全零(LP2-6):真实渲染块的框高 ==
                         // galley 高,占位即估高,与实测的差值只剩估高误差本身。
                         let placeholder = estimate;
@@ -2537,6 +2541,21 @@ pub fn ui(
                         // 富渲染。区域用渲染前后的 cursor 差值框出来;「点击进
                         // 编辑」的命中不走 egui widget,理由见 [`clicked_for_edit`]。
                         let top = ui.cursor().top();
+                        // 表格 titlebar(2026-10-23,常驻,代码块头部同款 24px):
+                        // 直接贴在表格上缘,左「表格」标签、右四枚操作图标。
+                        // 悬浮条形态被否(坤哥:飘在整列最右缘太远,要 titlebar
+                        // 的感觉)。改写动作不在此刻执行:`block_text` 还借着
+                        // editor(下方点击落点还要用),动作在块循环里借用结束
+                        // 后落地。
+                        let table_action = if kind == BlockKind::Widget
+                            && block_text.trim_start().starts_with('|')
+                            && !live.browse_locked
+                            && live.active != Some(index)
+                        {
+                            draw_table_titlebar(ui, block_text)
+                        } else {
+                            TableAction::None
+                        };
                         // 链接改写(#63 checkbox + #65 高亮):块文本先过改写层
                         // (缓存键是源码指纹 + 块序号,稳态帧零解析),`task://`
                         // 链接由本块专属 handler 画成自绘 checkbox、`hl://` 画
@@ -2650,22 +2669,6 @@ pub fn ui(
                             egui::pos2(ui.min_rect().left(), top),
                             egui::pos2(ui.min_rect().right(), bottom.max(top + 1.0)),
                         );
-                        // 表格工具条(2026-10-23):悬停表格块时在上缘外浮出
-                        // 「加行 / 加列 / 复制 / 删除」。加行加列直接改写
-                        // (加法无破坏性,单步 undo 可退),删除走确认弹窗;
-                        // 活动块(源码态)与对照列不出 —— 前者直接编辑源码,
-                        // 后者只读。改写动作不在此刻执行:`block_text` 还借着
-                        // editor(下方点击落点还要用),动作带回循环里在借用
-                        // 结束后落地。
-                        let table_action = if kind == BlockKind::Widget
-                            && block_text.trim_start().starts_with('|')
-                            && !live.browse_locked
-                            && live.active != Some(index)
-                        {
-                            draw_table_toolbar(ui, block_text, live, index, rect)
-                        } else {
-                            TableAction::None
-                        };
                         // 真实渲染块的实测高(#111 B 估高剔除的记账半边):下一帧
                         // 本块若滚出视口被估高占位替换,占位与实测的差值按它
                         // 补偿滚动偏移(见循环头剔除臂的 `estimate_drift`)。
@@ -3053,6 +3056,25 @@ fn apply_pending_block_action(
     }
 }
 
+/// 表格 titlebar 的高度:与代码块头部同档(vendored
+/// `CODE_BLOCK_HEADER_HEIGHT` = 24)。「常驻 titlebar」形态的高度要进估高
+/// 臂的占位(`table_titlebar_h`),两处同源,别只改一处。
+const TABLE_TITLEBAR_H: f32 = 24.0;
+
+/// 表格 titlebar 的占位高度:表格块且可写列(与真实渲染臂同一闸门)才有。
+/// 估高臂给视口外表格块补这 24px,否则占位永远比实测矮一截。
+fn table_titlebar_h(kind: BlockKind, block_text: &str, live: &LiveState, index: usize) -> f32 {
+    if kind == BlockKind::Widget
+        && block_text.trim_start().starts_with('|')
+        && !live.browse_locked
+        && live.active != Some(index)
+    {
+        TABLE_TITLEBAR_H
+    } else {
+        0.0
+    }
+}
+
 /// 表格工具条本帧的用户意图。绘制时收集,绘制返回后(块文本的借用
 /// 结束处)才执行改写。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3063,53 +3085,52 @@ enum TableAction {
     Delete,
 }
 
-/// 表格悬停工具条(2026-10-23):浮在表格块上缘之外的图标条 —— 加行 /
-/// 加列 / 复制 / 删除。复制就地走剪贴板(块文本已在手上);加行/加列/
-/// 删除作为动作返回,由调用方在借用结束后执行。rects 整条记录进工具条
-/// 探针,「点击进编辑」据此排除。工具条只在指针悬停块或工具条自身时
-/// 出现;不出现时不占交互(空帧零 rect)。
-fn draw_table_toolbar(
-    ui: &mut egui::Ui,
-    block_text: &str,
-    live: &LiveState,
-    index: usize,
-    block_rect: egui::Rect,
-) -> TableAction {
-    let _ = (live, index);
+/// 表格 titlebar(2026-10-23,常驻,代码块头部同款):在表格上缘分配
+/// [`TABLE_TITLEBAR_H`] 高的横条,左端「表格」标签、右端四枚操作图标
+/// (加行 / 加列 / 复制 / 删除)。复制就地走剪贴板(块文本已在手上);
+/// 加行/加列/删除作为动作返回,由调用方在借用结束后执行。图标 rect 记进
+/// 工具条探针,「点击进编辑」据此排除;titlebar 空白处的点击仍归
+/// 「整块点击进编辑」。
+///
+/// 悬浮条形态被否(坤哥:飘在整列最右缘太远,要 titlebar 的感觉);
+/// 常驻条直接参与布局,估高臂按 [`table_titlebar_h`] 补占位,滚动无跳变。
+fn draw_table_titlebar(ui: &mut egui::Ui, block_text: &str) -> TableAction {
     let size = egui::vec2(
         crate::ui::tokens::ICON + 2.0 * crate::ui::tokens::SPACE_XS,
         20.0,
     );
     let count = 4.0_f32;
     let gap = 2.0;
-    let total_w = count * size.x + (count - 1.0) * gap;
-    let clip = ui.clip_rect();
-    // 默认浮在块上缘外;块贴视口顶时钳进视口内(盖住表头也比点不到强)
-    let mut top = block_rect.top() - size.y - 2.0;
-    if top < clip.top() {
-        top = block_rect.top() + 2.0;
-    }
+    let pad = 4.0_f32;
     let bar_rect = egui::Rect::from_min_size(
-        egui::pos2(block_rect.right() - total_w, top),
-        egui::vec2(total_w, size.y),
+        ui.cursor().min,
+        egui::vec2(ui.available_width(), TABLE_TITLEBAR_H),
     );
-    let bar_hover = ui.rect_contains_pointer(block_rect) || ui.rect_contains_pointer(bar_rect);
-    if !bar_hover {
-        crate::ui::rich_widgets::push_table_toolbar_rects(ui.ctx(), Vec::new());
-        return TableAction::None;
-    }
-    let mut hit_rects = Vec::new();
-    let bar_frame = bar_rect.expand(3.0);
-    ui.painter().rect_filled(
-        bar_frame,
-        crate::ui::tokens::RADIUS_SM,
-        ui.visuals().extreme_bg_color,
-    );
-    ui.painter().rect_stroke(
-        bar_frame,
-        crate::ui::tokens::RADIUS_SM,
+    // 占位推进游标:hover 感知即可 —— 空白处的点击让给「整块点击进编辑」
+    let _ = ui.allocate_rect(bar_rect, egui::Sense::hover());
+
+    // 底:淡填充 + 描边,顶部圆角、底部直角 —— 视觉上与下方表格一体
+    let painter = ui.painter();
+    let radius = egui::CornerRadius {
+        nw: crate::ui::tokens::RADIUS_SM as u8,
+        ne: crate::ui::tokens::RADIUS_SM as u8,
+        sw: 0,
+        se: 0,
+    };
+    painter.rect_filled(bar_rect, radius, ui.visuals().extreme_bg_color);
+    painter.rect_stroke(
+        bar_rect,
+        radius,
         egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
         egui::StrokeKind::Inside,
+    );
+    // 左端「表格」标签(弱色小字,标题位)
+    painter.text(
+        egui::pos2(bar_rect.left() + pad + 2.0, bar_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "表格",
+        egui::FontId::proportional(12.0),
+        ui.visuals().weak_text_color(),
     );
     let actions = [
         (
@@ -3134,9 +3155,15 @@ fn draw_table_toolbar(
         ),
     ];
     let mut action = TableAction::None;
-    let mut cursor_x = bar_rect.left();
+    let mut hit_rects = Vec::new();
+    // 图标贴右缘排布:从右往左逐枚推进
+    let icons_w = count * size.x + (count - 1.0) * gap;
+    let mut cursor_x = bar_rect.right() - pad - icons_w;
     for (icon, tip, effect) in actions {
-        let rect = egui::Rect::from_min_size(egui::pos2(cursor_x, bar_rect.top()), size);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(cursor_x, bar_rect.center().y - size.y * 0.5),
+            size,
+        );
         cursor_x += size.x + gap;
         let response = ui.allocate_rect(rect, egui::Sense::click());
         let (fill, color) = if response.hovered() {
@@ -4914,40 +4941,20 @@ mod tests {
         assert_eq!(editor.text(), "# 标题\n\n正文段落。\n\nfn a(){}\n");
     }
 
-    /// 表格工具条:悬停才出现;点「加行」落一行;工具条点击不切入编辑。
+    /// 表格 titlebar(常驻,代码块头部同款):静帧即在场,四枚图标贴右;
+    /// 点「加行」落一行;titlebar 图标点击不切入编辑。
     #[test]
-    fn live_table_toolbar_hover_shows_and_add_row_works() {
+    fn live_table_titlebar_shows_and_add_row_works() {
         let ctx = egui::Context::default();
         let mut editor = EditorBuffer::new("标题\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n正文\n");
         let mut preview = PreviewState::new(&editor);
         let mut cursor = OutlineCursor::default();
         let mut live = LiveState::default();
 
-        // 静帧(无悬停):工具条不出现
+        // 静帧:titlebar 常驻,四枚图标在场(悬浮条形态被否,改常驻 titlebar)
         let frame = live_frame(
             &ctx,
             Vec::new(),
-            &mut editor,
-            &mut preview,
-            &mut cursor,
-            &mut live,
-        );
-        assert!(
-            frame.toolbar_rects.is_empty(),
-            "未悬停不出工具条:{:?}",
-            frame.toolbar_rects
-        );
-
-        // 悬停表格块:四枚图标出现。悬停点取表格文本 galley 的中心。
-        let (_, table_rect) = frame
-            .texts
-            .iter()
-            .find(|(text, _)| text.contains('a'))
-            .expect("表格已渲染");
-        let hover = egui::Event::PointerMoved(table_rect.center());
-        let frame = live_frame(
-            &ctx,
-            vec![hover],
             &mut editor,
             &mut preview,
             &mut cursor,
@@ -4959,6 +4966,11 @@ mod tests {
             "加行/加列/复制/删除四枚图标:{:?}",
             frame.toolbar_rects
         );
+        // 四枚图标同一行(titlebar 带内),不是浮在远处
+        let bar_top = frame.toolbar_rects[0].top();
+        for rect in &frame.toolbar_rects[1..] {
+            assert!((rect.top() - bar_top).abs() < 1.0, "图标同一行:{rect:?}");
+        }
 
         // 点「加行」(首枚):表格末尾落一行;不切入编辑态。
         let add_row = frame.toolbar_rects[0].center();
