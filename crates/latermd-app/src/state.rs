@@ -415,6 +415,9 @@ pub struct State {
     pub backlinks: crate::backlink_panel::BacklinkState,
     /// AI 流式(MockProvider,P1 联调):provider + 接收端 + 防重入标志。
     pub ai: AiState,
+    /// 后台任务完成时的统一 UI 唤醒器。生产者只拿 clone/普通回调，业务
+    /// 状态仍由本线程在归约阶段收流并修改。
+    pub(crate) repaint: crate::repaint::RepaintNotifier,
     /// AI Provider 凭据设置区(P2「凭据管理」):草稿、三态与凭据操作集,
     /// 读写全部经 latermd-creds 在归约发生。
     pub ai_key: AiKeyState,
@@ -466,8 +469,8 @@ pub struct State {
     /// 查询草稿同款分工),退出禅定时在归约复位(悬停态不跨禅定会话)。
     pub zen_nav: ZenNavState,
     /// 最近一次 AI 生成的 commit message 建议;`Some` = 建议浮窗可见。
-    /// 经 [`Message::AiCommitSuggestion`] 置入,浮窗「关闭」或下一次生成
-    /// 时替换/清除。
+    /// 经 [`Message::AiCommitFinished`] 置入,浮窗「关闭」或下一次生成
+    /// 发起时替换/清除。
     pub ai_commit_suggestion: Option<String>,
     /// 主题(外壳 visuals 与 MarkdownStyle 的唯一事实源);每帧由 `logic`
     /// 投影到 context,切换即时生效。
@@ -583,6 +586,7 @@ impl Default for State {
             search: SearchState::default(),
             backlinks: crate::backlink_panel::BacklinkState::default(),
             ai: AiState::default(),
+            repaint: crate::repaint::RepaintNotifier::default(),
             ai_key: AiKeyState::default(),
             mcp: McpState::default(),
             render_mode: RenderMode::default(),
@@ -941,7 +945,7 @@ pub enum Message {
         href: String,
     },
     /// 发起 AI Mock 流式续写(命令层入口);流式进行中在归约里被忽略
-    /// (防重入,见 [`AiState::start`])。
+    /// (防重入,见 [`AiState::start_with_repaint`])。
     AiStart,
     /// AI 流式的一个增量块,载荷为要追加到文档末尾的原文。后台线程产出,
     /// 每帧由归约侧从 channel 收流翻成本消息(见 `State::poll_ai`)。
@@ -993,9 +997,12 @@ pub enum Message {
     /// 节后在文档末尾以引用块形式流式追加新要点。流式进行中在归约里被
     /// 忽略(防重入,同一道闸)。
     AiSummaryRequested,
-    /// commit message 建议就绪,载荷为单行 subject;置入 state 供浮窗展示。
-    AiCommitSuggestion {
-        subject: String,
+    /// commit message 后台任务完成。序号用于丢弃迟到结果，标签 id 用于把
+    /// 错误写回发起文档而不是用户当前切到的其他标签。
+    AiCommitFinished {
+        seq: u64,
+        tab_id: u64,
+        result: Result<String, String>,
     },
     /// 关闭 commit message 建议浮窗。
     AiCommitDismissed,
@@ -1349,9 +1356,10 @@ impl State {
             Message::SearchReplaceAllCancelled => self.search.confirm_replace = None,
             Message::SearchRequested => self.start_search(),
             Message::BacklinksRequested => {
-                self.backlinks.start(
+                self.backlinks.start_with_repaint(
                     self.file_tree.root.as_deref(),
                     self.tabs.current().document.path.as_deref(),
+                    self.repaint.clone(),
                 );
             }
             Message::SearchResultClicked(path, line_no) => {
@@ -1429,7 +1437,25 @@ impl State {
             }
             Message::TaskCheckboxToggled { byte } => self.toggle_task_checkbox(byte),
             Message::AiSummaryRequested => self.request_summary(),
-            Message::AiCommitSuggestion { subject } => self.ai_commit_suggestion = Some(subject),
+            Message::AiCommitFinished {
+                seq,
+                tab_id,
+                result,
+            } => {
+                // 只有当前最新任务能收口；迟到 worker 不得覆盖新建议。
+                if self.ai.finish_commit(seq) {
+                    match result {
+                        Ok(subject) => self.ai_commit_suggestion = Some(subject),
+                        Err(error) => {
+                            // 用户可能已切标签，错误必须回到发起文档；标签已
+                            // 关闭或线程异常无标签时静默丢弃，避免污染别的文档。
+                            if let Some(index) = self.tabs.index_by_id(tab_id) {
+                                self.tabs.tabs[index].document.notice = Some(error);
+                            }
+                        }
+                    }
+                }
+            }
             Message::AiCommitDismissed => self.ai_commit_suggestion = None,
             Message::AiKeySaved => {
                 if let Err(err) = self.ai_key.save() {
@@ -1530,7 +1556,10 @@ impl State {
             }
             Message::AboutOpened => self.about.open = true,
             Message::AboutClosed => self.about.open = false,
-            Message::AboutUpdateCheckRequested => self.about.update.start(),
+            Message::AboutUpdateCheckRequested => {
+                // 网络检查完成后主动唤醒；关于窗结果仍经消息归约更新。
+                self.about.update.start_with_repaint(self.repaint.clone());
+            }
             Message::AboutUpdateCheckFinished { result } => self.about.update.finish(result),
             Message::TabActivate(index) => self.switch_active(index),
             Message::TabCloseRequested(index) => self.request_close_tab(index),
@@ -1647,7 +1676,9 @@ impl State {
     pub fn start_git_refresh(&mut self) {
         let root = self.file_tree.root.clone();
         let doc_rel = self.current_doc_relative();
-        self.git.start_refresh(root.as_deref(), doc_rel);
+        // 周期刷新完成后由后台线程主动要一帧；点击刷新仍保留同步即时反馈。
+        self.git
+            .start_refresh_with_repaint(root.as_deref(), doc_rel, self.repaint.clone());
     }
 
     /// 归约末尾收一次后台 Git 结果(非阻塞)。
@@ -1719,16 +1750,15 @@ impl State {
         false
     }
 
-    /// 生成 commit message(`Message::AiCommitRequested` 的归约):定位仓库
-    /// 目录 → 采 diff → 拼 prompt → 取建议。结果经
-    /// [`Message::AiCommitSuggestion`] 再归约一次落 state,与其它 AI 结果
-    /// 同走消息通道。
+    /// 生成 commit message(`Message::AiCommitRequested` 的归约):本线程只
+    /// 定位仓库并捕获标签/预算；采 diff、拼 prompt 和 provider 请求全部
+    /// 进后台。结果经 [`Message::AiCommitFinished`] 再归约一次落 state。
     ///
     /// 仓库定位:当前文档所在目录优先,退文件树根(`git diff` 在仓库子目录
-    /// 里跑也返回全仓改动);两者皆无 → 提示行。演示期同步完成(Mock 的
-    /// 关键词合成,流式通道是续写文本不适用);流式进行中忽略(防重入)。
+    /// 里跑也返回全仓改动);两者皆无 → 提示行。流式或 commit 任务进行中
+    /// 忽略重复请求，避免同一 provider 同时发起相互竞争的生成。
     fn request_commit_message(&mut self) {
-        if self.ai.is_streaming() || !self.ai_key_gate() {
+        if self.ai.is_streaming() || self.ai.is_commit_running() || !self.ai_key_gate() {
             return;
         }
         let Some(dir) = self
@@ -1746,26 +1776,16 @@ impl State {
                 Some("生成 commit message 需要先保存文档或设置文件树根目录".to_owned());
             return;
         };
-        let diff = match crate::git_diff::uncommitted_diff(&dir) {
-            Ok(diff) if !diff.trim().is_empty() => diff,
-            Ok(_) => {
-                self.tabs.current_mut().document.notice =
-                    Some("没有未提交的改动,无需生成 commit message".to_owned());
-                return;
-            }
-            Err(error) => {
-                self.tabs.current_mut().document.notice = Some(error);
-                return;
-            }
-        };
-        // prompt 预算走「上下文大小」配置(decisions-pending #110):
-        // 未配置(None)在 latermd-ai 落回 16KB 现状默认,行为不变
-        let prompt =
-            latermd_ai::commit_message_prompt_with_budget(&diff, self.ai.config.context_budget());
-        // 同步生成:Mock 走关键词合成,真实端点走一次非流式请求取首行
-        // (commit 建议是「一行结果」,流式对它没有意义)
-        match self.ai.runtime.commit_subject(&prompt) {
-            Ok(subject) => self.apply(Message::AiCommitSuggestion { subject }),
+        let tab_id = self.tabs.current().id;
+        let context_budget = self.ai.config.context_budget();
+        // Git 读取和真实 provider HTTP 都可能阻塞；worker 只回传结果，
+        // 完成后通知器唤醒 UI，再由 Finished 分支定点落标签状态。
+        match self
+            .ai
+            .start_commit(dir, tab_id, context_budget, self.repaint.clone())
+        {
+            Ok(true) => self.ai_commit_suggestion = None,
+            Ok(false) => {}
             Err(error) => self.tabs.current_mut().document.notice = Some(error),
         }
     }
@@ -1839,7 +1859,9 @@ impl State {
             return;
         }
         self.ensure_trailing_blank_line();
-        if self.ai.start(prompt) {
+        // provider 仍在自己的线程产出 chunk；通知器仅在 chunk 入队后唤醒
+        // 下一帧，文档写入继续统一走 Message 归约。
+        if self.ai.start_with_repaint(prompt, self.repaint.clone()) {
             // 新流顶掉待确认的润色浮窗(纯 UI 状态,零文档改动):否则
             // 旧会话挂着、新流的 chunk 会被 [`Self::append_ai_delta`] 误分
             // 进旧草稿。
@@ -1933,7 +1955,8 @@ impl State {
             rev: tab.editor.revision(),
         };
         let tab_id = tab.id;
-        if self.ai.start(&prompt) {
+        // 选区续写与普通流共用主动唤醒；chunk 仍定点写回发起标签。
+        if self.ai.start_with_repaint(&prompt, self.repaint.clone()) {
             // 新流顶掉待确认的润色浮窗(与 [`Self::start_ai_stream_with_prompt`]
             // 同口径,防 chunk 误分进旧草稿)
             self.ai_polish = None;
@@ -1987,7 +2010,8 @@ impl State {
             draft: String::new(),
         };
         let tab_id = tab.id;
-        if self.ai.start(&prompt) {
+        // 润色草稿的 chunk 到达后主动唤醒，确认前绝不写回原文。
+        if self.ai.start_with_repaint(&prompt, self.repaint.clone()) {
             self.ai_polish = Some(session);
             self.ai_active_tab = Some(tab_id);
             self.ai_insert_at = None;
@@ -2204,7 +2228,9 @@ impl State {
         }
         let mcp = McpConfig::load_from(&dir);
         self.mcp.set_root(self.file_tree.root.clone());
-        self.mcp.apply_config(mcp);
+        // MCP 绑定在后台完成，成功或失败都会主动唤醒下一帧更新状态行。
+        self.mcp
+            .apply_config_with_repaint(mcp, self.repaint.clone());
     }
 
     /// 配置目录:测试注入的 `settings_dir` 优先,否则平台默认目录。
@@ -2903,11 +2929,13 @@ impl State {
         self.tabs.current_mut().document.notice =
             Some(format!("正在上传到 {}…", profile.display_name()));
         let tab_id = self.tabs.current().id;
-        self.bed.start(
+        // 上传网络 IO 在后台线程；结果入队后主动唤醒一帧，再由归约插入。
+        self.bed.start_notifying(
             profile,
             picked,
             BedUploadPurpose::Insert { alt },
             Some(tab_id),
+            self.repaint.clone(),
         );
     }
 
@@ -2947,7 +2975,8 @@ impl State {
     /// docs/image-plan.md D 段):spawn 后台线程,立即返回。防重入不拦 ——
     /// 新读取直接换接收端,旧线程的结果无处可去(与图床上传同手法)。
     fn request_image_paste(&mut self) {
-        self.clipboard.start();
+        // 系统剪贴板读取和 PNG 编码可能阻塞；完成后主动唤醒一帧收口。
+        self.clipboard.start_with_repaint(self.repaint.clone());
     }
 
     /// 剪贴板读取收尾(`Message::ImagePasteFinished` 的归约):PNG 字节过
@@ -3095,11 +3124,13 @@ impl State {
         };
         self.bed.last_test = None; // 清旧回显,避免误读为本次结果
         let profile_name = profile.display_name().to_owned();
-        self.bed.start(
+        // 图床连通性测试与真实上传共用通知机制，完成后无需满帧轮询。
+        self.bed.start_notifying(
             profile,
             picked,
             BedUploadPurpose::Test { profile_name },
             None,
+            self.repaint.clone(),
         );
     }
 
@@ -3270,7 +3301,9 @@ impl State {
         }
         // 服务以「当前文件树根」为检索边界:换根时同步给运行中的 server
         self.mcp.set_root(self.file_tree.root.clone());
-        self.mcp.apply_config(config);
+        // 设置页重启 MCP 后不做帧轮询；绑定结果到达时由通知器唤醒。
+        self.mcp
+            .apply_config_with_repaint(config, self.repaint.clone());
     }
 
     /// 保存 AI 配置(设置页「保存」):归一化 → 落 `ai.json` → 即时重装配
@@ -3299,7 +3332,10 @@ impl State {
         let Some(source) = models_source_for(&draft, key) else {
             return;
         };
-        self.settings.models.start(source);
+        // HTTP 拉取完成后主动唤醒一帧；列表和错误仍只在消息归约中落地。
+        self.settings
+            .models
+            .start_with_repaint(source, self.repaint.clone());
     }
 
     /// 模型列表收流(每帧归约调用一次):channel 里的结果翻成消息,由
@@ -3934,7 +3970,8 @@ impl State {
     /// 不发起(该情形下 `ui` 层就不该发消息,这里防御性短路)。
     fn start_search(&mut self) {
         if let Some(root) = self.file_tree.root.clone() {
-            self.search.start(&root);
+            // 搜索线程每次命中或结束后主动唤醒一帧，结果仍在帧末统一收流。
+            self.search.start_with_repaint(&root, self.repaint.clone());
         } else {
             self.search.reset();
         }
@@ -4513,6 +4550,24 @@ mod tests {
         let mut name = path.as_os_str().to_os_string();
         name.push(".latermd-draft");
         PathBuf::from(name)
+    }
+
+    /// 等待 AI commit 后台任务并把回传消息走真实归约。目录扫描与 Mock
+    /// subject 都在工作线程，测试不能再假设 `AiCommitRequested` 同步完成。
+    fn settle_ai_commit(state: &mut State) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while state.ai.is_commit_running() && std::time::Instant::now() < deadline {
+            for message in state.poll_ai() {
+                state.apply(message);
+            }
+            if state.ai.is_commit_running() {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        assert!(
+            !state.ai.is_commit_running(),
+            "AI commit 后台任务应在时限内收口"
+        );
     }
 
     /// 右键菜单编辑动作(context-menu-plan §3 M1):归约只记账到
@@ -9563,6 +9618,7 @@ mod tests {
         state.tabs.current_mut().document.path = Some(dir.join("README.md"));
 
         state.apply(Message::AiCommitRequested);
+        settle_ai_commit(&mut state);
         let subject = state.ai_commit_suggestion.clone().expect("已生成建议");
         assert_eq!(subject, "docs: 新增README.md");
         assert!(!subject.contains('\n'), "单行 subject");
@@ -9573,6 +9629,7 @@ mod tests {
         // 干净仓库(全部提交):无未提交改动 → 提示,不出建议
         run_git(&dir, &["commit", "-q", "-m", "init"]);
         state.apply(Message::AiCommitRequested);
+        settle_ai_commit(&mut state);
         assert_eq!(state.ai_commit_suggestion, None);
         let notice = state.tabs.current().document.notice.as_deref().unwrap();
         assert!(notice.contains("没有未提交的改动"), "{notice}");
@@ -9583,6 +9640,38 @@ mod tests {
         assert_eq!(rootless.ai_commit_suggestion, None);
         let notice = rootless.tabs.current().document.notice.as_deref().unwrap();
         assert!(notice.contains("文件树"), "{notice}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// commit 后台等待期间切标签：失败提示必须回到发起标签，不污染用户
+    /// 后来切到的文档。这是同步实现改成异步后新增的标签归属边界。
+    #[test]
+    fn ai_commit_result_stays_with_the_origin_tab() {
+        let dir = temp_path("ai-commit-origin-tab");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("README.md"), "# 已提交\n").unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-q", "-m", "init"]);
+
+        let mut state = State::default();
+        let origin_id = state.tabs.current().id;
+        state.tabs.current_mut().document.path = Some(dir.join("README.md"));
+        state.apply(Message::AiCommitRequested);
+        state.spawn_tab(None, "第二篇");
+        settle_ai_commit(&mut state);
+
+        let origin = state.tabs.index_by_id(origin_id).unwrap();
+        assert!(state.tabs.tabs[origin]
+            .document
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("没有未提交的改动")));
+        assert!(
+            state.tabs.current().document.notice.is_none(),
+            "当前标签不接收其他标签的迟到错误"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9615,6 +9704,7 @@ mod tests {
         state.ai.finish();
 
         state.apply(Message::AiCommitRequested);
+        settle_ai_commit(&mut state);
         assert!(state.ai_commit_suggestion.is_some(), "收尾后同一请求生效");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9852,6 +9942,7 @@ mod tests {
         let mut state = State::default();
         state.tabs.current_mut().document.path = Some(dir.join("a.md"));
         state.apply(Message::AiCommitRequested);
+        settle_ai_commit(&mut state);
         assert_eq!(
             state.ai_commit_suggestion.as_deref(),
             Some("docs: 清理a.md"),
@@ -9861,6 +9952,7 @@ mod tests {
         // 显式 4KB:12KB 的 a.md 内容把 zz.md 的删除行挤出预算
         state.ai.config.context_kb = 4;
         state.apply(Message::AiCommitRequested);
+        settle_ai_commit(&mut state);
         assert_eq!(
             state.ai_commit_suggestion.as_deref(),
             Some("docs: 更新a.md"),

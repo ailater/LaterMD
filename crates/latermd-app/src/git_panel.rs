@@ -5,7 +5,7 @@
 //!   (3s),由归约侧(`ui::layout::reduce`)到点触发;换根、切到 Git 页与
 //!   回滚完成走同一入口立即刷新。
 //!
-//!   **轮询走后台线程**([`GitPanelState::start_refresh`]),交互触发的
+//!   **轮询走后台线程**([`GitPanelState::start_refresh_with_repaint`]),交互触发的
 //!   立即刷新走同步入口([`GitPanelState::refresh`])。
 //!
 //!   > 2026-10-17 修订:原文判定「status/log 是毫秒级本地读,不值得上后台
@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use crate::repaint::RepaintNotifier;
 use latermd_git::{CommitFileChange, CommitInfo, FileDiff, FileStatus, StatusKind};
 
 /// 主工作区当前正在审阅的 diff 来源。
@@ -308,7 +309,19 @@ impl GitPanelState {
     /// 交互触发的立即刷新仍走同步的 [`Self::refresh`](两者共用
     /// `collect_git_data`):用户点了按钮就该当场看到结果,引入"加载中"反
     /// 而让单击动作失去反馈。
+    #[cfg(test)]
     pub fn start_refresh(&mut self, tree_root: Option<&Path>, doc_rel: Option<String>) {
+        self.start_refresh_with_repaint(tree_root, doc_rel, RepaintNotifier::default());
+    }
+
+    /// 发起周期刷新并在完整快照入队后唤醒 UI。根目录和文档相对路径来自
+    /// 当前工作区；返回结果仍由 [`Self::poll_refresh`] 按代际号验新鲜度。
+    pub fn start_refresh_with_repaint(
+        &mut self,
+        tree_root: Option<&Path>,
+        doc_rel: Option<String>,
+        repaint: RepaintNotifier,
+    ) {
         self.refresh_due = Instant::now() + REFRESH_INTERVAL;
         let Some(root) = tree_root else {
             self.degrade(None);
@@ -326,7 +339,9 @@ impl GitPanelState {
             .name("latermd-git-refresh".to_owned())
             .spawn(move || {
                 let outcome = collect_git_data(&root, selected.as_deref(), tracked.as_deref());
-                let _ = tx.send((seq, outcome));
+                if tx.send((seq, outcome)).is_ok() {
+                    repaint.notify();
+                }
             });
         match spawn {
             Ok(_join) => {

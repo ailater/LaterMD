@@ -49,6 +49,7 @@ mod persist;
 mod preview_pixel_acceptance;
 #[cfg(test)]
 mod preview_typography_acceptance;
+mod repaint;
 mod search;
 mod settings;
 mod shortcut_overlay;

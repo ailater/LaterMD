@@ -19,6 +19,7 @@ use crate::ai_key::{self, AiKeyState};
 use crate::command::Command;
 use crate::keymap::Keymap;
 use crate::mcp::McpState;
+use crate::repaint::RepaintNotifier;
 use crate::state::Message;
 use crate::theme::{
     Density, SkinCatalog, ThemeMode, ThemeSettings, ZenNavMode, EDITOR_FONT_SIZE_MAX,
@@ -199,7 +200,7 @@ impl Default for ModelListState {
 }
 
 impl ModelListState {
-    /// 是否有拉取在途(驱动 UI 禁用按钮 + 持续重绘)。
+    /// 是否有拉取在途，供 UI 禁用按钮；完成帧由结果通知主动唤醒。
     pub fn is_fetching(&self) -> bool {
         self.rx.is_some()
     }
@@ -207,13 +208,23 @@ impl ModelListState {
     /// 发起(归约侧调用):替换接收端并经装配点 spawn。在途时忽略(UI 已
     /// 禁用按钮,防御);spawn 失败当场按失败收尾,不留卡死的「获取中」。
     /// 发起即清旧错误行 —— 用户已重新行动,旧行是过期信息。
+    #[cfg(test)]
     pub(crate) fn start(&mut self, source: ModelsSource) {
+        self.start_with_repaint(source, RepaintNotifier::default());
+    }
+
+    /// 发起模型列表拉取，并在后台结果转交给 UI channel 后主动唤醒一帧。
+    /// 来源由设置草稿和凭据组装；成功候选或失败文案仍由归约侧统一落状态。
+    pub(crate) fn start_with_repaint(&mut self, source: ModelsSource, repaint: RepaintNotifier) {
         if self.rx.is_some() {
             return;
         }
         self.error = None;
         self.saw_result = false;
-        let (tx, rx) = mpsc::channel();
+        let Ok((tx, rx)) = repaint.notifying_channel("latermd-models-repaint") else {
+            self.error = Some("获取模型列表失败:无法启动通知线程".to_owned());
+            return;
+        };
         self.rx = Some(rx);
         if (self.spawner)(source, tx).is_none() {
             self.rx = None;

@@ -1,7 +1,7 @@
 //! 图床的应用侧接线(docs/image-plan.md C 段)。
 //!
 //! 分工与 [`crate::ai`] 同款「发起 / 接收 / 收尾」三原语:
-//! * **发起**([`BedState::start`]):归约里 spawn 后台线程,阻塞的
+//! * **发起**([`BedState::start_notifying`]):归约里 spawn 后台线程,阻塞的
 //!   ureq 上传(含读文件、读钥匙串)全部离 UI 线程;channel 无界,
 //!   UI 侧只在每帧归约里 `try_recv`。
 //! * **接收**([`BedState::poll`]):非阻塞收空 channel,结果翻成
@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use latermd_bed::{BedProfile, BedUploader, UreqUploader};
 
+use crate::repaint::RepaintNotifier;
 use crate::state::Message;
 
 /// profile 列表落盘文件(与 settings.json 同目录)。
@@ -104,7 +105,7 @@ impl BedState {
             .map_err(|source| format!("{}: {source}", path.display()))
     }
 
-    /// 是否有上传在途(驱动持续重绘 + UI 禁用按钮)。
+    /// 是否有上传在途，供 UI 禁用重复提交；完成帧由结果通知主动唤醒。
     pub fn is_uploading(&self) -> bool {
         self.rx.is_some()
     }
@@ -114,20 +115,28 @@ impl BedState {
         self.profiles.iter().find(|profile| profile.id == id)
     }
 
-    /// 发起上传(生产入口):spawn 后台线程跑 [`UreqUploader`],立即返回。
-    /// 不做在途判断 —— 新请求直接把序号+1,旧线程的结果到达即被丢弃;
-    /// UI 侧在上传中禁用按钮,这里的宽容只是防御。
-    pub fn start(
+    /// 生产归约入口：上传参数来自图片对话框或图床测试，后台结果成功入队
+    /// 后主动唤醒 UI；真正的插入、提示和状态迁移仍由归约侧完成。
+    pub fn start_notifying(
         &mut self,
         profile: BedProfile,
         path: PathBuf,
         purpose: BedUploadPurpose,
         tab: Option<u64>,
+        repaint: RepaintNotifier,
     ) {
-        self.start_with(profile, path, purpose, tab, Arc::new(UreqUploader::new()));
+        self.start_with_notify(
+            profile,
+            path,
+            purpose,
+            tab,
+            Arc::new(UreqUploader::new()),
+            repaint,
+        );
     }
 
-    /// [`BedState::start`] 的注入版:测试塞假 uploader,免真实网络。
+    /// [`BedState::start_notifying`] 的注入版:测试塞假 uploader,免真实网络。
+    #[cfg(test)]
     pub(crate) fn start_with(
         &mut self,
         profile: BedProfile,
@@ -135,6 +144,27 @@ impl BedState {
         purpose: BedUploadPurpose,
         tab: Option<u64>,
         uploader: Arc<dyn BedUploader>,
+    ) {
+        self.start_with_notify(
+            profile,
+            path,
+            purpose,
+            tab,
+            uploader,
+            RepaintNotifier::default(),
+        );
+    }
+
+    /// 上传实现的统一入口。测试可注入 uploader，生产可同时注入通知器；
+    /// 返回值通过 channel 交给 UI 线程，不在工作线程改编辑器或设置状态。
+    fn start_with_notify(
+        &mut self,
+        profile: BedProfile,
+        path: PathBuf,
+        purpose: BedUploadPurpose,
+        tab: Option<u64>,
+        uploader: Arc<dyn BedUploader>,
+        repaint: RepaintNotifier,
     ) {
         self.upload_seq += 1;
         let seq = self.upload_seq;
@@ -149,7 +179,9 @@ impl BedState {
             .name("latermd-bed-upload".to_owned())
             .spawn(move || {
                 let result = run_upload(uploader.as_ref(), &profile, &path);
-                let _ = tx.send((seq, result));
+                if tx.send((seq, result)).is_ok() {
+                    repaint.notify();
+                }
             });
         if spawn.is_err() {
             // 线程都起不来:当场按失败收尾,不留卡死的「上传中」

@@ -18,6 +18,8 @@ pub use latermd_search::{
     SearchError, SearchEvent, SearchQuery, SearchResult, SearchService, MAX_HITS,
 };
 
+use crate::repaint::RepaintNotifier;
+
 /// 一次「全部替换」的回执(状态行数据源):替换了几个文件几处,以及
 /// 没替换成的文件与原因(非 UTF-8、读/写盘失败)。失败不回滚已成功的
 /// 文件 —— 逐文件独立落盘,报告如实分列,由用户决定下一步。
@@ -58,7 +60,7 @@ pub enum SearchStatus {
 /// `&mut`),变更当帧发 `Message::SearchQueryChanged`;归约里取消旧搜索
 /// 并把 `debounce_due` 顺延 300ms,到点由归约侧(`layout.rs` 的 reduce,
 /// 每帧必跑、不看 Search 页是否可见)发 `Message::SearchRequested`,归约
-/// 再调 [`SearchState::start`]。
+/// 再调 [`SearchState::start_with_repaint`]。
 ///
 /// 替换工作区(`replace_open` / `replace_with`)同属 UI 原地草稿;「全部
 /// 替换」走两段确认:`confirm_replace = Some(计划)` 挂起确认浮窗,
@@ -147,7 +149,14 @@ impl SearchState {
 
     /// 去抖到点发起(`Message::SearchRequested` 的归约)。空模式与非法
     /// 正则同步处理,不进后台线程。
+    #[cfg(test)]
     pub fn start(&mut self, root: &Path) {
+        self.start_with_repaint(root, RepaintNotifier::default());
+    }
+
+    /// 去抖到点发起并让每条后台命中主动唤醒 UI。根目录来自文件树，通知器
+    /// 来自应用状态；命中仍只进入 SearchService channel，由帧末归约落地。
+    pub fn start_with_repaint(&mut self, root: &Path, repaint: RepaintNotifier) {
         self.generation = self.generation.wrapping_add(1);
         self.confirm_replace = None;
         self.debounce_due = None;
@@ -163,7 +172,7 @@ impl SearchState {
         };
         self.hits.clear();
         self.truncated = false;
-        match self.service.spawn(query) {
+        match self.service.spawn_with_notify(query, repaint.callback()) {
             Ok(()) => self.status = SearchStatus::Running,
             Err(SearchError::InvalidPattern(msg)) => self.status = SearchStatus::Invalid(msg),
             Err(error) => self.status = SearchStatus::Invalid(error.to_string()),
@@ -213,6 +222,7 @@ impl SearchState {
     }
 
     /// 结果是否仍在流入(驱动下一帧重绘的判据)。
+    #[cfg(test)]
     pub fn is_running(&self) -> bool {
         self.status == SearchStatus::Running
     }

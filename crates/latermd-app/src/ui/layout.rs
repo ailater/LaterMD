@@ -14,14 +14,6 @@ use eframe::egui;
 /// 去抖的同款空转教训,见本模块空转回归测试)。
 const AUTOSAVE_WRITE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// 后台 Git 刷新在途期间的要帧间隔 —— 只为给结果到达留几帧。
-///
-/// 不是满帧空转(那会把整个应用推到 60fps):后台线程干的是本地 IO,
-/// 实测一轮 12ms / 86ms,50ms 一探足以在结果到达后几帧内收到,收完即
-/// 回到 `REFRESH_INTERVAL` 的长间隔。与 `AUTOSAVE_WRITE_RETRY` 同款：
-/// 过期到点必须钳制,否则在途期会把窗口推成满帧速率。
-const GIT_REFRESH_POLL: std::time::Duration = std::time::Duration::from_millis(50);
-
 /// 只读对照列(三态视图右栏)的面板 id:宽度持久化、分隔线定位、分隔线
 /// hover 判定三处共用同一个名字(故收成常量,不与 `"preview"` 这个已被
 /// P4 退役的旧名复用 —— 旧 layout.json 里还躺着 `right`/`right_width`)。
@@ -62,6 +54,10 @@ impl LaterMdApp {
             window_title,
             ..
         } = self;
+        // 每帧收流前清掉上一批通知，并绑定当前 context。后台结果若恰在
+        // drain 期间到达会重新请求一帧，不会因合并通知而丢失收口机会。
+        state.repaint.bind_context(ctx);
+        state.repaint.begin_drain();
         // AI 后台流式收流:channel 里的 chunk 翻成 Message 并入本帧归约
         // (文本回编辑器只走 Message,后台线程不触碰 UI 状态)
         outbox.extend(state.poll_ai());
@@ -281,18 +277,14 @@ impl LaterMdApp {
         {
             state.apply(Message::SearchRequested);
         }
-        // 搜索的重绘驱动(egui 空闲不来帧,后台进度必须显式要帧):
-        // 去抖等待中按剩余时长要一帧,到点由上一段发起;流式结果进行中
-        // 持续要帧,`Done` 落回 Finished 后自然停。
+        // 搜索去抖等待中按剩余时长要一帧，到点由上一段发起；后台结果
+        // 到达后的帧由统一 repaint 通知器主动唤醒，不再在途满帧空转。
         if let Some(due) = state.search.debounce_due {
             ctx.request_repaint_after(due.saturating_duration_since(std::time::Instant::now()));
         }
-        if state.search.is_running() {
-            ctx.request_repaint();
-        }
         // 反向链接的同款三段(#15):去抖到点在归约侧发起(end_of_logic 的
-        // 快照比对顺延计时,这里到点帧触发);等待中按剩余时长要帧,扫描
-        // 进行中持续要帧,结果到达下一帧收流,Finished 后自然停。
+        // 快照比对顺延计时,这里到点帧触发);等待中按剩余时长要帧，扫描
+        // 结果到达后由统一通知器唤醒。
         if state
             .backlinks
             .debounce_due
@@ -302,9 +294,6 @@ impl LaterMdApp {
         }
         if let Some(due) = state.backlinks.debounce_due {
             ctx.request_repaint_after(due.saturating_duration_since(std::time::Instant::now()));
-        }
-        if state.backlinks.is_scanning() {
-            ctx.request_repaint();
         }
         // Git 状态轮询:有文件树根且尚未降级才轮询(无根无事可刷;非 git
         // 目录零轮询——重探由换根/切 Git 页触发,egui 得以收敛到深度空闲,
@@ -316,43 +305,11 @@ impl LaterMdApp {
             if state.git.due() && !state.git.refreshing {
                 state.start_git_refresh();
             }
-            if state.git.error.is_none() {
-                ctx.request_repaint_after(
-                    // 在途期间要几帧来收结果:结果到了却没帧可用,面板会
-                    // 一直显示旧快照。50ms 一探,收完即回到 `refresh_due`
-                    // 的长间隔,最终仍收敛到深度空闲。
-                    if state.git.refreshing {
-                        GIT_REFRESH_POLL
-                    } else {
-                        state.git.until_refresh()
-                    },
-                );
+            if state.git.error.is_none() && !state.git.refreshing {
+                // 空闲时只为下一次三秒轮询排一帧；在途完成由后台通知器
+                // 直接唤醒，避免固定 50ms 探测。
+                ctx.request_repaint_after(state.git.until_refresh());
             }
-        }
-        // AI 流式的重绘驱动:chunk 到达即要在下一帧收流归约,预览才跟得上
-        // 100ms/chunk 的节奏;AiDone 归约清标志后自然停。
-        if state.ai.is_streaming() {
-            ctx.request_repaint();
-        }
-        // 图床上传的重绘驱动同理:结果到达要在下一帧收流归约(空闲不来帧,
-        // 不显式要帧结果会悬到下一次无关重绘);收尾清接收端后自然停。
-        if state.bed.is_uploading() {
-            ctx.request_repaint();
-        }
-        // 模型列表拉取的重绘驱动同理(#58 M2):结果到达要在下一帧收流
-        // 归约;收尾清接收端后自然停。
-        if state.settings.models.is_fetching() {
-            ctx.request_repaint();
-        }
-        // 检查更新的重绘驱动同理(#71 M2):结果到达要在下一帧收流归约;
-        // 收尾清接收端后自然停。
-        if state.about.update.is_checking() {
-            ctx.request_repaint();
-        }
-        // 剪贴板图片读取的重绘驱动同理(D 段):结果到达要在下一帧收流
-        // 归约;收尾清接收端后自然停。
-        if state.clipboard.is_reading() {
-            ctx.request_repaint();
         }
         // 自动保存的重绘驱动(#18 帧饥饿修复):停顿落盘不能指望输入来帧
         // ——用户切去别的窗口后 egui 收敛深度空闲,30s 到点没有帧可跑
@@ -4856,12 +4813,11 @@ mod tests {
         );
         assert_eq!(app.state.search.status, crate::search::SearchStatus::Idle);
 
-        // 同一个「有文件树根」的条件也会顺带发起一次 Git 后台刷新,它在途
-        // 期间按 50ms 要帧(见下方 GIT_REFRESH_POLL)。本测试只量**搜索**
-        // 去抖的排程,先跑到那次刷新收口 —— 临时目录不是仓库,收口即降级、
+        // 同一个「有文件树根」的条件也会顺带发起一次 Git 后台刷新。本测试
+        // 只量**搜索**去抖的排程,先跑到那次刷新收口 —— 临时目录不是仓库,收口即降级、
         // 轮询停止,此后 Git 侧不再有任何要帧。Git 自己的排程由
         // git_poll_starts_background_refresh_when_due_with_root 专测守着;
-        // 少了这段,本测试会在 CI 上随机撞见在途的 50ms(实测 1/3 概率红)。
+        // 少了这段,本测试会随机撞见 Git 完成通知带来的额外一帧。
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while app.state.git.error.is_none() {
             assert!(std::time::Instant::now() < deadline, "Git 后台刷新未收口");
@@ -5466,8 +5422,8 @@ mod tests {
         assert_eq!(app.state.git.entries.len(), 0, "发起帧不阻塞等 IO");
         assert!(!app.state.git.due(), "周期顺延,在途期间不重复发起");
 
-        // 结果由后续帧的 `poll_git` 收回(egui 空闲不来帧,靠
-        // `request_repaint_after(50ms)` 拿到收口帧)
+        // 结果由后续帧的 `poll_git` 收回；生产环境由后台完成通知主动唤醒，
+        // 测试 helper 显式推进帧直到收口。
         settle_git(&mut app, &ctx);
         assert_eq!(app.state.git.entries.len(), 1, "结果到位后条目就位");
         assert_eq!(
