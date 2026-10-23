@@ -237,14 +237,20 @@
 
 ```
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -D warnings
-cargo clippy --workspace --all-targets --no-default-features -D warnings
-cargo clippy --workspace --all-targets --all-features -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo doc --no-deps --all-features
 ```
 
 加上 P1/P2/P3 的红绿验证：临时改坏实现，确认新守门测试真红。
+
+> **踩过的坑（2026-10-23 实测）**：三轮 clippy 的 `-D warnings` **必须经 `--` 传给 clippy**，
+> 写成 `cargo clippy --workspace --all-targets -D warnings`（无 `--`）时 cargo 会自己解析 `-D`
+> 并报 `error: unexpected argument '-D' found`（Usage 提示的是 `cargo check`），**rc=1 但没有任何
+> 真实 lint 告警** —— 容易被误读成「门禁红了」。CI 的 `.github/workflows/rust.yml` 一直用的
+> 是带 `--` 的正确形式，照抄它。
 
 ---
 
