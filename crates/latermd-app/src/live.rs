@@ -2026,6 +2026,23 @@ pub fn ui(
                                     .char_range()
                                     .map(|r| editor.char_to_byte(focused.cell_start_char + r.primary.index.0));
                             }
+                            let table_rect = egui_markdown::table::table_geometry(
+                                ui.ctx(),
+                                editor_id.with(("live-table", index)),
+                            )
+                            .map(|geometry| geometry.table)
+                            .unwrap_or_else(|| ui.min_rect());
+                            let table_action = if !live.browse_locked {
+                                draw_table_toolbar(ui, &owned, live, index, table_rect)
+                            } else {
+                                TableAction::None
+                            };
+                            match table_action {
+                                TableAction::AddRow => table_add_row(editor, live, index),
+                                TableAction::AddCol => table_add_col(editor, live, index),
+                                TableAction::Delete => live.pending_block_action = Some(PendingBlockAction::TableDelete(index)),
+                                TableAction::None => {}
+                            }
                             continue;
                         }
                         let plain_cycle = badge.is_none()
@@ -2750,12 +2767,18 @@ pub fn ui(
                             egui::pos2(ui.min_rect().left(), top),
                             egui::pos2(ui.min_rect().right(), bottom.max(top + 1.0)),
                         );
+                        let table_rect = egui_markdown::table::table_geometry(
+                            ui.ctx(),
+                            editor_id.with(("live-render", index)).with(("table", index)),
+                        )
+                        .map(|geometry| geometry.table)
+                        .unwrap_or(rect);
                         let table_action = if kind == BlockKind::Widget
                             && block_text.trim_start().starts_with('|')
                             && !live.browse_locked
                             && live.active != Some(index)
                         {
-                            draw_table_toolbar(ui, block_text, live, index, rect)
+                            draw_table_toolbar(ui, block_text, live, index, table_rect)
                         } else {
                             TableAction::None
                         };
@@ -2807,7 +2830,13 @@ pub fn ui(
                         if let Some(pos) = edit_pos {
                             let label_id = editor_id.with(("live-render", index));
                             let block_source = BlockBuffer::slice(editor.text(), &range);
-                            let local = LiveState::click_caret_local(
+                            let local = table_caret_local(
+                                ui,
+                                editor_id.with(("live-render", index)).with(("table", index)),
+                                pos,
+                                block_text,
+                            )
+                            .or_else(|| LiveState::click_caret_local(
                                 ui,
                                 label_id,
                                 pos,
@@ -2818,7 +2847,7 @@ pub fn ui(
                                 emoji_map.as_ref(),
                                 task_map.as_ref(),
                                 block_source.len(),
-                            )
+                            ))
                             .map(|byte| {
                                 editor.byte_to_char(range.start + byte)
                                     - editor.byte_to_char(range.start)
@@ -3156,9 +3185,11 @@ fn apply_pending_block_action(
 /// 活动表格的一行。`cells` 的 `src` 是**块内字节区间**(管道之间的原始
 /// 单元格文本,含空白);分隔行无单元格。
 struct ActiveTableRow {
+    #[allow(dead_code)]
     header: bool,
     separator: bool,
     /// The source line range within the table block, excluding its newline.
+    #[allow(dead_code)]
     source: Range<usize>,
     cells: Vec<(String, Range<usize>)>,
 }
@@ -3295,177 +3326,120 @@ fn draw_active_table(
     keymap: &crate::keymap::Keymap,
     outbox: &mut Vec<Message>,
 ) -> Option<ActiveTableFocus> {
-    let _ = keymap;
-    let _ = outbox;
+    let _ = (keymap, outbox);
     let rows = table_rows(block_text)?;
-    let font_size = crate::theme::editor_font_size(ui.ctx());
-    let body_family = crate::fonts::preview_body_family(ui.ctx());
-    let font = egui::FontId::new(font_size, body_family.clone());
+    let md = egui_markdown::parse(block_text);
+    let data = md.tokens.iter().find_map(|t| match t {
+        egui_markdown::Token::Table(data) => Some(data),
+        _ => None,
+    })?;
     let style = egui_markdown_style::global_style(ui.ctx());
-    let pad = &style.table.cell_padding;
-    let cell_pad_x = pad[0] + pad[2];
-    let grid_stroke = egui::Stroke::new(
-        style.table.stroke_width.max(1.0),
-        ui.visuals().widgets.noninteractive.bg_stroke.color,
-    );
-    let header_fill = ui.visuals().faint_bg_color;
-    let zebra_fill = ui.visuals().faint_bg_color.gamma_multiply(0.45);
-
-    // 列宽:该列最宽单元格 galley + 单元格内距,钳最小可点宽
-    let col_count = rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
-    let mut col_w = vec![48.0_f32; col_count];
-    for row in &rows {
-        for (c, (text, _)) in row.cells.iter().enumerate() {
-            let galley =
-                ui.painter()
-                    .layout_no_wrap(text.clone(), font.clone(), egui::Color32::WHITE);
-            col_w[c] = col_w[c].max(galley.size().x + cell_pad_x + 4.0);
-        }
-    }
-    // pending_caret 落点 → (行, 列, 单元格内字符)。所有比较都基于
-    // table_rows 产出的块内源区间，不能把区间误当成当前行的局部 offset。
-    let mut land: Option<(usize, usize, usize)> = None;
-    if let Some((block, char_idx)) = live.pending_caret {
+    let font_size = crate::theme::editor_font_size(ui.ctx());
+    let font = egui::FontId::new(font_size, crate::fonts::preview_body_family(ui.ctx()));
+    let min_width = ui.available_width().max(0.0);
+    let logical_rows: Vec<&ActiveTableRow> = rows.iter().filter(|row| !row.separator).collect();
+    let mut land = None;
+    if let Some((block, char_idx)) = live.pending_caret.take() {
         if block == index {
-            for (r, row) in rows.iter().enumerate() {
-                let row_end = block_text[..row.source.end].chars().count();
-                if char_idx <= row_end {
-                    let mut target = None;
-                    for (c, (_, src)) in row.cells.iter().enumerate() {
-                        let cell_start = block_text[..src.start].chars().count();
-                        let cell_len = block_text[src.clone()].chars().count();
-                        if char_idx <= cell_start + cell_len {
-                            target = Some((
-                                c,
-                                char_idx
-                                    .saturating_sub(cell_start)
-                                    .saturating_add(2)
-                                    .min(cell_len),
-                            ));
-                            break;
-                        }
+            for (r, row) in logical_rows.iter().enumerate() {
+                for (c, (_, src)) in row.cells.iter().enumerate() {
+                    let start = block_text[..src.start].chars().count();
+                    let len = block_text[src.clone()].chars().count();
+                    if char_idx <= start + len {
+                        land = Some((
+                            r,
+                            c,
+                            char_idx.saturating_sub(start).saturating_add(2).min(len),
+                        ));
+                        break;
                     }
-                    let (c, local) = target.unwrap_or_else(|| {
-                        let (c, (_, src)) = row
-                            .cells
-                            .iter()
-                            .enumerate()
-                            .next_back()
-                            .expect("table row has cells");
-                        (c, block_text[src.clone()].chars().count())
-                    });
-                    land = Some((r, c, local));
+                }
+                if land.is_some() {
                     break;
                 }
             }
-            live.pending_caret = None;
             live.caret_follow = false;
+        } else {
+            live.pending_caret = Some((block, char_idx));
         }
     }
-
-    let mut focus: Option<ActiveTableFocus> = None;
-    // Keep source offsets valid after an earlier cell edit in this frame.
+    let mut focus = None;
     let mut source_shift: isize = 0;
-    for (r, row) in rows.iter().enumerate() {
-        if row.separator {
-            // 分隔行保持渲染表格的行高，仅绘制内部横线，不显示原始分隔文本。
-            let total: f32 = col_w.iter().sum();
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(total, (font_size + pad[1] + pad[3]).max(1.0)),
-                egui::Sense::hover(),
-            );
-            ui.painter().line_segment(
-                [
-                    egui::pos2(rect.left(), rect.center().y),
-                    egui::pos2(rect.right(), rect.center().y),
-                ],
-                grid_stroke,
-            );
-            continue;
-        }
-        let row_width: f32 = col_w.iter().sum();
-        let row_height = (font_size + pad[1] + pad[3]).max(1.0);
-        let row_rect =
-            egui::Rect::from_min_size(ui.cursor().min, egui::vec2(row_width, row_height));
-        if row.header {
-            ui.painter()
-                .rect_filled(row_rect, egui::CornerRadius::ZERO, header_fill);
-        } else if r % 2 == 0 {
-            ui.painter()
-                .rect_filled(row_rect, egui::CornerRadius::ZERO, zebra_fill);
-        }
-        for (c, (_, src)) in row.cells.iter().enumerate() {
-            let cell_id = editor_id.with(("live-tcell", index, r, c));
-            let adjusted_start = (src.start as isize + source_shift).max(0) as usize;
-            let adjusted_end =
-                (src.end as isize + source_shift).max(adjusted_start as isize) as usize;
+    let mut cell_renderer =
+        |cell_ui: &mut egui::Ui, row: usize, col: usize, header: bool, rect: egui::Rect| -> bool {
+            let logical_row = if header { 0 } else { row };
+            let Some(active_row) = logical_rows.get(logical_row) else {
+                return false;
+            };
+            let Some((_, src)) = active_row.cells.get(col) else {
+                return false;
+            };
+            let start = (src.start as isize + source_shift).max(0) as usize;
+            let end = (src.end as isize + source_shift).max(start as isize) as usize;
             let text = editor.text();
-            let start_byte = (block_start_byte + adjusted_start).min(text.len());
-            let end_byte = (block_start_byte + adjusted_end)
-                .min(text.len())
-                .max(start_byte);
-            let cell_start_char = editor.byte_to_char(start_byte);
+            let start_byte = (block_start_byte + start).min(text.len());
+            let end_byte = (block_start_byte + end).min(text.len()).max(start_byte);
+            let start_char = editor.byte_to_char(start_byte);
             let len_chars = text[start_byte..end_byte].chars().count();
-            let before_len = editor.text().len();
+            let before = editor.text().len();
             let mut buffer = CellBuffer {
                 buffer: editor,
-                start_char: cell_start_char,
+                start_char,
                 len_chars,
             };
-            let mut cell = egui::TextEdit::singleline(&mut buffer)
-                .id(cell_id)
-                .font(egui::FontId::new(font_size, body_family.clone()))
-                .desired_width(col_w[c])
+            let mut edit = egui::TextEdit::singleline(&mut buffer)
+                .id(editor_id.with(("live-tcell", index, row, col)))
+                .font(font.clone())
+                .desired_width(rect.width())
                 .frame(egui::Frame::NONE)
-                .margin(egui::Margin::symmetric(pad[0] as i8, pad[1] as i8))
-                // 与活动块同款:编辑中不被普通控件收回焦点
+                .margin(egui::Margin::symmetric(
+                    style.table.cell_padding[0] as i8,
+                    style.table.cell_padding[1] as i8,
+                ))
                 .lock_focus(true);
-            if row.header {
-                cell = cell.text_color(ui.visuals().strong_text_color());
+            if header {
+                edit = edit.text_color(cell_ui.visuals().strong_text_color());
             }
-            let output = cell.show(ui);
-            let after_len = editor.text().len();
-            source_shift += after_len as isize - before_len as isize;
-            // 单元格边界与渲染表格保持一致；外框和底边也在这里闭合。
-            let rect = output.response.response.rect;
-            let right = rect.right();
-            ui.painter().line_segment(
-                [
-                    egui::pos2(right, rect.top()),
-                    egui::pos2(right, rect.bottom()),
-                ],
-                grid_stroke,
-            );
-            if c == 0 {
-                ui.painter()
-                    .line_segment([rect.left_top(), rect.left_bottom()], grid_stroke);
+            let id = editor_id.with(("live-tcell", index, row, col));
+            let landing = land.filter(|(lr, lc, _)| *lr == row && *lc == col);
+            if landing.is_some() {
+                cell_ui.ctx().memory_mut(|mem| mem.request_focus(id));
             }
-            if c + 1 == row.cells.len() {
-                ui.painter()
-                    .line_segment([rect.left_bottom(), rect.right_bottom()], grid_stroke);
+            let output = edit.show(cell_ui);
+            source_shift += editor.text().len() as isize - before as isize;
+            if let Some((_, _, lchar)) = landing {
+                let mut state = output.state.clone();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(lchar),
+                    )));
+                state.store(cell_ui.ctx(), id);
+                cell_ui.ctx().memory_mut(|mem| mem.request_focus(id));
             }
-            // pending_caret 落地:写光标 + 抢焦点(与活动块 TextEdit 同口径)
-            if let Some((lr, lc, lchar)) = land {
-                if (lr, lc) == (r, c) {
-                    let mut state = output.state.clone();
-                    state
-                        .cursor
-                        .set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(lchar),
-                        )));
-                    state.store(ui.ctx(), cell_id);
-                    ui.ctx().memory_mut(|mem| mem.request_focus(cell_id));
-                }
-            }
-            let focused = ui.ctx().memory(|mem| mem.has_focus(cell_id));
-            if focused {
+            if cell_ui.ctx().memory(|mem| mem.has_focus(id)) {
                 focus = Some(ActiveTableFocus {
                     output,
-                    cell_start_char,
+                    cell_start_char: start_char,
                 });
             }
-        }
-    }
+            true
+        };
+    let mut options = egui_markdown::table::TableRenderOptions {
+        cell_renderer: Some(&mut cell_renderer),
+        min_width,
+    };
+    let _geometry = egui_markdown::table::render_table_with_options(
+        ui,
+        editor_id.with(("live-table", index)),
+        data,
+        &font,
+        ui.visuals().text_color(),
+        &style.inline_code,
+        &style.table,
+        None,
+        &mut options,
+    );
     focus
 }
 
@@ -3581,6 +3555,26 @@ fn draw_table_toolbar(
     }
     crate::ui::rich_widgets::push_table_toolbar_rects(ui.ctx(), hit_rects);
     action
+}
+
+/// Resolve a click inside a rendered table cell to a source-local character offset.
+/// Table cells are independent widgets and are intentionally absent from the text
+/// galley hit table, so this uses the geometry recorded by the shared table renderer.
+fn table_caret_local(
+    ui: &egui::Ui,
+    table_id: egui::Id,
+    pos: egui::Pos2,
+    block_text: &str,
+) -> Option<usize> {
+    let geometry = egui_markdown::table::table_geometry(ui.ctx(), table_id)?;
+    let rows = table_rows(block_text)?;
+    let logical_rows: Vec<&ActiveTableRow> = rows.iter().filter(|row| !row.separator).collect();
+    let (row, col, _, _) = geometry
+        .cells
+        .iter()
+        .find(|(_, _, _, rect)| rect.contains(pos))?;
+    let source = logical_rows.get(*row)?.cells.get(*col)?.1.clone();
+    Some(block_text[..source.start].chars().count().saturating_add(2))
 }
 
 /// 富渲染块「点击进入编辑」的命中检测。**不挂 egui widget**:块级矩形一旦
@@ -10389,5 +10383,48 @@ mod tests {
             right_offset, 0.0,
             "对照列从未收到目标 ⇒ 停在原处(共用记忆时会被主列带走)"
         );
+    }
+
+    #[test]
+    fn active_table_chinese_second_and_third_rows_edit_without_other_changes() {
+        let ctx = egui::Context::default();
+        let original = "前言\n\n| 名称 | 值 | 备注 |\n| --- | --- | --- |\n| 第一行 | 一 | 保持 |\n| 第二行 | 二 | 目标 |\n| 第三行 | 三 | 保持 |\n\n结尾\n";
+        let mut editor = EditorBuffer::new(original);
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(1),
+            ..LiveState::default()
+        };
+        live.sync(&editor, None);
+        let block = live.blocks[1].clone();
+        let table = &editor.text()[block.clone()];
+        let rows = table_rows(table).unwrap();
+        let target = rows
+            .iter()
+            .find(|r| !r.header && !r.separator && r.cells[0].0 == "第二行")
+            .unwrap();
+        let target_char = table[..target.cells[1].1.start].chars().count() + 2;
+        live.pending_caret = Some((1, target_char));
+        live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        live_frame(
+            &ctx,
+            vec![egui::Event::Text("改".into())],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(editor.text().contains("| 第二行 | 二 改| 目标 |"));
+        assert!(!editor.text().contains("| 第三行 | 三 改|"));
+        assert!(editor.text().contains("| 第一行 | 一 | 保持 |"));
+        assert!(editor.text().contains("| 第三行 | 三 | 保持 |"));
     }
 }

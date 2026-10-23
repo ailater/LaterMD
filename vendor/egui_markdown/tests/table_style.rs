@@ -75,3 +75,43 @@ fn zebra_fill_paints_faint_bg_stripes_on_body_rows() {
   assert!(on.len() >= 3, "striped body rows should paint faint rects, got {}", on.len());
   assert!(on.len() > off.len(), "baseline painted faint rects already: {off:?}");
 }
+
+#[test]
+fn table_geometry_has_grid_order_and_min_width() {
+  use egui_markdown::{
+    parse,
+    table::{render_table_with_options, table_geometry, TableRenderOptions},
+  };
+  let ctx = Context::default();
+  let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(500.0, 500.0));
+  let md = parse(TABLE_MD);
+  let data = md
+    .tokens
+    .iter()
+    .find_map(|t| match t {
+      egui_markdown::Token::Table(t) => Some(t),
+      _ => None,
+    })
+    .unwrap();
+  let id = Id::new("geometry-test");
+  let mut output = ctx.run_ui(RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+    let font = egui::FontId::proportional(14.0);
+    let style = MarkdownStyle::default();
+    let mut opts = TableRenderOptions { cell_renderer: None, min_width: 480.0 };
+    render_table_with_options(ui, id, data, &font, Color32::WHITE, &style.inline_code, &style.table, None, &mut opts);
+  });
+  output.textures_delta.clear();
+  let geometry = table_geometry(&ctx, id).expect("geometry recorded");
+  assert!(geometry.table.width() >= 480.0);
+  assert_eq!(geometry.cells.len(), 12);
+  for row in 0..4 {
+    let cells: Vec<_> = geometry.cells.iter().filter(|(r, _, _, _)| *r == row).collect();
+    assert_eq!(cells.len(), 3);
+    assert!(cells[0].3.min.x < cells[1].3.min.x && cells[1].3.min.x < cells[2].3.min.x);
+    if row > 0 {
+      let prev = geometry.cells.iter().find(|(r, c, _, _)| *r == row - 1 && *c == 0).unwrap();
+      assert!(cells[0].3.min.y > prev.3.min.y);
+    }
+  }
+  assert!(geometry.viewport.is_positive());
+}

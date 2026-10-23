@@ -4,6 +4,11 @@
 > LaterMD 的说明、记录**一律不写进 `vendor/egui_markdown/` 内部**——那会污染 `git subtree pull` 与发往 fork 的补丁。
 > 规范正文：[AGENTS.md](../AGENTS.md) §6 第 9 条；操作细节：[docs/vendor-upgrade-checklist.md](../docs/vendor-upgrade-checklist.md) §9。
 
+
+### 2026-10-23 — table renderer extension (① upstream-capable)
+
+`egui_markdown::table` now exposes `render_table_with_options`, while `render_table` keeps its existing defaults. The extension accepts an optional per-cell callback and minimum content width, returns table/viewport/cell geometry, and records geometry by stable table id through `table_geometry`. LaterMD uses this same renderer for rich and active table paths; only the focused active cell replaces the default cell renderer with a frameless editor. No private `membrane` or application-specific behavior is included in the vendored crate.
+
 ## 上游信息
 
 - canonical 仓库：<https://github.com/membrane-io/egui_markdown>（`iamseeley/egui_markdown` 301 跳转到此；上游 Cargo.toml 的 `repository` 字段是转移前的旧地址，以跳转后的为准）
