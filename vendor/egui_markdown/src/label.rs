@@ -2119,6 +2119,44 @@ fn paint_inline_widgets(
   }
 }
 
+/// Callback that replaces the highlighted galley body of a code block with
+/// caller-drawn UI (in-place editing). Invoked inside the frame's content
+/// area, below the header buttons; the returned size becomes the body extent
+/// and drives the horizontal scroll content size. When set, no galley is
+/// built for the block.
+pub type CodeBodyRenderer<'a> = dyn FnMut(&mut Ui) -> Vec2 + 'a;
+
+/// Options for [`render_code_block_with_options`].
+#[derive(Default)]
+pub struct CodeBlockRenderOptions<'a> {
+  /// Hug the frame to the content width instead of filling the column.
+  pub shrink_to_content: bool,
+  /// Minimum outer frame width (shrink mode only).
+  pub min_width: Option<f32>,
+  /// Replace the default highlighted, horizontally scrollable galley body
+  /// with caller-drawn UI (in-place editing).
+  pub body_renderer: Option<&'a mut CodeBodyRenderer<'a>>,
+}
+
+/// Geometry captured while rendering a code block, for hit mapping and
+/// in-place editing probes. Stored under the render id's `"geometry"` suffix.
+#[derive(Debug, Clone)]
+pub struct CodeBlockGeometry {
+  /// The frame's outer rectangle.
+  pub frame: Rect,
+  /// The body rectangle in screen coordinates: the highlighted galley's rect
+  /// in the default path, or the rect occupied by the `body_renderer` output.
+  pub body: Rect,
+  /// The highlighted body galley; `None` when a `body_renderer` replaced the
+  /// default body (no galley is built then).
+  pub galley: Option<Arc<Galley>>,
+}
+
+/// Read geometry captured by the last render for a stable code-block id.
+pub fn code_block_geometry(ctx: &Context, id: Id) -> Option<CodeBlockGeometry> {
+  ctx.data(|d| d.get_temp::<CodeBlockGeometry>(id.with("geometry")))
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn render_code_block(
   ui: &mut Ui,
@@ -2131,11 +2169,41 @@ fn render_code_block(
   style: &MarkdownStyle,
   code_theme: CodeThemeArg<'_>,
 ) {
+  render_code_block_with_options(
+    ui,
+    id,
+    text.as_ref(),
+    language,
+    code_block_buttons,
+    style,
+    code_theme,
+    &mut CodeBlockRenderOptions { shrink_to_content, min_width, body_renderer: None },
+  );
+}
+
+/// Render a code block with the same frame, header buttons, padding and
+/// horizontal scrolling chrome as [`render_code_block`], optionally replacing
+/// the highlighted galley body with caller-drawn UI via
+/// [`CodeBlockRenderOptions::body_renderer`] (in-place editing). The captured
+/// [`CodeBlockGeometry`] is stored under `id.with("geometry")` and returned.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn render_code_block_with_options(
+  ui: &mut Ui,
+  id: Id,
+  text: &str,
+  language: Option<&str>,
+  code_block_buttons: Option<&dyn Fn(&mut Ui, &str, &str)>,
+  style: &MarkdownStyle,
+  code_theme: CodeThemeArg<'_>,
+  options: &mut CodeBlockRenderOptions<'_>,
+) -> CodeBlockGeometry {
   let lang = language.unwrap_or(style.default_code_language.as_str());
   let cache_id = id.with("code_galley");
 
   #[cfg(feature = "syntax_highlighting")]
-  let galley = {
+  let galley: Option<Arc<Galley>> = if options.body_renderer.is_some() {
+    None
+  } else {
     let identity_hash = hash_code_block_identity(
       ui,
       lang,
@@ -2145,17 +2213,18 @@ fn render_code_block(
       code_theme,
     );
     let cached = ui.data(|d| d.get_temp::<StreamingCodeCache>(cache_id));
-    let updated =
-      scrolling_code_galley(ui, text.as_ref(), lang, style.code_font_size, identity_hash, code_theme, cached);
+    let updated = scrolling_code_galley(ui, text, lang, style.code_font_size, identity_hash, code_theme, cached);
     let galley = Arc::clone(&updated.galley);
     ui.data_mut(|d| d.insert_temp(cache_id, updated));
-    galley
+    Some(galley)
   };
 
   #[cfg(not(feature = "syntax_highlighting"))]
-  let galley = {
+  let galley: Option<Arc<Galley>> = if options.body_renderer.is_some() {
+    None
+  } else {
     let ctx_hash = hash_code_block_context(
-      text.as_ref(),
+      text,
       lang,
       style.code_font_size,
       ui.visuals().dark_mode,
@@ -2163,19 +2232,17 @@ fn render_code_block(
       code_theme,
     );
     match ui.data(|d| d.get_temp::<CachedCodeBlock>(cache_id)) {
-      Some(cached) if cached.ctx_hash == ctx_hash => cached.galley,
+      Some(cached) if cached.ctx_hash == ctx_hash => Some(cached.galley),
       _ => {
-        let galley = build_code_block_galley(ui, text.as_ref(), lang, style.code_font_size, code_theme);
+        let galley = build_code_block_galley(ui, text, lang, style.code_font_size, code_theme);
         ui.data_mut(|d| {
           d.insert_temp(cache_id, CachedCodeBlock { ctx_hash, galley: Arc::clone(&galley) });
         });
-        galley
+        Some(galley)
       }
     }
   };
 
-  let galley_width = galley.size().x;
-  let galley_height = galley.size().y;
   let stroke = Stroke::new(style.code_block.stroke_width, ui.visuals().widgets.noninteractive.bg_stroke.color);
 
   let p = &style.code_block.padding;
@@ -2191,18 +2258,28 @@ fn render_code_block(
       bottom: p[3] as i8,
     });
 
+  let mut geometry = CodeBlockGeometry { frame: Rect::NOTHING, body: Rect::NOTHING, galley: None };
   let frame_response = frame.show(ui, |ui| {
-    if !shrink_to_content {
+    if !options.shrink_to_content {
       ui.set_min_width(ui.available_width());
-    } else if let Some(width) = min_width {
+    } else if let Some(width) = options.min_width {
       // `width` is the desired outer width; we're inside the frame's margins.
       ui.set_min_width((width - p[0] - p[2]).min(ui.available_width()));
     }
     egui::ScrollArea::horizontal().id_salt(id).show(ui, |ui| {
-      let (rect, _) = ui.allocate_exact_size(epaint::vec2(galley_width, galley_height), Sense::hover());
-      ui.painter().galley(rect.min, galley, ui.visuals().text_color());
+      if let Some(render) = options.body_renderer.as_deref_mut() {
+        let origin = ui.cursor().min;
+        let size = render(ui);
+        geometry.body = Rect::from_min_size(origin, size);
+      } else if let Some(galley) = galley.as_ref() {
+        let (rect, _) = ui.allocate_exact_size(epaint::vec2(galley.size().x, galley.size().y), Sense::hover());
+        ui.painter().galley(rect.min, Arc::clone(galley), ui.visuals().text_color());
+        geometry.body = rect;
+        geometry.galley = Some(Arc::clone(galley));
+      }
     });
   });
+  geometry.frame = frame_response.response.rect;
 
   // Overlay buttons in the top-right, absolutely positioned over the frame.
   if let Some(button_fn) = code_block_buttons {
@@ -2213,6 +2290,9 @@ fn render_code_block(
     child_ui.add_space(4.0);
     button_fn(&mut child_ui, text, lang);
   }
+
+  ui.data_mut(|d| d.insert_temp(id.with("geometry"), geometry.clone()));
+  geometry
 }
 
 #[cfg(not(feature = "syntax_highlighting"))]
@@ -2264,6 +2344,63 @@ pub fn glyph_at_index(galley: &Galley, index: u32) -> Option<(&Glyph, u32)> {
 /// Helpful to avoid painting underlines for trailing whitespace.
 pub fn last_non_whitespace_glyph(row: &Row) -> Option<&Glyph> {
   row.glyphs.iter().rfind(|glyph| !glyph.chr.is_whitespace())
+}
+
+#[cfg(test)]
+mod code_block_options_tests {
+  use super::*;
+  use egui::RawInput;
+
+  /// `body_renderer` replaces the highlighted galley: no galley is built,
+  /// the reported body rect matches the renderer's size, and the frame hugs
+  /// it under `shrink_to_content`.
+  #[test]
+  fn body_renderer_replaces_galley_and_geometry_records_frame() {
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0));
+    let id = Id::new("code-options");
+    let observed = std::cell::Cell::new(Vec2::ZERO);
+    let output = ctx.run_ui(RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+      let style = crate::style::MarkdownStyle::default();
+      let mut render = |ui: &mut Ui| -> Vec2 {
+        let size = vec2(120.0, 45.0);
+        observed.set(size);
+        ui.allocate_exact_size(size, Sense::hover());
+        size
+      };
+      let mut options =
+        CodeBlockRenderOptions { shrink_to_content: true, min_width: Some(80.0), body_renderer: Some(&mut render) };
+      render_code_block_with_options(ui, id, "fn main() {}", Some("rust"), None, &style, None, &mut options);
+    });
+    output.drop_without_applying_deltas();
+    let geometry = code_block_geometry(&ctx, id).expect("geometry stored under id");
+    assert!(geometry.galley.is_none(), "no galley is built when a body_renderer replaces it");
+    assert_eq!(geometry.body.size(), observed.get(), "body rect reports the renderer's size");
+    assert!(
+      geometry.frame.width() >= 120.0,
+      "frame hugs the renderer's width under shrink_to_content: {:?}",
+      geometry.frame
+    );
+  }
+
+  /// The default path still paints and records the highlighted galley, with
+  /// the body rect matching the galley size.
+  #[test]
+  fn default_path_records_galley_geometry() {
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0));
+    let id = Id::new("code-default");
+    let output = ctx.run_ui(RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+      let style = crate::style::MarkdownStyle::default();
+      let mut options = CodeBlockRenderOptions::default();
+      render_code_block_with_options(ui, id, "let x = 1;", Some("rust"), None, &style, None, &mut options);
+    });
+    output.drop_without_applying_deltas();
+    let geometry = code_block_geometry(&ctx, id).expect("geometry stored under id");
+    let galley = geometry.galley.expect("default path builds the galley");
+    assert_eq!(geometry.body.size(), galley.size(), "body rect == galley rect");
+    assert!(geometry.frame.contains_rect(geometry.body), "body lives inside the frame");
+  }
 }
 
 #[cfg(all(test, feature = "images"))]

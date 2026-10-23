@@ -1315,6 +1315,42 @@ fn closeable_fence(block: &str) -> bool {
         .any(|l| is_fence_close(l, marker, open_len))
 }
 
+/// 围栏代码块的部件(原地编辑用):info string 与正文区间,区间均为
+/// **块内字节偏移**。
+struct CodeFenceParts {
+    /// 开栏行标记之后的 info string(trim 后;空串 = 无语言)。
+    info: String,
+    /// 正文 = 开栏行末到首根闭合围栏行首(含与闭合行相邻的尾随换行;
+    /// 编辑视图再剥它,见 [`draw_active_code_block`])。
+    body: Range<usize>,
+}
+
+/// 把围栏块切成 info 与正文。只认「存在首根合法闭合行」的块(与
+/// [`closeable_fence`] 同判),CommonMark 语义:第一根闭合行即收束,
+/// 其后(块区间可能吞进的分隔空行)不属于正文。
+fn code_fence_parts(block: &str) -> Option<CodeFenceParts> {
+    let first_end = block.find('\n')?;
+    let open_line = &block[..first_end];
+    let (marker, open_len) = fence_open(open_line)?;
+    let trimmed = strip_fence_indent(open_line);
+    let info = trimmed[open_len..].trim().to_owned();
+    let body_start = first_end + 1;
+    let mut line_start = body_start;
+    let mut body_end = None;
+    for line in block[body_start..].split('\n') {
+        if is_fence_close(line, marker, open_len) {
+            body_end = Some(line_start);
+            break;
+        }
+        line_start += line.len() + 1;
+    }
+    let body_end = body_end?;
+    (body_start <= body_end).then_some(CodeFenceParts {
+        info,
+        body: body_start..body_end,
+    })
+}
+
 /// 关闭代码块(用户需求 2026-10-23):去掉首尾围栏行,内容保留为普通
 /// 文本段落。内容为空(只有 info 行的空围栏)时整块删除 —— 留下一段
 /// 空白块没有意义。块尾的分隔空行(块区间吞进的 `\n\n`,见
@@ -1725,6 +1761,11 @@ pub fn ui(
     // `LiveState::toggle_anchor`。
     let mut pending_shift: Option<f32> = None;
     let mut pending_anchor: Option<(usize, f32)> = None;
+    // 落地帧残差校正(点击锚定的收尾):落地帧实测光标行顶与锚点的差,
+    // 交帧末(ScrollArea 收尾**之后**)写偏移。不能在闭包内就地写 ——
+    // egui ScrollArea 的 end() 会用 begin() 装载的帧内副本覆盖 State,
+    // 帧中 store 从不生效(2026-10-23 原地编辑把预测误差顶过容差时实测)。
+    let mut pending_residual: Option<f32> = None;
     // 选区 AI 浮标(#61 M1)的锚点素材:活动块持久选区(**文档坐标**字符
     // 区对,块内捕获时换算)与尾端光标条屏幕矩形,活动块分支内捕获、
     // ScrollArea 之后消费(命中区同层末尾注册,与源码模式同一纪律)。
@@ -1975,7 +2016,9 @@ pub fn ui(
                         let caret_local_chars = cursor
                             .byte
                             .filter(|byte| range.contains(byte))
-                            .map(|byte| editor.byte_to_char(byte) - editor.byte_to_char(range.start))
+                            .map(|byte| {
+                                editor.byte_to_char(byte) - editor.byte_to_char(range.start)
+                            })
                             .unwrap_or(0)
                             .min(full_chars);
                         let content_chars = block_text[..content_bytes].chars().count();
@@ -2023,14 +2066,17 @@ pub fn ui(
                                 outbox,
                             ) {
                                 active_response = Some(focused.output.response.response.clone());
-                                crate::ui::editor_menu::attach(ui, &focused.output, keymap, true, outbox);
+                                crate::ui::editor_menu::attach(
+                                    ui,
+                                    &focused.output,
+                                    keymap,
+                                    true,
+                                    outbox,
+                                );
                                 // 光标回填(大纲/状态栏):聚焦单元格内光标的文档字节
-                                cursor.byte = focused
-                                    .output
-                                    .state
-                                    .cursor
-                                    .char_range()
-                                    .map(|r| editor.char_to_byte(focused.cell_start_char + r.primary.index.0));
+                                cursor.byte = focused.output.state.cursor.char_range().map(|r| {
+                                    editor.char_to_byte(focused.cell_start_char + r.primary.index.0)
+                                });
                             }
                             let table_rect = egui_markdown::table::table_geometry(
                                 ui.ctx(),
@@ -2053,8 +2099,50 @@ pub fn ui(
                             match table_action {
                                 TableAction::AddRow => table_add_row(editor, live, index),
                                 TableAction::AddCol => table_add_col(editor, live, index),
-                                TableAction::Delete => live.pending_block_action = Some(PendingBlockAction::TableDelete(index)),
+                                TableAction::Delete => {
+                                    live.pending_block_action =
+                                        Some(PendingBlockAction::TableDelete(index))
+                                }
                                 TableAction::None => {}
+                            }
+                            continue;
+                        }
+                        // 围栏代码活动态:原地编辑(2026-10-23,表格单元格
+                        // 同款)—— 不塌成整块源码 TextEdit,vendored 代码框与
+                        // 浏览态同一条渲染路径,正文区替换为可编辑 TextEdit,
+                        // 围栏行隐藏(结构归头部:语言/复制/关闭)。布局零变化
+                        // (行高/内距与富渲染 galley 同参),进入编辑不跳。
+                        // 缩进代码/未闭合围栏(AI 流式中)仍走下方源码通路。
+                        if code_frame {
+                            let owned = block_text.to_owned();
+                            let block_start = live.blocks[index].start;
+                            if let Some(focused) = draw_active_code_block(
+                                ui,
+                                editor,
+                                live,
+                                index,
+                                &owned,
+                                block_start,
+                                editor_id,
+                                keymap,
+                                outbox,
+                            ) {
+                                active_response = Some(focused.output.response.response.clone());
+                                crate::ui::editor_menu::attach(
+                                    ui,
+                                    &focused.output,
+                                    keymap,
+                                    true,
+                                    outbox,
+                                );
+                                // 光标回填(大纲/状态栏):正文内光标的文档字节
+                                cursor.byte = focused.output.state.cursor.char_range().map(|r| {
+                                    editor.char_to_byte(focused.body_start_char + r.primary.index.0)
+                                });
+                                // 跨块方向键路由(帧末统一消费,与源码通路同槽)
+                                if focused.route.is_some() {
+                                    route = focused.route;
+                                }
                             }
                             continue;
                         }
@@ -2063,13 +2151,7 @@ pub fn ui(
                             && list_prefix(first_line).is_none();
                         let text_family = kind == BlockKind::Heading || plain_cycle;
                         let current_level = if kind == BlockKind::Heading {
-                            Some(
-                                first_line
-                                    .bytes()
-                                    .take_while(|&b| b == b'#')
-                                    .count()
-                                    .min(6) as u8,
-                            )
+                            Some(first_line.bytes().take_while(|&b| b == b'#').count().min(6) as u8)
                         } else {
                             None
                         };
@@ -2095,14 +2177,13 @@ pub fn ui(
                             .data(|data| data.get_temp::<bool>(focus_memory_id).unwrap_or(false));
                         // 渲染形态原地编辑(#158)的排版闭包:先绑定再挂 ——
                         // `.layouter(&mut 闭包字面量)` 的临时值撑不过语句
-                        let mut layouter = |ui: &egui::Ui,
-                                            text: &dyn egui::TextBuffer,
-                                            wrap_width: f32| {
-                            // 作业构造必须在 fonts_mut 闭包外:内部取
-                            // context 写锁,嵌套即自死锁(49ef922 同类)
-                            let job = active_block_job(ui, text.as_str(), wrap_width);
-                            ui.fonts_mut(|f| f.layout_job(job))
-                        };
+                        let mut layouter =
+                            |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+                                // 作业构造必须在 fonts_mut 闭包外:内部取
+                                // context 写锁,嵌套即自死锁(49ef922 同类)
+                                let job = active_block_job(ui, text.as_str(), wrap_width);
+                                ui.fonts_mut(|f| f.layout_job(job))
+                            };
                         let edit = egui::TextEdit::multiline(&mut buffer)
                             .id(response_id)
                             .font(egui::TextStyle::Monospace)
@@ -2208,10 +2289,7 @@ pub fn ui(
                             let chip_y = first_row_top
                                 + ((first_row_bottom - first_row_top - chip_h) * 0.5).max(0.0);
                             let chip = egui::Rect::from_min_size(
-                                egui::pos2(
-                                    block_rect.left() - BADGE_GUTTER + 3.0,
-                                    chip_y,
-                                ),
+                                egui::pos2(block_rect.left() - BADGE_GUTTER + 3.0, chip_y),
                                 egui::vec2(12.0, chip_h),
                             );
                             painter.rect_filled(chip, 3.0, egui::Color32::TRANSPARENT);
@@ -2235,10 +2313,14 @@ pub fn ui(
                                 ui.label(egui::RichText::new(type_label).weak().monospace());
                                 ui.separator();
                                 for level in 1u8..=6 {
-                                    let row = ui.add_enabled_ui(text_family, |ui| {
-                                        ui.selectable_label(current_level == Some(level), format!("H{level}"))
-                                    })
-                                    .inner;
+                                    let row = ui
+                                        .add_enabled_ui(text_family, |ui| {
+                                            ui.selectable_label(
+                                                current_level == Some(level),
+                                                format!("H{level}"),
+                                            )
+                                        })
+                                        .inner;
                                     if row.clicked() {
                                         set_block_heading_level(
                                             editor,
@@ -2250,13 +2332,14 @@ pub fn ui(
                                         ui.close();
                                     }
                                 }
-                                let row = ui.add_enabled_ui(text_family, |ui| {
-                                    ui.selectable_label(
-                                        text_family && current_level.is_none(),
-                                        "正文",
-                                    )
-                                })
-                                .inner;
+                                let row = ui
+                                    .add_enabled_ui(text_family, |ui| {
+                                        ui.selectable_label(
+                                            text_family && current_level.is_none(),
+                                            "正文",
+                                        )
+                                    })
+                                    .inner;
                                 if row.clicked() {
                                     set_block_heading_level(editor, live, index, None, caret_local);
                                     ui.close();
@@ -2605,16 +2688,10 @@ pub fn ui(
                                             .pos_from_cursor(egui::text::CCursor::new(char_idx));
                                         let residual =
                                             output.galley_pos.y + landed_row.min.y - anchor_top;
+                                        // 阈值内不修:亚像素误差交给下一帧的预测,
+                                        // 不值得为此多滚一帧。
                                         if residual.abs() > 0.5 {
-                                            if let Some(mut scroll) =
-                                                egui::scroll_area::State::load(
-                                                    ui.ctx(),
-                                                    scroll_state_id,
-                                                )
-                                            {
-                                                scroll.offset.y += residual;
-                                                scroll.store(ui.ctx(), scroll_state_id);
-                                            }
+                                            pending_residual = Some(residual);
                                         }
                                         live.toggle_anchor = None;
                                     }
@@ -2716,10 +2793,7 @@ pub fn ui(
                                     ui,
                                     code,
                                     lang,
-                                    Some(crate::ui::rich_widgets::CodeClose {
-                                        index,
-                                        sink: &sink,
-                                    }),
+                                    Some(crate::ui::rich_widgets::CodeClose { index, sink: &sink }),
                                 );
                             }
                         });
@@ -2746,21 +2820,21 @@ pub fn ui(
                             label.code_block_buttons(&crate::ui::rich_widgets::code_copy_buttons)
                         };
                         label
-                        // heal(live-unify-plan P1/R1):AI 流式写入本标签的帧
-                        // 开启,残缺 fence / 未闭合 ** 在块片段上补闭合 —— 块级
-                        // 契约由 latermd_md 的 block_level_heal_closes_streaming_
-                        // fragments 钉住。完整块上 heal 恒等(Cow::Borrowed),
-                        // 开关切换不改变完整块渲染(与预览同一口径)。
-                        .heal(heal)
-                        // 视口外代码块高亮延迟(#59/#60,vendor ①类配套):缓存
-                        // miss 帧里起始于视口下缘之外的 flush 段不做 syntect
-                        // 高亮,滚到可见前的同帧补齐 —— 大文档写作模式首切
-                        // 同享 20k 行 876→173ms 的收益(预览同参数)。
-                        .defer_offscreen_highlight(true)
-                        // mermaid 块出图(#51 M3)+ 任务 checkbox(#63),
-                        // 与右栏预览同一渲染入口。
-                        .link_handler(&rich_handler)
-                        .show(ui);
+                            // heal(live-unify-plan P1/R1):AI 流式写入本标签的帧
+                            // 开启,残缺 fence / 未闭合 ** 在块片段上补闭合 —— 块级
+                            // 契约由 latermd_md 的 block_level_heal_closes_streaming_
+                            // fragments 钉住。完整块上 heal 恒等(Cow::Borrowed),
+                            // 开关切换不改变完整块渲染(与预览同一口径)。
+                            .heal(heal)
+                            // 视口外代码块高亮延迟(#59/#60,vendor ①类配套):缓存
+                            // miss 帧里起始于视口下缘之外的 flush 段不做 syntect
+                            // 高亮,滚到可见前的同帧补齐 —— 大文档写作模式首切
+                            // 同享 20k 行 876→173ms 的收益(预览同参数)。
+                            .defer_offscreen_highlight(true)
+                            // mermaid 块出图(#51 M3)+ 任务 checkbox(#63),
+                            // 与右栏预览同一渲染入口。
+                            .link_handler(&rich_handler)
+                            .show(ui);
                         // drain 前先取「本块拦截了链接点击」标志(wikilink/本地
                         // 文档链接都走消息、无 OpenUrl,`clicked_for_edit` 的
                         // OpenUrl 探测看不见它们,须显式排除 —— 点击归链接,
@@ -2782,7 +2856,9 @@ pub fn ui(
                         );
                         let table_rect = egui_markdown::table::table_geometry(
                             ui.ctx(),
-                            editor_id.with(("live-render", index)).with(("table", index)),
+                            editor_id
+                                .with(("live-render", index))
+                                .with(("table", index)),
                         )
                         .map(|geometry| geometry.table)
                         .unwrap_or(rect);
@@ -2852,22 +2928,34 @@ pub fn ui(
                             let block_source = BlockBuffer::slice(editor.text(), &range);
                             let local = table_caret_local(
                                 ui,
-                                editor_id.with(("live-render", index)).with(("table", index)),
+                                editor_id
+                                    .with(("live-render", index))
+                                    .with(("table", index)),
                                 pos,
                                 block_text,
                             )
-                            .or_else(|| LiveState::click_caret_local(
-                                ui,
-                                label_id,
-                                pos,
-                                block_rendered.as_ref(),
-                                image_map.as_ref(),
-                                offset_map.as_ref(),
-                                highlight_map.as_ref(),
-                                emoji_map.as_ref(),
-                                task_map.as_ref(),
-                                block_source.len(),
-                            ))
+                            .or_else(|| {
+                                code_caret_local(
+                                    ui,
+                                    editor_id.with(("live-render", index)),
+                                    pos,
+                                    block_text,
+                                )
+                            })
+                            .or_else(|| {
+                                LiveState::click_caret_local(
+                                    ui,
+                                    label_id,
+                                    pos,
+                                    block_rendered.as_ref(),
+                                    image_map.as_ref(),
+                                    offset_map.as_ref(),
+                                    highlight_map.as_ref(),
+                                    emoji_map.as_ref(),
+                                    task_map.as_ref(),
+                                    block_source.len(),
+                                )
+                            })
                             .map(|byte| {
                                 editor.byte_to_char(range.start + byte)
                                     - editor.byte_to_char(range.start)
@@ -2905,20 +2993,20 @@ pub fn ui(
                                                 let old_range = live.blocks[old].clone();
                                                 let old_text =
                                                     BlockBuffer::slice(editor.text(), &old_range);
-                                                let (old_rendered, ..) =
-                                                    live.rich_block_with_base(old, old_text, base_dir);
+                                                let (old_rendered, ..) = live
+                                                    .rich_block_with_base(old, old_text, base_dir);
                                                 let dark_mode =
                                                     matches!(ui.ctx().theme(), egui::Theme::Dark);
                                                 let old_handler = RichLinkHandler::new(
-                                                    TaskProbeDomain::Live(
-                                                        live.blocks[old].start,
-                                                    ),
+                                                    TaskProbeDomain::Live(live.blocks[old].start),
                                                     dark_mode,
                                                     ui.visuals().text_color(),
                                                     std::rc::Rc::clone(&emoji_rects),
                                                 )
                                                 .with_ai(
-                                                    crate::ui::rich_widgets::ai_link_color(dark_mode),
+                                                    crate::ui::rich_widgets::ai_link_color(
+                                                        dark_mode,
+                                                    ),
                                                     ai,
                                                 );
                                                 // 与剔除臂占位同参的估高(+4px 内距
@@ -2933,7 +3021,9 @@ pub fn ui(
                                                     crate::fonts::preview_body_family(ui.ctx()),
                                                 ))
                                                 .wrap()
-                                                .overflow_wrap(egui_markdown::OverflowWrap::BreakAll)
+                                                .overflow_wrap(
+                                                    egui_markdown::OverflowWrap::BreakAll,
+                                                )
                                                 .scroll_code_blocks(true)
                                                 .shrink_code_blocks(true)
                                                 .code_block_min_width(Some(200.0))
@@ -2972,9 +3062,7 @@ pub fn ui(
                 // 滚动锚定收尾(#111 B):视口上方的估高占位若比上一帧实测
                 // (或上一帧占位)更高/更矮,下方内容会整体位移 —— 同向修正
                 // 偏移让视口内容钉在原地。下方块的差值只影响内容总高(滚动
-                // 条长度),不修。必须发生在 ScrollArea end() 之前才对下一帧
-                // 生效;egui 0.36 的 State::load/store 都是 persisted data,
-                // 读写一致。
+                // 条长度),不修。
                 if estimate_drift.abs() > f32::EPSILON {
                     if let Some(mut state) =
                         egui::scroll_area::State::load(ui.ctx(), scroll_state_id)
@@ -3043,6 +3131,16 @@ pub fn ui(
         // 比的是两个「闭包内偏移」(锚定 store 在 ScrollArea 收尾之后,不进
         // 本帧闭包),提前 bump 反而会让本帧凭空记一次移动。
         anchor_shift_applied = shift;
+    }
+    // 落地帧残差校正落账:与 pending_shift 同一时机(end() 之后再写,
+    // 下一帧 begin() 读到的才是修正值;闭包内的 store 会被 end() 的帧内
+    // 副本覆盖 —— pending_residual 声明处的实测记录)。
+    if let Some(residual) = pending_residual.take() {
+        if let Some(mut state) = egui::scroll_area::State::load(panel.ctx(), scroll_state_id) {
+            state.offset.y += residual;
+            state.store(panel.ctx(), scroll_state_id);
+        }
+        anchor_shift_applied = residual;
     }
     live.toggle_anchor = pending_anchor.take();
 
@@ -3596,6 +3694,309 @@ fn draw_table_toolbar(
     action
 }
 
+/// 活动代码块的渲染产出:正文 TextEdit 的输出(右键菜单挂点 + 光标
+/// 回填)、正文可见起点的文档字符偏移,以及块边界方向键路由的意图
+/// (None = 本帧不路由)。
+struct ActiveCodeFocus {
+    output: egui::widgets::text_edit::TextEditOutput,
+    /// 正文可见起点的文档字符偏移(块内光标 → 文档光标的换算基)。
+    body_start_char: usize,
+    /// 跨块路由:正文首/尾按 ↑↓←→ 出块,目标 (块序号, 块内字符偏移)。
+    route: Option<(usize, usize)>,
+}
+
+/// 活动代码块:原地编辑(2026-10-23,表格单元格同款)。渲染与浏览态
+/// 同源 —— 同一条 vendored `render_code_block_with_options`(代码底/描
+/// 边/圆角/头部按钮/横向滚动全同参),正文区替换为无框多行 TextEdit:
+/// 等宽字体与行高、左内距都按浏览态 galley 同参测量,进入编辑帧几何
+/// 零变化;围栏行不再显示(结构归头部:语言标签/复制/关闭),改动经
+/// [`BlockBuffer`] 直接落回共享缓冲(TextEdit 内建 undo 单步可退)。
+///
+/// 排版复用 [`egui_markdown::layout::highlight_code`]:编辑态也是语法
+/// 高亮,作业按内容指纹缓存,稳态帧零 syntect 开销。跨块 ↑↓ 路由、
+/// IME 候选框跟随在函数内就地复刻源码 TextEdit 通路;打字机跟随不进
+/// (表格同口径)。
+#[allow(clippy::too_many_arguments)]
+fn draw_active_code_block(
+    ui: &mut egui::Ui,
+    editor: &mut EditorBuffer,
+    live: &mut LiveState,
+    index: usize,
+    block_text: &str,
+    block_start_byte: usize,
+    editor_id: egui::Id,
+    keymap: &crate::keymap::Keymap,
+    outbox: &mut Vec<Message>,
+) -> Option<ActiveCodeFocus> {
+    let _ = (keymap, outbox);
+    let parts = code_fence_parts(block_text)?;
+    let style = egui_markdown::global_style(ui.ctx());
+    let code_font_size = style.code_font_size;
+    let code_font = egui::FontId::monospace(code_font_size);
+    let dark_mode = ui.visuals().dark_mode;
+    // 行高与浏览态 galley 同源:highlight 的 section 不带 line_height,
+    // 落到字体自然行高;TextEdit 侧显式钉同一值,两侧逐像素同高。
+    let row_height = ui.fonts_mut(|f| f.row_height(&code_font));
+
+    // 可见正文:剥掉与闭合行相邻的一个换行(\r\n 或 \n)。浏览态 galley
+    // 由 lines() 切行,同样看不见它;留在编辑视图会在进入编辑瞬间把块
+    // 撑高一行。
+    let full_body = &block_text[parts.body.clone()];
+    let visible_body_bytes = match full_body.as_bytes() {
+        [.., b'\r', b'\n'] => full_body.len() - 2,
+        [.., b'\n'] => full_body.len() - 1,
+        _ => full_body.len(),
+    };
+    let body_start_byte = block_start_byte + parts.body.start;
+    let body_start_char = editor.byte_to_char(body_start_byte);
+    let visible_body = &full_body[..visible_body_bytes];
+    let body_len_chars = visible_body.chars().count();
+
+    // pending_caret 落地:块内字符偏移钳进可见正文(点击头部/框内距/
+    // 兜底块尾都在钳位里归一),焦点与光标一并写入。
+    let mut land = None;
+    if let Some((block, char_idx)) = live.pending_caret.take() {
+        if block == index {
+            let body_start_local = block_text[..parts.body.start].chars().count();
+            let local = char_idx.clamp(body_start_local, body_start_local + body_len_chars)
+                - body_start_local;
+            land = Some(local);
+            live.caret_follow = false;
+        } else {
+            live.pending_caret = Some((block, char_idx));
+        }
+    }
+
+    // 编辑态高亮排版:作业按(内容, 字号, 明暗, 主题, ppp)指纹缓存,
+    // 稳态帧复用 Arc<LayoutJob>(克隆 job 远比 syntect 重跑便宜)。
+    let lang = parts.info.clone();
+    let theme_key = egui_markdown::theme::code_theme(ui.ctx(), dark_mode)
+        .as_ref()
+        .map(|theme| std::sync::Arc::as_ptr(theme) as usize)
+        .unwrap_or(0);
+    let ppp_bits = ui.ctx().pixels_per_point().to_bits();
+    let cache_id = editor_id.with(("live-code-galley", index));
+    let mut layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, _wrap_width: f32| {
+        let content = text.as_str();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&content, &mut hasher);
+        std::hash::Hash::hash(&lang, &mut hasher);
+        use std::hash::Hasher as _;
+        hasher.write_u32(code_font_size.to_bits());
+        hasher.write_u32(theme_key as u32);
+        hasher.write_u32(ppp_bits);
+        hasher.write_u8(u8::from(dark_mode));
+        let key = hasher.finish();
+        let cached = ui
+            .ctx()
+            .data(|d| d.get_temp::<(u64, std::sync::Arc<egui::text::LayoutJob>)>(cache_id))
+            .filter(|(seen, _)| *seen == key);
+        let job = match cached {
+            Some((_, job)) => (*job).clone(),
+            None => {
+                let mut job =
+                    egui_markdown::layout::highlight_code(ui, content, &lang, code_font_size, None);
+                // 编辑视图不软换行(与浏览态横向滚动一致);行高钉死与
+                // 光标/选区几何同源;尾部空白占宽(编辑器语义)。
+                job.wrap.max_width = f32::INFINITY;
+                job.break_on_newline = true;
+                job.keep_trailing_whitespace = true;
+                for section in &mut job.sections {
+                    section.format.line_height = Some(row_height);
+                }
+                let job = std::sync::Arc::new(job);
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(cache_id, (key, std::sync::Arc::clone(&job))));
+                (*job).clone()
+            }
+        };
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+
+    // 头部按钮:复制(载荷 = 本帧正文,vendored 传入)+ 关闭(块序号推
+    // sink,帧末统一弹确认;与浏览态同一通道)。
+    let close_sink =
+        (!live.browse_locked).then(|| std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    let with_close = close_sink.as_ref().map(|sink| {
+        let sink = std::rc::Rc::clone(sink);
+        move |ui: &mut egui::Ui, code: &str, lang: &str| {
+            crate::ui::rich_widgets::code_header_buttons(
+                ui,
+                code,
+                lang,
+                Some(crate::ui::rich_widgets::CodeClose { index, sink: &sink }),
+            );
+        }
+    });
+
+    let mut focus = None;
+    let edit_id = editor_id.with(("live-code-edit", index));
+    {
+        // 正文渲染闭包:块文本的借用在这里让位给 BlockBuffer 的 &mut。
+        let mut body = |ui: &mut egui::Ui| -> egui::Vec2 {
+            let mut route = None;
+            let global_range =
+                body_start_byte..(body_start_byte + visible_body_bytes).min(editor.text().len());
+            let mut buffer = BlockBuffer::full(editor, global_range);
+            let rows = visible_body.lines().count().max(1);
+            // 浏览态 galley 每行前置一个空格(pad_code_body),字形整体
+            // 右移一个空格宽;编辑态用左内距等量补偿,进入编辑字形不跳。
+            let space_w = ui.fonts_mut(|f| f.glyph_width(&code_font, ' '));
+            // 正文内容宽(等宽字形宽度和):期望宽 = 内容宽 + 左内距。
+            // desired_width(INFINITY) 会把代码框撑满整列,shrink 语义失效;
+            // 行尾追加的字符下一帧随块文本更新变宽,一帧滞后可接受。
+            let mut distinct: Vec<char> = visible_body.chars().collect();
+            distinct.sort_unstable();
+            distinct.dedup();
+            let advances: std::collections::HashMap<char, f32> = ui.fonts_mut(|f| {
+                distinct
+                    .iter()
+                    .map(|&c| (c, f.glyph_width(&code_font, c)))
+                    .collect()
+            });
+            let content_width = visible_body
+                .lines()
+                .map(|line| {
+                    line.chars()
+                        .map(|c| advances.get(&c).copied().unwrap_or(0.0))
+                        .sum::<f32>()
+                })
+                .fold(0.0_f32, f32::max);
+            let edit = egui::TextEdit::multiline(&mut buffer)
+                .id(edit_id)
+                .font(code_font.clone())
+                .desired_width((content_width + space_w).max(24.0))
+                .desired_rows(rows.clamp(1, 40))
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin::ZERO))
+                .lock_focus(true)
+                .margin(egui::Margin {
+                    left: space_w.round() as i8,
+                    ..egui::Margin::ZERO
+                })
+                .layouter(&mut layouter);
+            let output = edit.show(ui);
+            if let Some(lchar) = land {
+                let mut state = output.state.clone();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(lchar),
+                    )));
+                state.store(ui.ctx(), edit_id);
+                ui.ctx().memory_mut(|mem| mem.request_focus(edit_id));
+            }
+            // IME 候选框跟随(源码模式同款显式 IMERect):输入法事件帧
+            // 且本编辑器持焦时,把光标矩形上报视口。
+            let focused = ui.ctx().memory(|mem| mem.has_focus(edit_id));
+            let ime_event = ui.ctx().input(|input| {
+                input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Ime(_)))
+            });
+            if ime_event && focused {
+                if let Some(range) = output.state.cursor.char_range() {
+                    let caret = output
+                        .galley
+                        .pos_from_cursor(egui::text::CCursor::new(range.primary.index.0));
+                    let caret_rect = egui::Rect::from_min_max(
+                        output.galley_pos + caret.min.to_vec2(),
+                        output.galley_pos + caret.max.to_vec2(),
+                    );
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::IMERect(caret_rect));
+                }
+            }
+            // 跨块路由:正文首 ↑/← 去上一块可见末尾;正文尾 ↓/→ 去下一
+            // 块开头。Shift 按住一律不路由(选区扩展不出块,与源码通路
+            // 同一语义)。
+            if focused && !ui.input(|input| input.modifiers.shift) {
+                let caret_local = output
+                    .state
+                    .cursor
+                    .char_range()
+                    .map(|range| range.primary.index.0);
+                let at_start = caret_local == Some(0);
+                let at_end = caret_local.is_some_and(|caret| caret >= body_len_chars);
+                let prev_end = (index > 0).then(|| {
+                    let prev = &editor.text()[live.blocks[index - 1].clone()];
+                    visible_char_len(prev)
+                });
+                let (up_or_left, down_or_right) = ui.input(|input| {
+                    (
+                        input.key_pressed(egui::Key::ArrowUp)
+                            || input.key_pressed(egui::Key::ArrowLeft),
+                        input.key_pressed(egui::Key::ArrowDown)
+                            || input.key_pressed(egui::Key::ArrowRight),
+                    )
+                });
+                if up_or_left && at_start && index > 0 {
+                    route = Some((index - 1, prev_end.unwrap_or(0)));
+                } else if down_or_right && at_end {
+                    route = Some((index + 1, 0));
+                }
+            }
+            if ui.ctx().memory(|mem| mem.has_focus(edit_id)) {
+                focus = Some(ActiveCodeFocus {
+                    output,
+                    body_start_char,
+                    route,
+                });
+            }
+            ui.min_rect().size()
+        };
+        let mut options = egui_markdown::CodeBlockRenderOptions {
+            shrink_to_content: true,
+            // 与浏览态富渲染同参(写作列富渲染臂的 code_block_min_width)。
+            min_width: Some(200.0),
+            body_renderer: Some(&mut body),
+        };
+        let lang_arg = if parts.info.is_empty() {
+            None
+        } else {
+            Some(parts.info.as_str())
+        };
+        #[allow(clippy::type_complexity)]
+        let buttons: Option<&dyn Fn(&mut egui::Ui, &str, &str)> = match with_close.as_ref() {
+            Some(buttons) => Some(buttons),
+            None => Some(&crate::ui::rich_widgets::code_copy_buttons),
+        };
+        egui_markdown::render_code_block_with_options(
+            ui,
+            editor_id.with(("live-code", index)),
+            &block_text[parts.body.clone()],
+            lang_arg,
+            buttons,
+            &style,
+            None,
+            &mut options,
+        );
+    }
+    // 源码形态的实测高记账(与活动臂 `live-src-h` 同槽):塌缩预测按
+    // 「富渲染估高 − 本态实测」算位移,两侧必须同口径取**外框高**(占位
+    // 臂的占位 = 同一估高器的产物)—— 原地编辑帧不记账会让落地帧凭空
+    // 跳一截(2026-10-23 锚定测试实测)。
+    if let Some(geometry) =
+        egui_markdown::code_block_geometry(ui.ctx(), editor_id.with(("live-code", index)))
+    {
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(
+                editor_id.with(("live-src-h", index)),
+                geometry.frame.height(),
+            )
+        });
+    }
+    // 关闭信号(drain 在渲染之后,同一帧成立):置待确认动作,弹窗在
+    // 帧末统一渲染(见 `pending_block_action`)。
+    if close_sink
+        .as_ref()
+        .is_some_and(|sink| !sink.borrow().is_empty())
+    {
+        live.pending_block_action = Some(PendingBlockAction::CodeClose(index));
+    }
+    focus
+}
+
 /// Resolve a click inside a rendered table cell to a source-local character offset.
 /// Table cells are independent widgets and are intentionally absent from the text
 /// galley hit table, so this uses the geometry recorded by the shared table renderer.
@@ -3614,6 +4015,86 @@ fn table_caret_local(
         .find(|(_, _, _, rect)| rect.contains(pos))?;
     let source = logical_rows.get(*row)?.cells.get(*col)?.1.clone();
     Some(block_text[..source.start].chars().count().saturating_add(2))
+}
+
+/// 富渲染代码块「点击进编辑」的落点:代码正文 galley 与表格单元格一样
+/// 不在文本命中表(独立 widget),用 vendored 渲染时记录的几何探针把
+/// 点击点映到正文源码。返回**块内字节偏移**(与 `click_caret_local` 同
+/// 量纲,经调用方的 byte→char 换算进 pending_caret)。galley 之外(框内
+/// 距/头部区)钳到 galley 矩形取最近字符,不落块尾。
+fn code_caret_local(
+    ui: &egui::Ui,
+    label_id: egui::Id,
+    pos: egui::Pos2,
+    block_text: &str,
+) -> Option<usize> {
+    let parts = code_fence_parts(block_text)?;
+    let md = egui_markdown::parse(block_text);
+    let (token_index, _) = md
+        .tokens
+        .iter()
+        .enumerate()
+        .find(|(_, token)| matches!(token, egui_markdown::Token::CodeBlock { .. }))?;
+    let geometry =
+        egui_markdown::code_block_geometry(ui.ctx(), label_id.with(("code_block", token_index)))?;
+    let galley = geometry.galley.as_ref()?;
+    // 屏幕 → galley 局部:galley.rect 与 pos_from_cursor 都是局部坐标
+    // (rect.top() 恒 0),落点先平移再钳。
+    let clamped = egui::Pos2::new(
+        (pos.x - geometry.body.min.x).clamp(galley.rect.min.x, galley.rect.max.x),
+        (pos.y - geometry.body.min.y).clamp(galley.rect.min.y, galley.rect.max.y),
+    );
+    // 行号:行高均匀,按 y 找所在行(行外钳到首/末行)。
+    let row_index = galley
+        .rows
+        .iter()
+        .position(|row| clamped.y < row.max_y())
+        .unwrap_or(galley.rows.len().saturating_sub(1));
+    // 列号 = 插入点(光标语义):逐字符量左缘,取「中点已越过点击 x」的
+    // 最后一个字符位。不用 `cursor_from_pos`:它按字形列计数,而代码
+    // galley 的填充空格(pad_code_body 行首)与行内空格都不产字形,字符
+    // 列会错位。
+    let mut padded_line_start = 0usize;
+    for row in &galley.rows[..row_index] {
+        padded_line_start += row.char_count_including_newline().0;
+    }
+    let line_len = galley
+        .rows
+        .get(row_index)
+        .map(|row| row.char_count_including_newline().0)
+        .unwrap_or(0);
+    let mut col = 0usize;
+    for i in 0..line_len {
+        let left = galley
+            .pos_from_cursor(egui::text::CCursor::new(padded_line_start + i))
+            .min
+            .x;
+        let next_left = galley
+            .pos_from_cursor(egui::text::CCursor::new(padded_line_start + i + 1))
+            .min
+            .x;
+        if clamped.x >= (left + next_left) * 0.5 {
+            col = i + 1;
+        } else {
+            break;
+        }
+    }
+    // padded 行 = 空格 + 正文行:col 从行首(含 pad)计,内容插入点 =
+    // col − 1(钳 0);col 落到行尾即内容末尾。
+    let full_body = &block_text[parts.body.start..parts.body.end];
+    let mut body_line_byte = 0usize;
+    let mut clicked = None;
+    for (i, raw_line) in full_body.split('\n').enumerate() {
+        if i == row_index {
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            let content_caret = col.saturating_sub(1).min(line.chars().count());
+            let byte = char_indices_to_byte(line, content_caret);
+            clicked = Some(parts.body.start + body_line_byte + byte);
+            break;
+        }
+        body_line_byte += raw_line.len() + 1;
+    }
+    Some(clicked.unwrap_or(parts.body.end))
 }
 
 /// 富渲染块「点击进入编辑」的命中检测。**不挂 egui widget**:块级矩形一旦
@@ -5437,6 +5918,419 @@ mod tests {
         assert_eq!(rows[0].cells[0].1, 1..9);
         assert_eq!(rows[0].cells[1].1, 10..16);
         assert_eq!(&block[rows[2].cells[1].1.clone()], " xxxxx ");
+    }
+
+    // —— 代码块原地编辑(2026-10-23,表格单元格同款) ——
+
+    #[test]
+    fn code_fence_parts_parses_info_and_body() {
+        let parts = code_fence_parts("```rust\nlet a = 1;\nlet b = 2;\n```\n\n尾\n").unwrap();
+        assert_eq!(parts.info, "rust");
+        assert_eq!(
+            &"```rust\nlet a = 1;\nlet b = 2;\n```\n\n尾\n"[parts.body.clone()],
+            "let a = 1;\nlet b = 2;\n",
+            "正文 = 开栏行末到闭合行首"
+        );
+        // CRLF:行尾 \r 不进 info;正文含 \r\n
+        let text = "```\r\na\r\nb\r\n```\r\n";
+        let parts = code_fence_parts(text).unwrap();
+        assert_eq!(parts.info, "");
+        assert_eq!(&text[parts.body.clone()], "a\r\nb\r\n");
+        // 正文里的围栏形内容行(带尾随文字)不是闭合行
+        let text = "```text\n``` 不是闭合\nx\n```\n";
+        let parts = code_fence_parts(text).unwrap();
+        assert_eq!(&text[parts.body.clone()], "``` 不是闭合\nx\n");
+        // 未闭合 / 缩进代码:没有部件
+        assert!(code_fence_parts("```rust\nlet a").is_none());
+        assert!(code_fence_parts("    let a = 1;\n").is_none());
+    }
+
+    /// 原地编辑的核心验收:进入活动态后代码框与正文墨迹和浏览态逐像素
+    /// 同位(围栏隐藏、几何零变化),且正文真的可编辑。
+    #[test]
+    fn active_code_block_is_in_place_and_editable() {
+        let ctx = egui::Context::default();
+        let mut editor =
+            EditorBuffer::new("标题\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n\n正文\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let editor_id = egui::Id::new("live-copy-test");
+        let browse_body = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("let a = 1;"))
+            .expect("浏览态渲染代码正文")
+            .1;
+        let browse_geometry = egui_markdown::code_block_geometry(
+            &ctx,
+            editor_id.with(("live-render", 1)).with(("code_block", 0)),
+        )
+        .expect("浏览态记录代码块几何");
+        assert!(browse_geometry.galley.is_some(), "默认路径带正文 galley");
+
+        // 进入活动态(pending_caret 落正文首)
+        live.active = Some(1);
+        live.sync(&editor, None);
+        live.pending_caret = Some((1, 0));
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert_eq!(live.pending_caret, None, "落点已消费");
+        let edit_body = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("let a = 1;"))
+            .expect("编辑态仍渲染代码正文")
+            .1;
+        assert!(
+            (edit_body.left() - browse_body.left()).abs() < 2.0,
+            "正文 x 漂移(左内距未同参?):浏览 {browse_body:?} vs 编辑 {edit_body:?}"
+        );
+        assert!(
+            (edit_body.top() - browse_body.top()).abs() < 2.0,
+            "正文 y 漂移(行高未同参?):浏览 {browse_body:?} vs 编辑 {edit_body:?}"
+        );
+        let edit_geometry =
+            egui_markdown::code_block_geometry(&ctx, editor_id.with(("live-code", 1)))
+                .expect("编辑态走 vendored 同源渲染");
+        assert!(edit_geometry.galley.is_none(), "编辑态不建富渲染 galley");
+        assert!(
+            (edit_geometry.frame.height() - browse_geometry.frame.height()).abs() < 2.0,
+            "代码框高度漂移(围栏行漏显?):浏览 {:.1} vs 编辑 {:.1}",
+            browse_geometry.frame.height(),
+            edit_geometry.frame.height()
+        );
+        // 编辑态不把代码框撑满整列(shrink 语义与浏览态一致)
+        assert!(
+            (edit_geometry.frame.width() - browse_geometry.frame.width()).abs() < 8.0,
+            "代码框宽度漂移(编辑态撑满整列?):浏览 {:.1} vs 编辑 {:.1}",
+            browse_geometry.frame.width(),
+            edit_geometry.frame.width()
+        );
+        // 正文可编辑:聚焦正文键入 → splice 进共享缓冲,围栏原样
+        live_frame(
+            &ctx,
+            vec![egui::Event::Text("X".to_owned())],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(
+            editor.text().contains("```rust\nXlet a = 1;"),
+            "键入落在正文首(块内字符 0):{:?}",
+            editor.text()
+        );
+        assert!(editor.text().contains("```"), "围栏原样保留");
+        assert_eq!(live.active, Some(1), "编辑中块保持活动");
+    }
+
+    /// 浏览态点击代码正文:caret 落在点击处(几何探针命中),不落块尾。
+    #[test]
+    fn code_block_click_lands_caret_in_body() {
+        let ctx = egui::Context::default();
+        let mut editor =
+            EditorBuffer::new("标题\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n\n正文\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        // 取第二行 "let b = 2;" 里 'b' 的字形位置,点它正中
+        let b_pos = frame
+            .glyph_chars
+            .iter()
+            .find(|(text, _)| text.contains("let b = 2;"))
+            .and_then(|(_, glyphs)| glyphs.iter().find(|(chr, _)| *chr == 'b'))
+            .map(|(_, pos)| *pos)
+            .expect("第二行字形已收集");
+        for events in click_events(b_pos + egui::vec2(2.0, 7.0)) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        assert_eq!(live.active, Some(1), "点击进编辑");
+        // 落点帧 + 稳帧(egui 焦点在帧末授予,光标回填在持焦帧)
+        for _ in 0..2 {
+            live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        let block = live.blocks[1].clone();
+        let body_start = block.start + "```rust\n".len();
+        let clicked_byte = body_start + "let a = 1;\n".len() + "let ".len();
+        assert_eq!(
+            cursor.byte,
+            Some(clicked_byte),
+            "caret 落在点击的 'b' 处,不落块尾:{:?}",
+            cursor.byte
+        );
+    }
+
+    /// 浏览态点击代码框头部/复制按钮不进编辑本就由探针排除;这里钉
+    /// 「点正文之外(语言标签一侧)进编辑不 panic、落点钳进正文」。
+    #[test]
+    fn code_block_click_outside_body_clamps_into_body() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("标题\n\n```rust\nlet a = 1;\n```\n\n正文\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let (_, body_rect) = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("let a = 1;"))
+            .expect("正文已渲染");
+        // 点正文 galley 上方(框内距区):探针 galley 之外,钳位落正文首
+        for events in click_events(egui::pos2(body_rect.center().x, body_rect.top() - 8.0)) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        assert_eq!(live.active, Some(1), "点击代码框仍进编辑");
+        for _ in 0..2 {
+            live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        let block = live.blocks[1].clone();
+        let body_start = block.start + "```rust\n".len();
+        let body_end = block.end - "```\n".len();
+        assert!(
+            cursor
+                .byte
+                .is_some_and(|byte| byte >= body_start && byte <= body_end),
+            "落点钳进正文:{:?} vs 正文 {body_start}..{body_end}",
+            cursor.byte
+        );
+    }
+
+    /// 中文正文与 CRLF 行尾的原地编辑不 panic、splice 位置正确
+    /// (PR#313 表格同族回归)。
+    #[test]
+    fn active_code_block_cjk_and_crlf_edit_in_place() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("```rust\n中文行\r\nsecond\r\n```\r\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(0),
+            ..LiveState::default()
+        };
+        live.sync(&editor, None);
+        live.pending_caret = Some((0, 0));
+        live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        live_frame(
+            &ctx,
+            vec![egui::Event::Text("改".to_owned())],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(
+            editor.text().contains("```rust\n改中文行"),
+            "键入落在正文首:{:?}",
+            editor.text()
+        );
+        assert!(editor.text().contains("second"), "其余正文不受影响");
+        assert!(editor.text().contains("```"), "围栏原样保留");
+    }
+
+    /// 未闭合围栏(AI 流式中)与缩进代码不进原地编辑:仍走整块源码
+    /// TextEdit(旧行为,回归护栏)。
+    #[test]
+    fn unclosed_fence_and_indented_code_keep_source_edit() {
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("live-copy-test");
+        for doc in [
+            "前言\n\n```rust\nlet a = 1;\n",
+            "正文\n\n    let a = 1;\n\n尾\n",
+        ] {
+            let mut editor = EditorBuffer::new(doc);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState {
+                active: Some(1),
+                ..LiveState::default()
+            };
+            live.sync(&editor, None);
+            live.pending_caret = Some((1, 0));
+            let frame = live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            assert!(
+                egui_markdown::code_block_geometry(&ctx, editor_id.with(("live-code", 1)))
+                    .is_none(),
+                "未闭合/缩进代码不走原地编辑:{doc:?}"
+            );
+            // 源码通路还在:围栏/缩进整块文本在墨迹里
+            assert!(
+                doc.contains("```") == frame.texts.iter().any(|(text, _)| text.contains("```")),
+                "源码 TextEdit 保留围栏可见:{doc:?}"
+            );
+        }
+    }
+
+    /// 单行正文的代码块同样逐像素同位(1 行 galley 的行高取整路径)。
+    #[test]
+    fn active_code_block_one_line_keeps_browse_geometry() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("标题\n\n```text\n filler \n```\n\n正文\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let _ = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let editor_id = egui::Id::new("live-copy-test");
+        let browse = egui_markdown::code_block_geometry(
+            &ctx,
+            editor_id.with(("live-render", 1)).with(("code_block", 0)),
+        )
+        .expect("browse geom");
+        live.active = Some(1);
+        live.sync(&editor, None);
+        live.pending_caret = Some((1, 0));
+        let _ = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let edit = egui_markdown::code_block_geometry(&ctx, editor_id.with(("live-code", 1)))
+            .expect("edit geom");
+        assert!(
+            (edit.frame.height() - browse.frame.height()).abs() < 2.0,
+            "单行代码框高度漂移:浏览 {:.3} vs 编辑 {:.3}",
+            browse.frame.height(),
+            edit.frame.height()
+        );
+        assert!(
+            (edit.body.top() - browse.body.top()).abs() < 2.0,
+            "单行正文 y 漂移:浏览 {:?} vs 编辑 {:?}",
+            browse.body,
+            edit.body
+        );
+    }
+
+    /// 活动代码块正文首/尾的方向键跨块路由(源码通路同语义)。
+    #[test]
+    fn active_code_block_routes_across_blocks_with_arrows() {
+        let ctx = egui::Context::default();
+        let mut editor =
+            EditorBuffer::new("标题\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n\n正文\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState {
+            active: Some(1),
+            ..LiveState::default()
+        };
+        live.sync(&editor, None);
+        live.pending_caret = Some((1, 0));
+        live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        // 正文首按 ↑ → 路由到上一块可见末尾
+        live_frame(
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowUp,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+                physical_key: None,
+            }],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert_eq!(live.active, Some(0), "↑ 出块到上一块");
+        assert!(live.pending_caret.is_some(), "落点交给上一块");
+        for _ in 0..2 {
+            live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        assert_eq!(cursor.byte, Some("标题".len()), "落在上一块可见末尾");
     }
 
     /// 表格工具条仅在悬停时出现；静帧不占布局，悬停后四枚按钮贴近表格。
@@ -7665,26 +8559,26 @@ mod tests {
             "点击行几何已捕获、锚定计划已挂载:{live:?}"
         );
         // 位移在点击帧末写进 ScrollArea state,落地帧的闭包才按新偏移布局
-        // —— 探针口径读落地帧
-        let offset_after_shift = run(
+        // —— 探针口径读落地帧。原地编辑(2026-10-23)之后代码块不再塌缩,
+        // 唯一的真实高度差来源消失:偏移应当几乎不动(≤2px,行几何取整),
+        // 「点击行钉在原地」由几何恒等直接成立,不再依赖塌缩补偿。
+        let _landing_frame = run(
             tick,
             Vec::new(),
             &mut editor,
             &mut preview,
             &mut cursor,
             &mut live,
-        )
-        .offset;
-        tick += 0.1;
-        assert!(
-            (offset_after_shift - offset_before).abs() > 1.0,
-            "锚定补偿真的动了偏移(前 {offset_before} 后 {offset_after_shift})"
         );
+        tick += 0.1;
 
         // 残差校正帧:偏移经「预测 + 残差」两次修正后,点击字符所在的
         // 源码行与点击行顶对齐。终态量法:TextEdit 矩形顶(帧内响应)+
         // 该块同参 shaping 的光标行顶(与生产共用 predict_source_layout)
-        // == 被点击渲染行顶,容差 2px。
+        // == 被点击渲染行顶,容差 2px。(原地编辑后唯一的高度差来源是
+        // 活动代码块塌回「剔除占位」的估高误差,由 live-src-h 记账 +
+        // 塌缩预测补偿,见 draw_active_code_block 的记账注释。)
+        tick += 0.1;
         tick += 0.1;
         let measure_frame = run(
             tick,
