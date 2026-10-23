@@ -3476,12 +3476,13 @@ enum TableAction {
 }
 
 /// 表格悬停工具条：仅当指针位于表格块或工具条自身时显示，且不占布局高度。
-/// 悬在**表格外**、上方空隙里，左缘与表格对齐（坤哥 2026-10-23 二轮反馈：
-/// 角内钉扎挡住表头首行）。上缘钳在上一块底缘（`min_top`）之下 —— 空隙
-/// 不够时向下让，宁可压回表头也不覆盖上一块；表贴视口顶、空隙滚出屏时
-/// 条不可见，退回角内保可点。`min_top` = 本块顶 - `block_gap`（调用点
-/// 传入）。加行/加列/删除由调用方在块文本借用结束后执行；复制直接写入
-/// 剪贴板。
+/// 悬在**表格外**、上方空隙里，左缘与表格对齐（坤哥 2026-10-23 反馈：角内
+/// 钉扎挡住表头首行）。外框底缘离表格顶 3px、顶缘钳在上一块底缘 +2px
+/// （`min_top` = 本块顶 - `block_gap`，调用点传入）—— 空隙不够时向下让，
+/// 宁可压回表头也不覆盖上一块；表贴视口顶、空隙滚出屏时条不可见，退回
+/// 角内保可点。条身用 `ICON_SM` 图标压到 18px 高，在最窄的 26px 块间隙
+/// （元件→元件）里上下各留 2px 呼吸。加行/加列/删除由调用方在块文本
+/// 借用结束后执行；复制直接写入剪贴板。
 fn draw_table_toolbar(
     ui: &mut egui::Ui,
     block_text: &str,
@@ -3492,32 +3493,34 @@ fn draw_table_toolbar(
 ) -> TableAction {
     let _ = (live, index);
     let size = egui::vec2(
-        crate::ui::tokens::ICON + 2.0 * crate::ui::tokens::SPACE_XS,
-        20.0,
+        crate::ui::tokens::ICON_SM + 2.0 * crate::ui::tokens::SPACE_XS,
+        18.0,
     );
     let count = 4.0_f32;
     let gap = 2.0;
     let total_w = count * size.x + (count - 1.0) * gap;
     let clip = ui.clip_rect();
-    // 下缘离表格顶 2px；上缘不越过上一块底 +1px。外框 expand(2.0),
-    // 条左缘 +2px 使外框与表格左缘齐平。
-    let mut top = (block_rect.top() - size.y - 2.0).max(min_top + 1.0);
-    if top < clip.top() {
-        top = block_rect.top() + 3.0;
+    let expand = 2.0_f32;
+    // 以外框为基准定位:期望外框底缘离表格顶 3px(呼吸),顶缘不越过
+    // 上一块底 +2px。条左缘 +expand 使外框与表格左缘齐平。
+    let frame_h = size.y + 2.0 * expand;
+    let mut frame_top = (block_rect.top() - 3.0 - frame_h).max(min_top + 2.0);
+    if frame_top < clip.top() {
+        frame_top = block_rect.top() + 3.0;
     }
     let bar_rect = egui::Rect::from_min_size(
-        egui::pos2(block_rect.left() + 2.0, top),
+        egui::pos2(block_rect.left() + expand, frame_top + expand),
         egui::vec2(total_w, size.y),
     );
-    // 悬停区取表格与条的并集:条与表格之间留了 2px 空隙,指针横穿时
-    // 若按两矩形分别判定会闪断一帧。
+    // 悬停区取表格与条的并集:条与表格之间留了空隙,指针横穿时若按两
+    // 矩形分别判定会闪断一帧。
     let bar_hover = ui.rect_contains_pointer(block_rect.union(bar_rect));
     if !bar_hover {
         crate::ui::rich_widgets::push_table_toolbar_rects(ui.ctx(), Vec::new());
         return TableAction::None;
     }
     let mut hit_rects = Vec::new();
-    let bar_frame = bar_rect.expand(2.0);
+    let bar_frame = bar_rect.expand(expand);
     ui.painter().rect_filled(
         bar_frame,
         crate::ui::tokens::RADIUS_SM,
@@ -3569,7 +3572,12 @@ fn draw_table_toolbar(
             ui.painter()
                 .rect_filled(rect, crate::ui::tokens::RADIUS_SM, fill);
         }
-        icon.draw(ui.painter(), rect.center(), crate::ui::tokens::ICON, color);
+        icon.draw(
+            ui.painter(),
+            rect.center(),
+            crate::ui::tokens::ICON_SM,
+            color,
+        );
         let response = response.on_hover_text(tip);
         hit_rects.push(rect);
         if !response.clicked() {
