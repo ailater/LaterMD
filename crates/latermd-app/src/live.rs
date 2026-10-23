@@ -3168,18 +3168,24 @@ fn apply_pending_block_action(
 struct ActiveTableRow {
     header: bool,
     separator: bool,
+    /// The source line range within the table block, excluding its newline.
+    source: Range<usize>,
     cells: Vec<(String, Range<usize>)>,
 }
 
 /// 把表格块解析成行/单元格(带块内字节区间)。要求管道表格的规整形态
 /// (每行 ≥2 根管道);不合规格返回 None,活动态回落整块源码 TextEdit。
 fn table_rows(block: &str) -> Option<Vec<ActiveTableRow>> {
-    let content = block.trim_end_matches('\n');
+    let content = block.trim_end_matches(['\r', '\n']);
     if content.is_empty() {
         return None;
     }
     let mut rows = Vec::new();
-    for (i, line) in content.lines().enumerate() {
+    let mut line_start = 0;
+    for (i, raw_line) in content.split('\n').enumerate() {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let line_source_start = line_start;
+        line_start += raw_line.len() + usize::from(line_start + raw_line.len() < content.len());
         let trimmed = line.trim();
         if !trimmed.starts_with('|') {
             return None;
@@ -3189,6 +3195,7 @@ fn table_rows(block: &str) -> Option<Vec<ActiveTableRow>> {
             rows.push(ActiveTableRow {
                 header: false,
                 separator: true,
+                source: line_source_start..line_source_start + line.len(),
                 cells: Vec::new(),
             });
             continue;
@@ -3205,12 +3212,16 @@ fn table_rows(block: &str) -> Option<Vec<ActiveTableRow>> {
             .windows(2)
             .map(|w| {
                 let raw = &line[w[0] + 1..w[1]];
-                (raw.trim().to_owned(), w[0] + 1..w[1])
+                (
+                    raw.trim().to_owned(),
+                    line_source_start + w[0] + 1..line_source_start + w[1],
+                )
             })
             .collect();
         rows.push(ActiveTableRow {
             header: i == 0,
             separator: false,
+            source: line_source_start..line_source_start + line.len(),
             cells,
         });
     }
@@ -3235,23 +3246,31 @@ impl egui::TextBuffer for CellBuffer<'_> {
 
     fn as_str(&self) -> &str {
         let text = self.buffer.text();
-        let start = self.buffer.char_to_byte(self.start_char);
-        let end = self.buffer.char_to_byte(self.start_char + self.len_chars);
+        let start_char = self.start_char.min(self.buffer.len_chars());
+        let end_char = (self.start_char + self.len_chars).min(self.buffer.len_chars());
+        let start = self.buffer.char_to_byte(start_char);
+        let end = self.buffer.char_to_byte(end_char.max(start_char));
         &text[start..end]
     }
 
     fn insert_text(&mut self, text: &str, char_index: egui::text::CharIndex) -> usize {
-        let at = self.start_char + char_index.0;
+        let local = char_index.0.min(self.len_chars);
+        let at = (self.start_char + local).min(self.buffer.len_chars());
         self.buffer.insert_chars(at, text);
-        self.len_chars += text.chars().count();
-        text.chars().count()
+        let inserted = text.chars().count();
+        self.len_chars += inserted;
+        inserted
     }
 
     fn delete_char_range(&mut self, char_range: Range<egui::text::CharIndex>) {
-        let start = self.start_char + char_range.start.0;
-        self.buffer
-            .remove_chars(start..self.start_char + char_range.end.0);
-        self.len_chars -= char_range.end.0 - char_range.start.0;
+        let start_local = char_range.start.0.min(self.len_chars);
+        let end_local = char_range.end.0.min(self.len_chars).max(start_local);
+        let start = (self.start_char + start_local).min(self.buffer.len_chars());
+        let end = (self.start_char + end_local)
+            .min(self.buffer.len_chars())
+            .max(start);
+        self.buffer.remove_chars(start..end);
+        self.len_chars -= end_local - start_local;
     }
 
     fn type_id(&self) -> std::any::TypeId {
@@ -3309,44 +3328,50 @@ fn draw_active_table(
         }
     }
 
-    // pending_caret 落点 → (行, 列, 单元格内字符):块内字符偏移逐行消耗
-    // (行字符数 = 行文本字符 + 1 个换行),再在行内按单元格字符宽找列。
+    // pending_caret 落点 → (行, 列, 单元格内字符)。所有比较都基于
+    // table_rows 产出的块内源区间，不能把区间误当成当前行的局部 offset。
     let mut land: Option<(usize, usize, usize)> = None;
     if let Some((block, char_idx)) = live.pending_caret {
         if block == index {
-            let mut remain = char_idx;
             for (r, row) in rows.iter().enumerate() {
-                let line = block_text.lines().nth(r).unwrap_or("");
-                let line_chars = line.chars().count() + 1;
-                if remain <= line_chars {
-                    let mut in_cell = remain;
+                let row_end = block_text[..row.source.end].chars().count();
+                if char_idx <= row_end {
+                    let mut target = None;
                     for (c, (_, src)) in row.cells.iter().enumerate() {
-                        let cell_chars = block_text[src.clone()].chars().count();
-                        if in_cell <= cell_chars {
-                            land = Some((r, c, in_cell));
+                        let cell_start = block_text[..src.start].chars().count();
+                        let cell_len = block_text[src.clone()].chars().count();
+                        if char_idx <= cell_start + cell_len {
+                            target = Some((
+                                c,
+                                char_idx
+                                    .saturating_sub(cell_start)
+                                    .saturating_add(2)
+                                    .min(cell_len),
+                            ));
                             break;
                         }
-                        in_cell -= cell_chars;
                     }
-                    // 落点在管道/行内空白上(不属于任何单元格):钳到本行
-                    // 最后一个单元格的末尾,焦点不落空
-                    if land.is_none() {
-                        if let Some((_, src)) = row.cells.last() {
-                            let last = block_text[src.clone()].chars().count();
-                            land = Some((r, row.cells.len() - 1, last));
-                        }
-                    }
+                    let (c, local) = target.unwrap_or_else(|| {
+                        let (c, (_, src)) = row
+                            .cells
+                            .iter()
+                            .enumerate()
+                            .next_back()
+                            .expect("table row has cells");
+                        (c, block_text[src.clone()].chars().count())
+                    });
+                    land = Some((r, c, local));
                     break;
                 }
-                remain -= line_chars;
             }
             live.pending_caret = None;
             live.caret_follow = false;
         }
     }
 
-    let block_start_char = editor.byte_to_char(block_start_byte);
     let mut focus: Option<ActiveTableFocus> = None;
+    // Keep source offsets valid after an earlier cell edit in this frame.
+    let mut source_shift: isize = 0;
     for (r, row) in rows.iter().enumerate() {
         if row.separator {
             // 分隔行:横线占位(不可编辑,列数变化时自动重排)
@@ -3363,8 +3388,17 @@ fn draw_active_table(
         }
         for (c, (_, src)) in row.cells.iter().enumerate() {
             let cell_id = editor_id.with(("live-tcell", index, r, c));
-            let cell_start_char = block_start_char + block_text[..src.start].chars().count();
-            let len_chars = block_text[src.clone()].chars().count();
+            let adjusted_start = (src.start as isize + source_shift).max(0) as usize;
+            let adjusted_end =
+                (src.end as isize + source_shift).max(adjusted_start as isize) as usize;
+            let text = editor.text();
+            let start_byte = (block_start_byte + adjusted_start).min(text.len());
+            let end_byte = (block_start_byte + adjusted_end)
+                .min(text.len())
+                .max(start_byte);
+            let cell_start_char = editor.byte_to_char(start_byte);
+            let len_chars = text[start_byte..end_byte].chars().count();
+            let before_len = editor.text().len();
             let mut buffer = CellBuffer {
                 buffer: editor,
                 start_char: cell_start_char,
@@ -3380,6 +3414,8 @@ fn draw_active_table(
                 cell = cell.text_color(ui.visuals().strong_text_color());
             }
             let output = cell.show(ui);
+            let after_len = editor.text().len();
+            source_shift += after_len as isize - before_len as isize;
             // 单元格右缘竖线,拼出网格感
             let rect = output.response.response.rect;
             ui.painter().line_segment(
@@ -5380,6 +5416,15 @@ mod tests {
     fn table_rows_roundtrip_after_cell_edit() {
         let rows = table_rows("| a | b X |\n| --- | --- |").unwrap();
         assert_eq!(rows[0].cells[1].0, "b X");
+    }
+
+    #[test]
+    fn table_rows_use_block_byte_ranges_for_unicode_and_crlf() {
+        let block = "| 中文 | 😀 |\r\n| --- | --- |\r\n| 长 | xxxxx |";
+        let rows = table_rows(block).unwrap();
+        assert_eq!(rows[0].cells[0].1, 1..9);
+        assert_eq!(rows[0].cells[1].1, 10..16);
+        assert_eq!(&block[rows[2].cells[1].1.clone()], " xxxxx ");
     }
 
     /// titlebar 宽度跟表格实际宽:宽屏下四枚图标贴在表格宽度附近,
