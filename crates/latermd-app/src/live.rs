@@ -3327,6 +3327,16 @@ fn draw_active_table(
             col_w[c] = col_w[c].max(galley.size().x + cell_pad_x + 4.0);
         }
     }
+    // titlebar 与表格网格共用最小宽度:四个按钮必须完整落在表格范围内,
+    // 不能出现「titlebar 比下面表格宽」或按钮溢出表格的断层。
+    let table_width = col_w.iter().sum::<f32>();
+    let titlebar_min_width = table_titlebar_min_width();
+    if table_width < titlebar_min_width && col_count > 0 {
+        let extra = (titlebar_min_width - table_width) / col_count as f32;
+        for width in &mut col_w {
+            *width += extra;
+        }
+    }
 
     // pending_caret 落点 → (行, 列, 单元格内字符)。所有比较都基于
     // table_rows 产出的块内源区间，不能把区间误当成当前行的局部 offset。
@@ -3455,6 +3465,12 @@ fn draw_active_table(
 /// 臂的占位(`table_titlebar_h`),两处同源,别只改一处。
 const TABLE_TITLEBAR_H: f32 = 24.0;
 
+/// 表格 titlebar 与表格网格共同使用的最小宽度。
+fn table_titlebar_min_width() -> f32 {
+    let icon_w = crate::ui::tokens::ICON + 2.0 * crate::ui::tokens::SPACE_XS;
+    4.0 * icon_w + 3.0 * 2.0 + 60.0 + 2.0 * 4.0
+}
+
 /// 表格 titlebar 的占位高度:表格块且可写列(与真实渲染臂同一闸门)才有。
 /// 估高臂给视口外表格块补这 24px,否则占位永远比实测矮一截。
 fn table_titlebar_h(kind: BlockKind, block_text: &str, live: &LiveState, index: usize) -> f32 {
@@ -3510,7 +3526,7 @@ fn draw_table_titlebar(ui: &mut egui::Ui, block_text: &str) -> TableAction {
                 .layout_no_wrap(line.to_owned(), font.clone(), egui::Color32::WHITE);
         measured = measured.max(galley.size().x);
     }
-    let min_w = count * size.x + (count - 1.0) * gap + 60.0;
+    let min_w = table_titlebar_min_width();
     let bar_w = measured.clamp(min_w, (ui.available_width() - pad).max(min_w)) + 2.0 * pad;
     let bar_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(bar_w, TABLE_TITLEBAR_H));
     // 占位推进游标:hover 感知即可 —— 空白处的点击让给「整块点击进编辑」
