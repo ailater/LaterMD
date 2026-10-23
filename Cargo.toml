@@ -18,7 +18,7 @@ members = [
 
 [workspace.package]
 # 与发布 tag 对齐(dist 校验 tag 与包版本一致);v0.0.1 起合入 main 自动递增 patch
-version = "0.0.8"
+version = "0.0.9"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/ailater/LaterMd"
