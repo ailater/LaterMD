@@ -19,7 +19,9 @@ name = "latermd"
 path = "src/main.rs"
 
 [dependencies]
-eframe = "0.36.2"
+# eframe 的 feature 按平台分档声明(见文末两个 `[target.*.dependencies]`),
+# 不在 `[dependencies]` 里统一写一行:macOS 必须**关掉** accesskit,
+# 其余平台保留(原因见 macOS 段的长注释)。两处版本号必须同步改。
 # 图片渲染(docs/image-plan.md B 段):vendored 层把 Token::Image 画成
 # egui::Image 的分支在该 feature 之后(上游自带,未改 vendor 一行);
 # http 由 vendored 的 images feature 联动开启,ehttp 的原生后端就是依赖
@@ -110,7 +112,47 @@ harness = false
 # LATERMD_RENDERER=glow;CI 用 `--features glow` 编一条额外产线验证可编译。
 glow = ["eframe/glow"]
 
+# macOS:**关闭** eframe 的 accesskit(默认 feature 之一)。
+#
+# 依据:真机崩溃报告(2026-10-23 22:49,macOS 15.3.1 / MacBookPro15,4,
+# LaterMD 0.0.8)主线程 `EXC_BAD_INSTRUCTION (SIGILL)`,栈为
+#   -[_NSTouchBarFinderObservation invalidate]
+#   → -[NSObject(NSKeyValueObserverRegistration) removeObserver:forKeyPath:]
+#   → NSDisplayCycleFlush → -[NSApplication run]
+# 即 AppKit 在显示周期里撤销 Touch Bar 的 KVO 观察时抛出 NSRangeException,
+# AppKit 捕获不到就 `_crashOnException` 终止进程。根因在上游
+# AccessKit/accesskit#823:accesskit_macos 的 `SubclassingAdapter` 会
+# `object_setClass` 换掉 winit view 的类,drop 时又把类换回去,而 AppKit
+# 在此期间已对 `nextResponder` / `touchBar` 注册了 KVO(类被替换成
+# NSKVONotifying_*),换回去之后观察者仍在册 → 下一次 removeObserver 抛异常。
+# 我们锁定的 accesskit_macos 0.26.3 正含该缺陷,修复在上游 #835(main,
+# 截至 2026-10-24 尚未发版,且 eframe 0.36.2 钉的是 accesskit_winit 0.32
+# → accesskit_macos ^0.26,升不上去)。
+#
+# 代价与回退:关掉后 macOS 上 VoiceOver 读不到界面内容(其余平台不受影响);
+# 等上游发布含 #835 的 accesskit_macos 且 eframe 跟版后,把这一段的
+# `default-features = false, features = [...]` 还原成 `eframe = "0.36.2"` 即可。
+# features 清单 = eframe 0.36.2 的 default 去掉 accesskit,逐项抄自
+# eframe-0.36.2/Cargo.toml,不要凭记忆增删。唯一例外是 `winit/default`:
+# Cargo 不允许依赖声明里出现 "dep/feat" 形式的透传项(报错
+# "not allowed to contain slashes"),而 winit 0.30 的 default 只有
+# rwh_06 / x11 / wayland / wayland-dlopen / wayland-csd-adwaita 五项,
+# 前三项之外全属 Linux 后端 —— macOS 走 AppKit 后端,不受影响。
 [target.'cfg(target_os = "macos")'.dependencies]
+eframe = { version = "0.36.2", default-features = false, features = [
+    "default_fonts",
+    "links",
+    "wayland",
+    "web_screen_reader",
+    "wgpu",
+    "x11",
+] }
 objc2 = { version = "0.6.4", default-features = false }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSMenu", "NSMenuItem", "NSResponder", "NSEvent", "NSCell", "NSPasteboard", "NSWindow", "NSView", "NSButton", "NSControl"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString", "NSObject"] }
+
+# Windows / Linux:保留 eframe 全部默认 features(含 accesskit)。
+# accesskit 在这两个平台走 AT-SPI / UIA,没有 macOS 那个 #823 缺陷,
+# 不该陪着一起关 —— 屏幕阅读器支持是有用户的真功能。
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+eframe = { version = "0.36.2" }

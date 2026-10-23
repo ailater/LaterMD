@@ -41,6 +41,10 @@ mod layout;
 mod live;
 #[cfg(target_os = "macos")]
 mod mac_menu;
+// 守门跑在所有平台:它读的是 manifest 里 **macOS 段** 的 feature 分档,
+// 而本机(Linux)编不到那段 —— 正因为编不到才要在这里守。
+#[cfg(test)]
+mod macos_feature_gate;
 mod mcp;
 #[cfg(test)]
 mod packaging_assoc;

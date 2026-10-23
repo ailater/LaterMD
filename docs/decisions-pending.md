@@ -1365,3 +1365,16 @@
 - **岔路**:#158 的前缀弱色正文小字实际不可见(weak 色太暗太小),用户以为 # 没显示、不可编辑。①维持弱色小字;②幽灵语法:前缀与标题**同字号**,文本色降透明度(~43%,alpha 110)—— Obsidian/MarkText 观感,既是明显可编辑的语法,点击目标也够大;③隐藏前缀靠徽标交互改级别(徽标点击弹级别菜单,另立批次)。
 - **自动选择**:②。改级别 = 光标放块首敲/删 `#`,源码真实改写、徽标即时跟随(`live_heading_marker_ghost_visible_and_level_editable` 端到端钉住:H1 块首敲 `#` → 源码 `##`、徽标 H2);行高仍用标题行盒,块高零变化。
 - **如何改**:嫌幽灵色太显/太淡,调 `active_block_job` 里 `ghost` 的 alpha(现 110);要徽标点击改级别,给徽标挂弹层走 `clicked_for_edit` 的探针排除路径即可(登记为候选后续)。
+
+## #160 macOS 间歇崩溃止血:只在 macOS 关掉 eframe 的 accesskit(上游 AccessKit/accesskit#823;2026-10-23 真机崩溃反馈·自动拍板)
+
+- **岔路**:真机崩溃(2026-10-23 22:49,macOS 15.3.1 / MacBookPro15,4 / LaterMD 0.0.8,启动约 3 分钟后主线程 `EXC_BAD_INSTRUCTION (SIGILL)`),栈是
+  `-[_NSTouchBarFinderObservation invalidate]` → `removeObserver:forKeyPath:` → `NSDisplayCycleFlush` → `-[NSApplication run]`。
+  根因在上游 **AccessKit/accesskit#823**:`accesskit_macos` 的 `SubclassingAdapter` 用 `object_setClass` 换掉 winit 的 view 类、drop 时再换回来,而 AppKit 期间已对 `nextResponder`/`touchBar` 注册 KVO(类被换成 `NSKVONotifying_*`),换回之后观察者仍在册,下一次 `removeObserver` 抛 NSRangeException ⇒ AppKit 捕获不到直接终止进程。我们锁的 `accesskit_macos 0.26.3` 正含此缺陷。
+  四条路:①**全平台关 accesskit**;②**只在 macOS 关**;③vendor/fork 一份 `accesskit_macos` 把 #835 移植到 0.26.x;④升 eframe 0.37 等上游发版。
+- **自动选择**:②。`crates/latermd-app/Cargo.toml` 里 `eframe` 拆成两个 `[target.*.dependencies]` 段 —— macOS 段 `default-features = false` + 逐项列出 default 里除 accesskit 之外的六项,非 macOS 段保持 `eframe = "0.36.2"`(默认 features 全开)。`Cargo.lock` 零变化。
+- **为什么不取另三条**:①accesskit 在 Windows/Linux 走 UIA / AT-SPI,**没有** macOS 这个缺陷,跟着一起关等于白丢两个平台的屏幕阅读器支持。③#835 的修复(2026-10-23 merge)截至 2026-10-24 **尚未发版**(crates.io 上 `accesskit_macos` 最新仍是 0.27.1 / 2026-09-25),而 eframe 0.36.2 钉的是 `accesskit_winit 0.32 → accesskit_macos ^0.26`,即使发 0.27.2 也升不上去;fork 一份 0.26.4 要常驻维护。④eframe 0.36→0.37 是 egui 大版本迁移,为一个崩溃点不值得,且同样等上游。
+- **验证**:`cargo tree -p latermd-app -f "{p} {f}"` 三目标对比 —— `aarch64-apple-darwin` / `x86_64-apple-darwin` 树里 eframe features 为 `default_fonts,links,wayland,web_screen_reader,wgpu,x11`(无 accesskit、无 accesskit_winit/accesskit_macos),`x86_64-unknown-linux-gnu` / `x86_64-pc-windows-msvc` 仍带 `accesskit`(+ `accesskit_unix` / `accesskit_windows`)。本机 `cargo check -p latermd-app --all-targets` 与 `--features glow` 两条产线均 rc=0。**macOS 真机待复验**(本机 Linux 编不到:交叉 `cargo check --target x86_64-apple-darwin` 卡在 libz-sys 需要 macOS C 工具链)。
+  新增守门 `crates/latermd-app/src/macos_feature_gate.rs`(`#[cfg(test)]`,跑在所有平台因为它守的正是本机编不到的那段)三条:macOS 段不许出现 accesskit 且六项 feature 齐全、非 macOS 段不许 `default-features = false`、两段 eframe 版本一致。**红绿已实跑**:把 accesskit 塞回 macOS 段、删掉 macOS 段的 `default-features = false`、给非 macOS 段套上同款清单,三条各自当场 FAILED,还原后全绿(3 passed)。
+- **遗留**:`winit/default` 无法照抄进依赖声明(Cargo 报 "not allowed to contain slashes"),缺的是 `wayland-dlopen` / `wayland-csd-adwaita` 两项 —— 均为 Linux 后端,macOS 走 AppKit 不受影响;`rwh_06` 由 eframe 自己声明 winit 时直接开启,也不受影响。
+- **如何改**:上游发布含 #835 的 `accesskit_macos` 且 eframe 跟版之后,把 macOS 段还原成 `eframe = "0.36.2"`(删掉整段分档、把 eframe 放回 `[dependencies]`),并删除 `macos_feature_gate.rs` 与 main.rs 里对应 `mod` 一行。代价是 macOS 上 VoiceOver 读不到界面内容,属已知取舍,不是 bug。
