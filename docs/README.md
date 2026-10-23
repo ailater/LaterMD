@@ -12,6 +12,7 @@
 | [adr-004-technical-stack.md](adr-004-technical-stack.md) | 技术栈与依赖版本清单、打包方案、工具链 | 已接受（2026-09-24 重构） |
 | [adr-005-layout-and-sidebar.md](adr-005-layout-and-sidebar.md) | 三栏布局、侧边栏、字体与并发模型 | 已接受 |
 | [roadmap.md](roadmap.md) | 阶段划分、验收标准、crate 增量时机、风险登记册、当前位置 | 已接受（**排期唯一事实来源**） |
+| [site/README.md](site/README.md) | 官网下载页（`docs/site/` 静态站点，GitHub Pages 发布至 md.ailater.com） | 已上线（2026-10-23，v0.0.8 硬编码待随版本更新） |
 | [vendor-upgrade-checklist.md](vendor-upgrade-checklist.md) | egui_markdown vendor 与升级操作清单 | **已执行**(2026-09-24 六项全绿) |
 | [m0-report.md](m0-report.md) | M0 技术验证结论（IME / 帧率 / 三 target 实测数据） | 已产出（Linux 项完成；IME 与 Win·mac wgpu 待真机） |
 | [p0-acceptance.md](p0-acceptance.md) | P0 四条验收标准的逐条状态、证据出处与出口待办 | 跟踪中（功能 10/11，剩打包首跑验证） |
