@@ -44,6 +44,7 @@ mod mac_menu;
 mod mcp;
 #[cfg(test)]
 mod packaging_assoc;
+mod persist;
 #[cfg(test)]
 mod preview_pixel_acceptance;
 #[cfg(test)]

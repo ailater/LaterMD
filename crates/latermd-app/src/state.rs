@@ -606,11 +606,26 @@ impl Default for State {
             system_theme: None,
             system_theme_ok: false,
             system_theme_due: None,
-            settings_dir: None,
+            settings_dir: default_settings_dir(),
             autosave_switch_out: None,
             selection_ai_last: None,
         }
     }
+}
+
+/// 测试态把默认 settings_dir 钉到**进程级临时目录**:裸 `State::default()`
+/// 的测试(200+ 处)落到真实用户配置目录——实测 `cargo test` 并行线程
+/// 并发写同一份 `file_tree.json` 把它撕裂(trailing characters),测试
+/// 的临时路径还反过来污染了用户的树根。显式注入 `settings_dir` 的测试
+/// 不受影响;生产构建恒为 `None`(回落平台配置目录,行为不变)。
+#[cfg(test)]
+fn default_settings_dir() -> Option<std::path::PathBuf> {
+    Some(std::env::temp_dir().join(format!("latermd-test-settings-{}", std::process::id())))
+}
+
+#[cfg(not(test))]
+fn default_settings_dir() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// 选区 AI 浮标的两动作(#61 M1):TextEdit 选中内容后浮标点开的菜单项。
