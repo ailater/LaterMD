@@ -582,10 +582,12 @@ fn heal_complete_document_is_identity_and_borrowed() {
 ///   更多,倍数从 >5× 掉到 3.9×,原阈值 5.0 于是无理由地红)。倍数的语义
 ///   不变量是「miss 比 hit 贵一个量级」;改构建配置后要重新标定,别把红
 ///   当成性能退化。
+/// - 2026-10-24 再补一条:倍数也**随 runner 架构**浮动(aarch64-apple-
+///   darwin 上稳态被放得更贵,倍数系统性掉到 ~2×,见断言处的实测表),
+///   所以 miss 帧改为多文本取中位数、阈值按两个平台的实测重标定。
 #[test]
 fn markdown_cache_hits_in_steady_state_and_misses_on_text_change() {
     let rendered_a = latermd_md::expand_wikilinks(&sample_doc(4, 300));
-    let rendered_b = latermd_md::expand_wikilinks(&sample_doc(5, 300));
     let ctx = egui::Context::default();
     ctx.run_ui(RawInput::default(), |_| {})
         .drop_without_applying_deltas();
@@ -601,15 +603,35 @@ fn markdown_cache_hits_in_steady_state_and_misses_on_text_change() {
         "稳态帧 {hot:?} 应远低于冷帧 {cold:?}(缓存命中的时间证据;若红了说明每帧全量重解析)"
     );
 
-    let switched = label_frame(&ctx, &rendered_b);
-    // 3.0 的标定(2026-10-16,dev 依赖栈 `opt-level = 3`):稳态 ~520µs、
-    // 换文本 ~2.0ms,实测比值 3.75–3.90,取 3.0 留约 25% 余量。
+    // miss 帧取**三份不同文本首帧的中位数**,不是单次计时。
+    //
+    // 单次的抖动会原样进比值:2026-10-24 CI 的 aarch64-apple-darwin 上
+    // 单次只有 1.97×,本机 x86 同一份代码 3.8× —— 差在**稳态**那一侧
+    // (aarch64 runner 稳态 2.16ms / 本机 0.49ms = 4.4×,而 miss 帧只贵
+    // 2.3×),倍数被系统性压低,不是 miss 路径退化。
+    let mut switched = Vec::new();
+    for seed in [5_u32, 6, 7] {
+        let rendered = latermd_md::expand_wikilinks(&sample_doc(seed, 300));
+        switched.push(label_frame(&ctx, &rendered));
+    }
+    let switched = median(switched);
+    // 1.5 的重标定(2026-10-24,取代 2026-10-16 的 3.0):
+    // - 本机 x86 dev(依赖栈 `opt-level = 3`):稳态 ~500µs、miss 中位数
+    //   ~2.0ms,比值 3.98 / 3.87 / 3.82(三次)。
+    // - CI aarch64-apple-darwin:稳态 2.16ms、miss 4.25ms,比值 ~1.97
+    //   (单次,旧代码)。
+    // 旧阈值 3.0 是从 x86 单独标定的,在 aarch64 runner 上余量为负 ——
+    // 这是**既有**脆弱性,不是本次引入:本机开/关 accesskit 的对照实测
+    // (3.79/3.83 开 vs 3.74/3.76 关)证明该倍数与 accesskit 无关。
+    // 取 1.5 是给 aarch64 runner 的单次波动留 ~25% 余量(实测 1.97);
+    // 语义底线仍是 1.0 —— 切文本路径一旦意外命中缓存,miss 帧会塌到稳态
+    // 同量级(比值≈1),1.5 留得出判定空间。
     //
     // 不用 `cold` 当尺子:它是**首帧**,46ms 里绝大部分是字体装载与
     // syntect `SyntaxSet` 的一次性初始化,不是 miss 路径的成本 —— 拿它比
     // 会把「预热」误读成「未命中」。
     assert!(
-        switched.as_secs_f64() > hot.as_secs_f64() * 3.0,
+        switched.as_secs_f64() > hot.as_secs_f64() * 1.5,
         "换文本首帧 {switched:?} 应是 miss 量级(≫ 稳态 {hot:?},冷帧 {cold:?});若跌到同量级,说明切文本路径已有缓存,回归断言需要跟着改向"
     );
 }
