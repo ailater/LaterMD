@@ -768,6 +768,42 @@ pub(crate) fn copy_button_rects(ctx: &egui::Context) -> Vec<egui::Rect> {
     }
 }
 
+// —— Live 表格工具条探针(2026-10-23)——
+// 与复制头探针同手法:绘制帧写入本帧 rect 清单,`clicked_for_edit` 按它
+// 排除「点击进编辑」。工具条悬浮在表格块上缘之外,点击通常落不进块矩形;
+// 首块贴视口顶时工具条被钳进块内,这份清单兜住那条边。
+
+fn table_toolbar_rects_id() -> egui::Id {
+    egui::Id::new("latermd-table-toolbar-rects")
+}
+
+/// 记录本帧表格工具条(含各图标按钮)的 rect;帧号变了重开清单。
+pub(crate) fn push_table_toolbar_rects(ctx: &egui::Context, rects: Vec<egui::Rect>) {
+    let id = table_toolbar_rects_id();
+    let frame = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(id, (frame, rects)));
+}
+
+/// 原始探针(最后写入帧的清单,不做帧号核对):测试在 run_ui 之后读取,
+/// 那时帧号已前进,按「最后写入者即本帧」取。仅测试消费(`table_toolbar_rects`
+/// 才是生产读法,带帧号核对),cfg(test) 挡 dead-code。
+#[cfg(test)]
+pub(crate) fn table_toolbar_probe(ctx: &egui::Context) -> Vec<egui::Rect> {
+    ctx.data(|d| d.get_temp::<(u64, Vec<egui::Rect>)>(table_toolbar_rects_id()))
+        .map(|(_, rects)| rects)
+        .unwrap_or_default()
+}
+
+/// 本帧表格工具条 rect 清单(帧号核对通过才返回)。
+pub(crate) fn table_toolbar_rects(ctx: &egui::Context) -> Vec<egui::Rect> {
+    let id = table_toolbar_rects_id();
+    let frame = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<(u64, Vec<egui::Rect>)>(id))
+        .filter(|(seen, _)| *seen == frame)
+        .map(|(_, rects)| rects)
+        .unwrap_or_default()
+}
+
 fn code_fingerprint(code: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -775,16 +811,30 @@ fn code_fingerprint(code: &str) -> u64 {
     hasher.finish()
 }
 
-/// 代码块头部一行(常驻):复制按钮 + 语言标签,挂在 vendored
-/// `MarkdownLabel::code_block_buttons` 挂载点 —— 该挂载点上游自带(subtree
-/// 引入即有),普通代码块右上角悬浮调用,回调直接收到 `(块源文本, 语言)`,
-/// 无需从 `code_block_spans` 切偏移;```ai 指令卡走 `block_code_widget` 另
-/// 一条路,不经过这里。
+/// 代码块头部一行(常驻):复制按钮 + 关闭按钮(可选)+ 语言标签,挂在
+/// vendored `MarkdownLabel::code_block_buttons` 挂载点 —— 该挂载点上游
+/// 自带(subtree 引入即有),普通代码块右上角悬浮调用,回调直接收到
+/// `(块源文本, 语言)`,无需从 `code_block_spans` 切偏移;```ai 指令卡走
+/// `block_code_widget` 另一条路,不经过这里。
 ///
-/// 点击 → `Context::copy_text` 整块源文本(vendored parser 已去块尾换行)
-/// → 按钮进入 ✓ 反馈态。无语言/空块同样给按钮:复制空串是合法操作,
-/// 交互一致比按内容藏按钮好猜。
-pub(crate) fn code_copy_buttons(ui: &mut egui::Ui, code: &str, lang: &str) {
+/// 点击复制 → `Context::copy_text` 整块源文本(vendored parser 已去块尾
+/// 换行)→ 按钮进入 ✓ 反馈态。无语言/空块同样给按钮:复制空串是合法
+/// 操作,交互一致比按内容藏按钮好猜。
+///
+/// **关闭按钮**(2026-10-23,用户需求):复制左侧的 ×,点击把块序号推进
+/// `sink`,由 Live 层(live.rs)弹确认后把围栏改写成普通文本 —— 头部只
+/// 管「在哪画、点没点」,改写落点(块区间)只有 Live 层知道。
+pub(crate) struct CodeClose<'a> {
+    pub index: usize,
+    pub sink: &'a std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+}
+
+pub(crate) fn code_header_buttons(
+    ui: &mut egui::Ui,
+    code: &str,
+    lang: &str,
+    close: Option<CodeClose<'_>>,
+) {
     let now = std::time::Instant::now();
     let until = ui
         .ctx()
@@ -793,7 +843,8 @@ pub(crate) fn code_copy_buttons(ui: &mut egui::Ui, code: &str, lang: &str) {
         .map(|(_, until)| until);
     let copied = until.is_some();
 
-    // 子 Ui 是 right_to_left(Center):先分配的贴右缘,按钮在语言标签右侧。
+    // 子 Ui 是 right_to_left(Center):先分配的贴右缘 —— 复制最右,关闭
+    // 在复制左边,语言标签再往左(需求口径「放到复制左边」)。
     let size = egui::vec2(
         crate::ui::tokens::ICON + 2.0 * crate::ui::tokens::SPACE_XS,
         20.0,
@@ -815,8 +866,53 @@ pub(crate) fn code_copy_buttons(ui: &mut egui::Ui, code: &str, lang: &str) {
         };
         icon.draw(painter, rect.center(), crate::ui::tokens::ICON, color);
     }
+    if response.clicked() {
+        ui.ctx().copy_text(code.to_owned());
+        let deadline = now + COPIED_FEEDBACK;
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(copied_feedback_id(), (code_fingerprint(code), deadline)));
+        ui.ctx().request_repaint_after(COPIED_FEEDBACK_DELAY);
+    }
 
-    // 探针:记录本帧按钮几何,帧号变了就重开清单(一帧一份)。
+    // 关闭按钮:复制左侧的 ×。点击不就地改写(本函数拿不到块区间),
+    // 只把块序号推给 Live 层。
+    let mut close_rect = None;
+    if let Some(close) = close {
+        let (crect, close_response) = ui.allocate_exact_size(size, egui::Sense::click());
+        if ui.is_rect_visible(crect) {
+            let painter = ui.painter();
+            if close_response.hovered() {
+                painter.rect_filled(
+                    crect,
+                    crate::ui::tokens::RADIUS_SM,
+                    ui.visuals().widgets.hovered.bg_fill,
+                );
+            }
+            crate::ui::icons::Icon::Close.draw(
+                painter,
+                crect.center(),
+                crate::ui::tokens::ICON,
+                ui.visuals().weak_text_color(),
+            );
+        }
+        if close_response.clicked() {
+            close.sink.borrow_mut().push(close.index);
+            ui.ctx().request_repaint();
+        }
+        close_response.on_hover_text("关闭代码块,转为普通文本");
+        close_rect = Some(crect);
+    }
+
+    // 语言标签:info string 首词(完整 info 可带 `title=` 等元数据,首词才是
+    // 语言);无语言(裸围栏/缩进块,vendored 侧落到空串)不画标签。
+    if let Some(word) = lang.split_whitespace().next() {
+        ui.label(egui::RichText::new(word).small().weak())
+            .on_hover_text("代码块语言");
+    }
+
+    // 探针:记录本帧头部按钮几何(复制 + 关闭),帧号变了就重开清单
+    // (一帧一份)。「点击进编辑」按这份清单排除 —— 点头部按钮是按钮
+    // 语义,不连带切入编辑。
     let probe_id = copy_button_rects_id();
     let frame = ui.ctx().cumulative_pass_nr();
     let mut rects = ui
@@ -826,23 +922,11 @@ pub(crate) fn code_copy_buttons(ui: &mut egui::Ui, code: &str, lang: &str) {
         .map(|(_, rects)| rects)
         .unwrap_or_default();
     rects.push(rect);
+    if let Some(crect) = close_rect {
+        rects.push(crect);
+    }
     ui.ctx()
         .data_mut(|d| d.insert_temp(probe_id, (frame, rects)));
-
-    // 语言标签:info string 首词(完整 info 可带 `title=` 等元数据,首词才是
-    // 语言);无语言(裸围栏/缩进块,vendored 侧落到空串)不画标签。
-    if let Some(word) = lang.split_whitespace().next() {
-        ui.label(egui::RichText::new(word).small().weak())
-            .on_hover_text("代码块语言");
-    }
-
-    if response.clicked() {
-        ui.ctx().copy_text(code.to_owned());
-        let deadline = now + COPIED_FEEDBACK;
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(copied_feedback_id(), (code_fingerprint(code), deadline)));
-        ui.ctx().request_repaint_after(COPIED_FEEDBACK_DELAY);
-    }
 
     // hover 文案放最后(on_hover_text 消费 response)。
     if let Some(until) = until {
@@ -853,6 +937,12 @@ pub(crate) fn code_copy_buttons(ui: &mut egui::Ui, code: &str, lang: &str) {
     } else {
         response.on_hover_text("复制代码");
     }
+}
+
+/// 只读列/估高臂用的头部:只有复制 + 语言,无关闭按钮。静态引用形态,
+/// 供 `MarkdownLabel::code_block_buttons(&fn)` 直接挂载。
+pub(crate) fn code_copy_buttons(ui: &mut egui::Ui, code: &str, lang: &str) {
+    code_header_buttons(ui, code, lang, None);
 }
 
 #[cfg(test)]

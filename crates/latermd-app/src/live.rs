@@ -214,6 +214,40 @@ pub struct LiveState {
     /// 避免在大文档中输入一个字符就清空整篇缓存。两张映射随渲染文本
     /// 同源缓存:点击进编辑的落点换算要把渲染文本偏移**逆穿**回块源码坐标。
     rich_cache: std::collections::HashMap<usize, RichCacheEntry>,
+    /// 块级改写的待确认动作(2026-10-23):关闭代码块 / 删除表格。挂起中
+    /// 每帧渲染确认弹窗,确认才改写。挂在 LiveState(每列一份)而非全局:
+    /// 对照列锁浏览(`browse_locked`)根本不会产生动作,互不干扰。
+    pub(crate) pending_block_action: Option<PendingBlockAction>,
+}
+
+/// 待确认的块级改写。序号在弹窗打开期间是稳定的(模态,文档不动),
+/// 确认帧再取 `blocks[index]`,不在点击帧缓存区间。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingBlockAction {
+    /// 关闭代码块:去围栏,内容保留为普通文本。
+    CodeClose(usize),
+    /// 删除整个表格块。
+    TableDelete(usize),
+}
+
+impl PendingBlockAction {
+    /// 确认弹窗文案:(标题, 导语, 警示, 确认按钮)。
+    fn dialog_text(self) -> (&'static str, String, &'static str, &'static str) {
+        match self {
+            Self::CodeClose(_) => (
+                "关闭代码块",
+                "把此代码块转为普通文本。".to_owned(),
+                "围栏标记将被移除,代码内容保留为正文;Ctrl+Z 可撤销。",
+                "转为普通文本",
+            ),
+            Self::TableDelete(_) => (
+                "删除表格",
+                "把此表格从文档中移除。".to_owned(),
+                "整个表格(含所有行列)将被删除;Ctrl+Z 可撤销。",
+                "删除表格",
+            ),
+        }
+    }
 }
 
 impl LiveState {
@@ -436,6 +470,7 @@ impl LiveState {
         self.toggle_anchor = None;
         self.rich_cache.clear();
         self.block_hashes.clear();
+        self.pending_block_action = None;
     }
 }
 
@@ -1193,6 +1228,221 @@ fn set_block_heading_level(
     let new_len = (block.chars().count() as isize + delta_chars).max(0) as usize;
     let new_caret = ((caret_local as isize + delta_chars).max(0) as usize).min(new_len);
     live.pending_caret = Some((index, new_caret));
+    live.pending_range = None;
+    live.caret_follow = false;
+}
+
+// ---------------------------------------------------------------- 块级改写(2026-10-23)
+//
+// 关闭代码块 / 表格加行列 / 删表:与 [`set_block_heading_level`] 同一通道
+// (直接 `replace_range`,TextEdit 内建 undo 单步可退;光标经 pending_caret
+// 落回)。入口两条:头部/工具条点击 → 简单动作就地执行,破坏性动作(关
+// 代码块、删表)先挂 `pending_block_action`,帧末弹确认,确认帧才改写。
+
+/// CommonMark 围栏允许的前导缩进上限。
+const FENCE_MAX_INDENT: usize = 3;
+
+/// 剥掉围栏允许的前导缩进(≤[`FENCE_MAX_INDENT`] 个空格);更多缩进时
+/// 原样返回 —— 后续的围栏判定自然失败(CommonMark:4 空格起是缩进代码)。
+fn strip_fence_indent(line: &str) -> &str {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent <= FENCE_MAX_INDENT {
+        &line[indent..]
+    } else {
+        line
+    }
+}
+
+/// 围栏开栏行的标记:行首(≤3 空格缩进)连续 ≥3 个 `` ` `` 或 `~`,返回
+/// (围栏字符, 长度)。info string 跟在后面不算。
+fn fence_open(line: &str) -> Option<(char, usize)> {
+    let trimmed = strip_fence_indent(line);
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let run = trimmed.chars().take_while(|&c| c == marker).count();
+    (run >= 3).then_some((marker, run))
+}
+
+/// 闭合围栏行:与开栏同字符、长度不短于开栏,且**标记之外整行空白**
+/// (CommonMark 对闭合围栏的硬性要求 —— 内容行里嵌的 ```` ``` ```` 不算)。
+fn is_fence_close(line: &str, marker: char, open_len: usize) -> bool {
+    let trimmed = strip_fence_indent(line);
+    let run = trimmed.chars().take_while(|&c| c == marker).count();
+    run >= open_len && trimmed[run..].trim().is_empty()
+}
+
+/// 可关闭的围栏块:有开栏行且**存在对应的闭合行**。独立空围栏不会被
+/// 解析器当成 CodeBlock token(实测并入邻块),这个判定挡的是「开栏 +
+/// 正文粘连」的合并块 —— 头部不挂关闭按钮,确认弹窗不会空转。
+fn closeable_fence(block: &str) -> bool {
+    let Some((marker, open_len)) = fence_open(block.lines().next().unwrap_or("")) else {
+        return false;
+    };
+    block
+        .lines()
+        .skip(1)
+        .any(|l| is_fence_close(l, marker, open_len))
+}
+
+/// 关闭代码块(用户需求 2026-10-23):去掉首尾围栏行,内容保留为普通
+/// 文本段落。内容为空(只有 info 行的空围栏)时整块删除 —— 留下一段
+/// 空白块没有意义。块尾的分隔空行(块区间吞进的 `\n\n`,见
+/// `latermd_md::blocks` 规定 ②)原样保留,改写后与下一块的间距不变;
+/// 整块删除时区间整体替换为空串,前一块自带的分隔正好凑成单空行。
+/// 光标落块首,不拽视口。
+fn close_code_block(editor: &mut EditorBuffer, live: &mut LiveState, index: usize) {
+    let Some(range) = live.blocks.get(index).cloned() else {
+        return;
+    };
+    let block = BlockBuffer::slice(editor.text(), &range).to_owned();
+    let Some((marker, open_len)) = fence_open(block.lines().next().unwrap_or("")) else {
+        return; // 缩进代码块/非围栏:没有围栏可去
+    };
+    let mut lines = block.split('\n').collect::<Vec<_>>();
+    // 块尾吞进的分隔空行退回:内容行只数到最后一根非空行
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    // 末行是闭合围栏才剥;流式未闭合(AI 写入中)整段都是内容,不动
+    if lines
+        .last()
+        .is_some_and(|l| is_fence_close(l, marker, open_len))
+    {
+        lines.pop();
+    } else {
+        return;
+    }
+    lines.remove(0); // 开栏行(含 info)
+    let trailing = &block[block.trim_end_matches('\n').len()..];
+    let replacement = if lines.is_empty() || lines.iter().all(|l| l.trim().is_empty()) {
+        // 空块:整块删除。区间含块尾分隔,替换为空串后前一块自带的
+        // 分隔正好是唯一的空行
+        String::new()
+    } else {
+        format!("{}{}", lines.join("\n"), trailing)
+    };
+    // 块表是字节区间,`replace_range` 吃字符区间 —— 换算后替换
+    let chars = editor.byte_to_char(range.start)..editor.byte_to_char(range.end);
+    editor.replace_range(chars, &replacement);
+    live.pending_caret = Some((index, 0));
+    live.pending_range = None;
+    live.caret_follow = false;
+}
+
+/// 表格的行列规格:首行表头(管道分隔),次行分隔行(至少一根 `---`),
+/// 其后为数据行。列数取表头;行格式要求首尾都有 `|`(本编辑器与常见
+/// 教程的产出形态),不合规格返回 None(工具条点了也不动)。
+fn table_shape(block: &str) -> Option<(Vec<&str>, usize)> {
+    let content = block.trim_end_matches('\n');
+    let mut lines = content.lines().filter(|l| !l.trim().is_empty());
+    let header = lines.next()?;
+    if !header.trim_start().starts_with('|') {
+        return None;
+    }
+    let cols = header.split('|').count().saturating_sub(2);
+    if cols == 0 {
+        return None;
+    }
+    Some((content.lines().collect(), cols))
+}
+
+/// 表格末尾加一行(空单元格,列数对齐表头)。落点在最后一根内容行之后
+/// (块尾分隔空行之前),光标落块首;规格不齐(无表头/列数为 0)不动。
+fn table_add_row(editor: &mut EditorBuffer, live: &mut LiveState, index: usize) {
+    let Some(range) = live.blocks.get(index).cloned() else {
+        return;
+    };
+    let block = BlockBuffer::slice(editor.text(), &range).to_owned();
+    let Some((_, cols)) = table_shape(&block) else {
+        return;
+    };
+    let content_end = block.trim_end_matches('\n').len();
+    let cells = vec![""; cols].join(" | ");
+    let row = format!("| {cells} |");
+    let mut replacement = String::with_capacity(block.len() + row.len() + 1);
+    replacement.push_str(&block[..content_end]);
+    replacement.push('\n');
+    replacement.push_str(&row);
+    replacement.push_str(&block[content_end..]);
+    // 块表是字节区间,`replace_range` 吃字符区间 —— 换算后替换
+    let chars = editor.byte_to_char(range.start)..editor.byte_to_char(range.end);
+    editor.replace_range(chars, &replacement);
+    live.pending_caret = Some((index, 0));
+    live.pending_range = None;
+    live.caret_follow = false;
+}
+
+/// 表格右侧加一列:表头/数据行各在行尾补一个空单元格,分隔行补
+/// ` --- `。逐行替换而非整块重排 —— 行内已有的对齐标记(`:-:` 等)
+/// 原样保留。列数以表头为准;短于表头的行(残缺表格)补齐到表头列数,
+/// 不动超长行。光标落块首。
+fn table_add_col(editor: &mut EditorBuffer, live: &mut LiveState, index: usize) {
+    let Some(range) = live.blocks.get(index).cloned() else {
+        return;
+    };
+    let block = BlockBuffer::slice(editor.text(), &range).to_owned();
+    let Some((lines, cols)) = table_shape(&block) else {
+        return;
+    };
+    let content_end = block.trim_end_matches('\n').len();
+    let trailing = &block[content_end..];
+    let mut out = String::with_capacity(block.len() + lines.len() * 5);
+    for (i, line) in lines.iter().enumerate() {
+        let body = line.trim_end_matches('\r');
+        out.push_str(body);
+        // 行尾带 `|` 的形态追加「新单元格 + 收尾管」;不带尾管的形态
+        // (CommonMark 允许)只补单元格本身,不凭空引入管。
+        let closed = body.trim_end().ends_with('|');
+        let is_separator = i == 1 && body.trim_start().trim_matches('|').contains('-');
+        if is_separator {
+            if closed {
+                out.push_str(" --- |");
+            } else {
+                out.push_str(" ---");
+            }
+        } else {
+            if i > 1 {
+                // 数据行:短行先补齐到表头列数(残缺行缺的尾巴一并补上)
+                let cells = body.split('|').count().saturating_sub(2);
+                for _ in cells..cols {
+                    if closed {
+                        out.push_str(" |");
+                    } else {
+                        out.push(' ');
+                    }
+                }
+            }
+            if closed {
+                out.push_str("  |");
+            } else {
+                out.push_str("  ");
+            }
+        }
+        out.push('\n');
+    }
+    // 上面逐行补了 '\n',块尾分隔不该再翻倍:剥掉最后一个 '\n' 再接 trailing
+    out.pop();
+    out.push_str(trailing);
+    // 块表是字节区间,`replace_range` 吃字符区间 —— 换算后替换
+    let chars = editor.byte_to_char(range.start)..editor.byte_to_char(range.end);
+    editor.replace_range(chars, &out);
+    live.pending_caret = Some((index, 0));
+    live.pending_range = None;
+    live.caret_follow = false;
+}
+
+/// 删除整个块(删表用):区间整体替换为空串。块区间含块尾分隔空行,
+/// 删除后前一块自带的分隔正好是唯一的空行,间距不变。
+fn delete_block(editor: &mut EditorBuffer, live: &mut LiveState, index: usize) {
+    let Some(range) = live.blocks.get(index).cloned() else {
+        return;
+    };
+    // 块表是字节区间,`replace_range` 吃字符区间 —— 换算后替换
+    let chars = editor.byte_to_char(range.start)..editor.byte_to_char(range.end);
+    editor.replace_range(chars, "");
+    live.pending_caret = Some((index.max(1) - 1, 0));
     live.pending_range = None;
     live.caret_follow = false;
 }
@@ -2317,7 +2567,33 @@ pub fn ui(
                             std::rc::Rc::clone(&emoji_rects),
                         )
                         .with_ai(crate::ui::rich_widgets::ai_link_color(dark_mode), ai);
-                        MarkdownLabel::new(
+                        // 代码块头部按钮(复制 + 关闭):可写列的**围栏代码块**
+                        // 才挂关闭 —— 缩进代码块没有围栏可去(关了还是缩进块),
+                        // 对照列只读。关闭点击只把块序号推进 sink,确认弹窗
+                        // 在帧末统一渲染(见 `pending_block_action`)。
+                        // sink 只在围栏代码块上分配:普通块每帧零分配。
+                        let fenced_header =
+                            kind == BlockKind::Widget && closeable_fence(block_text);
+                        let close_sink = if fenced_header && !live.browse_locked {
+                            Some(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())))
+                        } else {
+                            None
+                        };
+                        let with_close = close_sink.as_ref().map(|sink| {
+                            let sink = std::rc::Rc::clone(sink);
+                            move |ui: &mut egui::Ui, code: &str, lang: &str| {
+                                crate::ui::rich_widgets::code_header_buttons(
+                                    ui,
+                                    code,
+                                    lang,
+                                    Some(crate::ui::rich_widgets::CodeClose {
+                                        index,
+                                        sink: &sink,
+                                    }),
+                                );
+                            }
+                        });
+                        let label = MarkdownLabel::new(
                             editor_id.with(("live-render", index)),
                             block_rendered.as_ref(),
                         )
@@ -2331,8 +2607,15 @@ pub fn ui(
                         // 富渲染块也是「code 预览的地方」。
                         .scroll_code_blocks(true)
                         .shrink_code_blocks(true)
-                        .code_block_min_width(Some(200.0))
-                        .code_block_buttons(&crate::ui::rich_widgets::code_copy_buttons)
+                        .code_block_min_width(Some(200.0));
+                        // 代码块头部按钮:可写围栏代码块挂「复制+关闭」,其余
+                        // 挂只读的「复制」。
+                        let label = if let Some(buttons) = with_close.as_ref() {
+                            label.code_block_buttons(buttons)
+                        } else {
+                            label.code_block_buttons(&crate::ui::rich_widgets::code_copy_buttons)
+                        };
+                        label
                         // heal(live-unify-plan P1/R1):AI 流式写入本标签的帧
                         // 开启,残缺 fence / 未闭合 ** 在块片段上补闭合 —— 块级
                         // 契约由 latermd_md 的 block_level_heal_closes_streaming_
@@ -2354,11 +2637,35 @@ pub fn ui(
                         // 不连带切入编辑)。
                         let link_intercepted = !rich_handler.intercepted_is_empty();
                         rich_handler.drain_into(outbox);
+                        // 代码块关闭信号(drain 在 sink 之后读,同一帧成立):
+                        // 只置待确认动作,弹窗与改写在帧末统一处理。
+                        if close_sink
+                            .as_ref()
+                            .is_some_and(|sink| !sink.borrow().is_empty())
+                        {
+                            live.pending_block_action = Some(PendingBlockAction::CodeClose(index));
+                        }
                         let bottom = ui.cursor().top();
                         let rect = egui::Rect::from_min_max(
                             egui::pos2(ui.min_rect().left(), top),
                             egui::pos2(ui.min_rect().right(), bottom.max(top + 1.0)),
                         );
+                        // 表格工具条(2026-10-23):悬停表格块时在上缘外浮出
+                        // 「加行 / 加列 / 复制 / 删除」。加行加列直接改写
+                        // (加法无破坏性,单步 undo 可退),删除走确认弹窗;
+                        // 活动块(源码态)与对照列不出 —— 前者直接编辑源码,
+                        // 后者只读。改写动作不在此刻执行:`block_text` 还借着
+                        // editor(下方点击落点还要用),动作带回循环里在借用
+                        // 结束后落地。
+                        let table_action = if kind == BlockKind::Widget
+                            && block_text.trim_start().starts_with('|')
+                            && !live.browse_locked
+                            && live.active != Some(index)
+                        {
+                            draw_table_toolbar(ui, block_text, live, index, rect)
+                        } else {
+                            TableAction::None
+                        };
                         // 真实渲染块的实测高(#111 B 估高剔除的记账半边):下一帧
                         // 本块若滚出视口被估高占位替换,占位与实测的差值按它
                         // 补偿滚动偏移(见循环头剔除臂的 `estimate_drift`)。
@@ -2505,6 +2812,18 @@ pub fn ui(
                                     Some(rect.min.y + collapse_delta + src_caret_top - row_top);
                                 pending_anchor = Some((index, row_top));
                             }
+                        }
+                        // 表格工具条动作落地:加行/加列就地改写(单步 undo
+                        // 可退),删除挂待确认。放在点击落点之后 —— `block_text`
+                        // 对 editor 的借用到这里才结束,更早会撞借用。
+                        match table_action {
+                            TableAction::AddRow => table_add_row(editor, live, index),
+                            TableAction::AddCol => table_add_col(editor, live, index),
+                            TableAction::Delete => {
+                                live.pending_block_action =
+                                    Some(PendingBlockAction::TableDelete(index));
+                            }
+                            TableAction::None => {}
                         }
                     }
                 }
@@ -2693,8 +3012,162 @@ pub fn ui(
     // 快照同步(与源码模式同一条规则:仅修订号前进时重建;大纲那一半另有
     // 「侧栏是否正在显示」的闸门,见 `PreviewState::sync_outline`)
     preview.sync_outline(editor);
+
+    // 块级改写确认弹窗(2026-10-23):关闭代码块 / 删除表格。只在可写列
+    // 渲染(对照列锁浏览,产生的动作都不该有);确认帧才改写,取消/× 即弃。
+    if !live.browse_locked {
+        if let Some(action) = live.pending_block_action {
+            let (title, lead, warning, confirm_text) = action.dialog_text();
+            let (confirm, cancel, close) = crate::ui::layout::destructive_confirm_dialog(
+                panel,
+                title,
+                &lead,
+                warning,
+                confirm_text,
+                None,
+                None,
+            );
+            if confirm.clicked() {
+                apply_pending_block_action(editor, live, action);
+                live.pending_block_action = None;
+            } else if cancel.clicked() || close {
+                live.pending_block_action = None;
+            }
+        }
+    }
+
     active_response
         .unwrap_or_else(|| panel.allocate_response(egui::vec2(0.0, 0.0), egui::Sense::click()))
+}
+
+/// 确认弹窗「确认」帧的改写分派。抽成独立函数:测试直接驱动它验证
+/// 动作路由,不必在无头帧里点弹窗按钮。
+fn apply_pending_block_action(
+    editor: &mut EditorBuffer,
+    live: &mut LiveState,
+    action: PendingBlockAction,
+) {
+    match action {
+        PendingBlockAction::CodeClose(index) => close_code_block(editor, live, index),
+        PendingBlockAction::TableDelete(index) => delete_block(editor, live, index),
+    }
+}
+
+/// 表格工具条本帧的用户意图。绘制时收集,绘制返回后(块文本的借用
+/// 结束处)才执行改写。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableAction {
+    None,
+    AddRow,
+    AddCol,
+    Delete,
+}
+
+/// 表格悬停工具条(2026-10-23):浮在表格块上缘之外的图标条 —— 加行 /
+/// 加列 / 复制 / 删除。复制就地走剪贴板(块文本已在手上);加行/加列/
+/// 删除作为动作返回,由调用方在借用结束后执行。rects 整条记录进工具条
+/// 探针,「点击进编辑」据此排除。工具条只在指针悬停块或工具条自身时
+/// 出现;不出现时不占交互(空帧零 rect)。
+fn draw_table_toolbar(
+    ui: &mut egui::Ui,
+    block_text: &str,
+    live: &LiveState,
+    index: usize,
+    block_rect: egui::Rect,
+) -> TableAction {
+    let _ = (live, index);
+    let size = egui::vec2(
+        crate::ui::tokens::ICON + 2.0 * crate::ui::tokens::SPACE_XS,
+        20.0,
+    );
+    let count = 4.0_f32;
+    let gap = 2.0;
+    let total_w = count * size.x + (count - 1.0) * gap;
+    let clip = ui.clip_rect();
+    // 默认浮在块上缘外;块贴视口顶时钳进视口内(盖住表头也比点不到强)
+    let mut top = block_rect.top() - size.y - 2.0;
+    if top < clip.top() {
+        top = block_rect.top() + 2.0;
+    }
+    let bar_rect = egui::Rect::from_min_size(
+        egui::pos2(block_rect.right() - total_w, top),
+        egui::vec2(total_w, size.y),
+    );
+    let bar_hover = ui.rect_contains_pointer(block_rect) || ui.rect_contains_pointer(bar_rect);
+    if !bar_hover {
+        crate::ui::rich_widgets::push_table_toolbar_rects(ui.ctx(), Vec::new());
+        return TableAction::None;
+    }
+    let mut hit_rects = Vec::new();
+    let bar_frame = bar_rect.expand(3.0);
+    ui.painter().rect_filled(
+        bar_frame,
+        crate::ui::tokens::RADIUS_SM,
+        ui.visuals().extreme_bg_color,
+    );
+    ui.painter().rect_stroke(
+        bar_frame,
+        crate::ui::tokens::RADIUS_SM,
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
+    let actions = [
+        (
+            crate::ui::icons::Icon::RowAdd,
+            "在表格末尾添加一行",
+            TableAction::AddRow,
+        ),
+        (
+            crate::ui::icons::Icon::ColAdd,
+            "在表格右侧添加一列",
+            TableAction::AddCol,
+        ),
+        (
+            crate::ui::icons::Icon::Copy,
+            "复制表格 Markdown",
+            TableAction::None,
+        ),
+        (
+            crate::ui::icons::Icon::Trash,
+            "删除表格",
+            TableAction::Delete,
+        ),
+    ];
+    let mut action = TableAction::None;
+    let mut cursor_x = bar_rect.left();
+    for (icon, tip, effect) in actions {
+        let rect = egui::Rect::from_min_size(egui::pos2(cursor_x, bar_rect.top()), size);
+        cursor_x += size.x + gap;
+        let response = ui.allocate_rect(rect, egui::Sense::click());
+        let (fill, color) = if response.hovered() {
+            (
+                Some(ui.visuals().widgets.hovered.bg_fill),
+                ui.visuals().text_color(),
+            )
+        } else {
+            (None, ui.visuals().weak_text_color())
+        };
+        if let Some(fill) = fill {
+            ui.painter()
+                .rect_filled(rect, crate::ui::tokens::RADIUS_SM, fill);
+        }
+        icon.draw(ui.painter(), rect.center(), crate::ui::tokens::ICON, color);
+        let response = response.on_hover_text(tip);
+        hit_rects.push(rect);
+        if !response.clicked() {
+            continue;
+        }
+        match (icon, effect) {
+            // 复制就地执行:块文本就在参数里,无需回头借 editor。
+            (crate::ui::icons::Icon::Copy, _) => ui
+                .ctx()
+                .copy_text(block_text.trim_end_matches(['\n', '\r']).to_owned()),
+            (_, TableAction::None) => {}
+            (_, effect) => action = effect,
+        }
+    }
+    crate::ui::rich_widgets::push_table_toolbar_rects(ui.ctx(), hit_rects);
+    action
 }
 
 /// 富渲染块「点击进入编辑」的命中检测。**不挂 egui widget**:块级矩形一旦
@@ -2737,6 +3210,14 @@ fn clicked_for_edit(
     if crate::ui::rich_widgets::copy_button_rects(ui.ctx())
         .iter()
         .any(|button| button.contains(pos))
+    {
+        return None;
+    }
+    // 表格工具条(2026-10-23):悬浮条通常在块外,块贴视口顶被钳进块内
+    // 时靠这份探针兜住 —— 点击归工具条,不连带进编辑。
+    if crate::ui::rich_widgets::table_toolbar_rects(ui.ctx())
+        .iter()
+        .any(|rect| rect.contains(pos))
     {
         return None;
     }
@@ -3654,6 +4135,8 @@ mod tests {
     /// (#61)、每条文本 galley 的字形屏幕坐标(#170 点击落点定位)。
     struct LiveFrame {
         button_rects: Vec<egui::Rect>,
+        /// 表格工具条本帧的图标 rect 清单(最后写入帧)。
+        toolbar_rects: Vec<egui::Rect>,
         copied: Vec<String>,
         opened: Vec<String>,
         texts: Vec<(String, egui::Rect)>,
@@ -3750,6 +4233,7 @@ mod tests {
         LiveFrame {
             // 帧后读取:帧号已前进,按「最后写入者即本帧」取原始探针。
             button_rects: crate::ui::rich_widgets::copy_button_probe(ctx).1,
+            toolbar_rects: crate::ui::rich_widgets::table_toolbar_probe(ctx),
             copied,
             opened,
             texts,
@@ -4258,8 +4742,8 @@ mod tests {
         assert!(frame.copied.is_empty(), "静帧不应复制");
         assert_eq!(
             frame.button_rects.len(),
-            1,
-            "非活动代码块一枚复制按钮:{:?}",
+            2,
+            "非活动代码块:复制 + 关闭两枚按钮:{:?}",
             frame.button_rects
         );
         assert_eq!(live.active, None);
@@ -4286,6 +4770,216 @@ mod tests {
         assert_eq!(live.active, None, "点按钮不得切入编辑态:{live:?}");
     }
 
+    // —— 块级改写:关闭代码块 / 表格工具条(2026-10-23,用户需求)——
+
+    /// 关闭代码块的改写语义:去围栏留内容,块尾分隔空行原样保留;
+    /// 光标落块首。与 [`set_block_heading_level`] 同一改写通道。
+    #[test]
+    fn close_code_block_strips_fences_keeps_content() {
+        let mut editor =
+            EditorBuffer::new("# 标题\n\n```rust\nfn a(){}\nlet b = 2;\n```\n\n正文\n");
+        let mut live = LiveState::default();
+        live.sync(&editor, None);
+        assert_eq!(live.blocks.len(), 3);
+        close_code_block(&mut editor, &mut live, 1);
+        assert_eq!(editor.text(), "# 标题\n\nfn a(){}\nlet b = 2;\n\n正文\n");
+        assert_eq!(live.pending_caret, Some((1, 0)), "光标落块首");
+    }
+
+    /// 流式未闭合(AI 写入中)与内容行里嵌 ``` 的围栏:关闭点了也不动
+    /// (闭合判定只认「标记之外整行空白」的行,防误剥)。
+    #[test]
+    fn close_code_block_ignores_unclosed_and_embedded_fence() {
+        let mut editor = EditorBuffer::new("段落\n\n```rust\nfn a(){}\n");
+        let mut live = LiveState::default();
+        live.sync(&editor, None);
+        let code_index = live.blocks.len() - 1;
+        close_code_block(&mut editor, &mut live, code_index);
+        assert_eq!(
+            editor.text(),
+            "段落\n\n```rust\nfn a(){}\n",
+            "未闭合围栏不动"
+        );
+
+        let mut editor = EditorBuffer::new("```text\nsee ``` below\n```\n\n正文\n");
+        let mut live = LiveState::default();
+        live.sync(&editor, None);
+        close_code_block(&mut editor, &mut live, 0);
+        assert_eq!(editor.text(), "see ``` below\n\n正文\n");
+    }
+
+    /// 空围栏不被解析器独立成块(实测并入前一段落):合并未遂块上改写
+    /// 是保守 no-op —— 没有完整围栏可去,什么都不发生。
+    #[test]
+    fn close_code_block_ignores_empty_fence_merged_into_paragraph() {
+        let mut editor = EditorBuffer::new("标题\n\n```rust\n```\n\n正文\n");
+        let mut live = LiveState::default();
+        live.sync(&editor, None);
+        assert_eq!(live.blocks.len(), 2, "空围栏并入前一块");
+        close_code_block(&mut editor, &mut live, 0);
+        assert_eq!(editor.text(), "标题\n\n```rust\n```\n\n正文\n", "no-op");
+    }
+
+    /// 表格末尾加行:空单元格、列数对齐表头,落在最后一根内容行之后
+    /// (块尾分隔之前)。
+    #[test]
+    fn table_add_row_appends_aligned_empty_row() {
+        let mut editor = EditorBuffer::new("| a | b |\n| --- | --- |\n| 1 | 2 |\n\n正文\n");
+        let mut live = LiveState::default();
+        live.sync(&editor, None);
+        table_add_row(&mut editor, &mut live, 0);
+        assert_eq!(
+            editor.text(),
+            "| a | b |\n| --- | --- |\n| 1 | 2 |\n|  |  |\n\n正文\n"
+        );
+    }
+
+    /// 表格右侧加列:表头/数据行补空单元格,分隔行补 `---`;对齐标记
+    /// 之类的既有内容不动。
+    #[test]
+    fn table_add_col_appends_cell_to_every_row() {
+        let mut editor = EditorBuffer::new("| a | b |\n| :--- | ---: |\n| 1 | 2 |\n\n正文\n");
+        let mut live = LiveState::default();
+        live.sync(&editor, None);
+        table_add_col(&mut editor, &mut live, 0);
+        assert_eq!(
+            editor.text(),
+            "| a | b |  |\n| :--- | ---: | --- |\n| 1 | 2 |  |\n\n正文\n"
+        );
+    }
+
+    /// 非表格块(段落):加了也不动,不产出脏源码。
+    #[test]
+    fn table_ops_ignore_malformed_blocks() {
+        let mut editor = EditorBuffer::new("正文段落\n");
+        let mut live = LiveState::default();
+        live.sync(&editor, None);
+        table_add_row(&mut editor, &mut live, 0);
+        table_add_col(&mut editor, &mut live, 0);
+        assert_eq!(editor.text(), "正文段落\n", "段落不是表格,原样不动");
+    }
+
+    /// 确认动作分派:删表整块移除,前后块之间恰好剩一个空行。
+    #[test]
+    fn apply_pending_block_action_deletes_table() {
+        let mut editor = EditorBuffer::new("标题\n\n| a | b |\n| --- | --- |\n\n正文\n");
+        let mut live = LiveState::default();
+        live.sync(&editor, None);
+        apply_pending_block_action(&mut editor, &mut live, PendingBlockAction::TableDelete(1));
+        assert_eq!(editor.text(), "标题\n\n正文\n");
+    }
+
+    /// 点头部关闭按钮:挂待确认、文本不动、不切入编辑(关闭与复制同属
+    /// 头部按钮语义,点击排除在「整块点击进编辑」之外)。
+    #[test]
+    fn live_close_button_pends_dialog_without_rewriting() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("# 标题\n\n正文段落。\n\n```rust\nfn a(){}\n```\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let before = editor.text().to_owned();
+
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert_eq!(frame.button_rects.len(), 2, "复制 + 关闭");
+        let close_target = frame.button_rects[1].center();
+        for events in click_events(close_target) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        assert_eq!(
+            live.pending_block_action,
+            Some(PendingBlockAction::CodeClose(2)),
+            "关闭点击挂待确认弹窗"
+        );
+        assert_eq!(editor.text(), before, "挂起帧不得直接改写");
+        assert_eq!(live.active, None, "点关闭按钮不得切入编辑态");
+
+        // 确认分派:去围栏留内容(弹窗按钮的点击走 layout 既有测试,
+        // 这里直驱分派函数)
+        apply_pending_block_action(&mut editor, &mut live, PendingBlockAction::CodeClose(2));
+        assert_eq!(editor.text(), "# 标题\n\n正文段落。\n\nfn a(){}\n");
+    }
+
+    /// 表格工具条:悬停才出现;点「加行」落一行;工具条点击不切入编辑。
+    #[test]
+    fn live_table_toolbar_hover_shows_and_add_row_works() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("标题\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n正文\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+
+        // 静帧(无悬停):工具条不出现
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(
+            frame.toolbar_rects.is_empty(),
+            "未悬停不出工具条:{:?}",
+            frame.toolbar_rects
+        );
+
+        // 悬停表格块:四枚图标出现。悬停点取表格文本 galley 的中心。
+        let (_, table_rect) = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains('a'))
+            .expect("表格已渲染");
+        let hover = egui::Event::PointerMoved(table_rect.center());
+        let frame = live_frame(
+            &ctx,
+            vec![hover],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert_eq!(
+            frame.toolbar_rects.len(),
+            4,
+            "加行/加列/复制/删除四枚图标:{:?}",
+            frame.toolbar_rects
+        );
+
+        // 点「加行」(首枚):表格末尾落一行;不切入编辑态。
+        let add_row = frame.toolbar_rects[0].center();
+        for events in click_events(add_row) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        assert!(
+            editor.text().contains("| 1 | 2 |\n|  |  |"),
+            "点加行必须落一行:{:?}",
+            editor.text()
+        );
+        assert_eq!(live.active, None, "点工具条不得切入编辑态");
+    }
+
     /// 点块内正文(非按钮)仍切入编辑(修复不得伤及「整块点击进编辑」本身)。
     #[test]
     fn live_click_outside_copy_button_still_enters_edit() {
@@ -4303,9 +4997,9 @@ mod tests {
             &mut cursor,
             &mut live,
         );
-        assert_eq!(frame.button_rects.len(), 1);
+        assert_eq!(frame.button_rects.len(), 2);
 
-        // 点击代码正文(galley rect 中心):离右上角复制按钮足够远。
+        // 点击代码正文(galley rect 中心):离右上角复制/关闭按钮足够远。
         let (_, code_rect) = frame
             .texts
             .iter()
