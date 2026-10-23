@@ -118,11 +118,21 @@ fn table_geometry_has_grid_order_and_min_width() {
 
 #[test]
 fn empty_rows_keep_a_font_line_height() {
-  use egui_markdown::{parse, table::{render_table_with_options, table_geometry, TableRenderOptions}};
+  use egui_markdown::{
+    parse,
+    table::{render_table_with_options, table_geometry, TableRenderOptions},
+  };
   let ctx = Context::default();
   let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(500.0, 500.0));
   let md = parse("| A | B |\n|---|---|\n|  |  |\n");
-  let data = md.tokens.iter().find_map(|t| match t { egui_markdown::Token::Table(t) => Some(t), _ => None }).unwrap();
+  let data = md
+    .tokens
+    .iter()
+    .find_map(|t| match t {
+      egui_markdown::Token::Table(t) => Some(t),
+      _ => None,
+    })
+    .unwrap();
   let id = Id::new("empty-row-height");
   let mut output = ctx.run_ui(RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
     let font = egui::FontId::proportional(14.0);
@@ -136,4 +146,3 @@ fn empty_rows_keep_a_font_line_height() {
   let body = geometry.cells.iter().find(|(r, _, h, _)| *r == 1 && !*h).unwrap().3;
   assert!(body.height() >= header.height() - 0.1, "empty row collapsed: header={:?} body={:?}", header, body);
 }
-
