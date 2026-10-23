@@ -603,9 +603,11 @@ impl FileTreeSettings {
             path: dir.clone(),
             source: Box::new(source),
         })?;
-        std::fs::write(dir.join(SETTINGS_FILE), json.as_bytes()).map_err(|source| SaveError {
-            path: dir.join(SETTINGS_FILE),
-            source: Box::new(source),
+        crate::persist::write_atomic(&dir.join(SETTINGS_FILE), json.as_bytes()).map_err(|source| {
+            SaveError {
+                path: dir.join(SETTINGS_FILE),
+                source: Box::new(source),
+            }
         })
     }
 

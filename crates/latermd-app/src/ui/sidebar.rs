@@ -1459,13 +1459,25 @@ fn root_row(
         }
         // 新建落在「当前文档所在目录」,没有落盘文档才回落根 —— 决定
         // 目录的活归归约(它手上有完整的文档状态),这里只发请求。
-        let new =
-            crate::ui::icons::narrow_icon_button(ui, Icon::New, "在当前目录新建 Markdown 文档");
-        if new.clicked() {
-            if let Some(dir) = new_file_target(current_file, tree.root.as_deref()) {
-                outbox.push(Message::FileTreeNewFileRequested(dir));
+        // 两者皆无时**禁用按钮**而不是点了没反应:冷启动(无文档无根)点
+        // 新建毫无反馈,用户只能猜是坏了(用户主诉)。禁用态 + 提示「先
+        // 选择文件夹」把原因写在按钮上。
+        let new_target = new_file_target(current_file, tree.root.as_deref());
+        let (new_tip, new_enabled) = if new_target.is_some() {
+            ("在当前目录新建 Markdown 文档", true)
+        } else {
+            ("先选择文件夹或打开文档,再新建", false)
+        };
+        let mut new_response = None;
+        ui.add_enabled_ui(new_enabled, |ui| {
+            let new = crate::ui::icons::narrow_icon_button(ui, Icon::New, new_tip);
+            if new.clicked() {
+                if let Some(dir) = &new_target {
+                    outbox.push(Message::FileTreeNewFileRequested(dir.clone()));
+                }
             }
-        }
+            new_response = Some(new);
+        });
         let refresh = crate::ui::icons::narrow_busy_icon_button(
             ui,
             Icon::Reset,
@@ -1478,7 +1490,7 @@ fn root_row(
         }
         handles = RootRowHandles {
             pick: Some(pick),
-            new: Some(new),
+            new: new_response,
             refresh: Some(refresh),
         };
     });

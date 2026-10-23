@@ -493,7 +493,7 @@ impl Keymap {
         let json = serde_json::to_string_pretty(self)
             .map_err(|source| format!("{}: {source}", path.display()))?;
         std::fs::create_dir_all(dir).map_err(|source| format!("{}: {source}", dir.display()))?;
-        std::fs::write(&path, json.as_bytes())
+        crate::persist::write_atomic(&path, json.as_bytes())
             .map_err(|source| format!("{}: {source}", path.display()))
     }
 }
