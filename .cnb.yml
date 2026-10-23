@@ -143,6 +143,7 @@ $:
             cd dist
             fail=0
             while read -r sum file; do
+              [ -n "${file}" ] || continue   # 文件末尾的空行
               file=${file#\*}
               if [ -f "${file}" ]; then
                 echo "${sum} *${file}" | sha256sum -c - || fail=1
