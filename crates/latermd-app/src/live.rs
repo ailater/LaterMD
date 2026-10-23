@@ -1848,8 +1848,14 @@ pub fn ui(
                     // 块文本直接借用共享缓冲；渲染缓存持有改写结果，稳态帧不再复制整块。
                     let block_text = BlockBuffer::slice(editor.text(), &range);
                     let kind = block_kind(block_text);
-                    if let Some(prev) = prev_kind {
-                        ui.add_space(block_gap(&gap_style, gap_font_size, prev, kind));
+                    // 本块与上一块之间的空隙(add_space 的同值):表格悬停
+                    // 工具条要借这块空白悬浮,同时得钳住不压上一块 —— 上一
+                    // 块底缘 = 本块顶(cursor_y)- gap_above。
+                    let gap_above = prev_kind
+                        .map(|prev| block_gap(&gap_style, gap_font_size, prev, kind))
+                        .unwrap_or(0.0);
+                    if gap_above > 0.0 {
+                        ui.add_space(gap_above);
                     }
                     prev_kind = Some(kind);
                     // 视口外块估高剔除(#111 B,decisions-pending 备选 B 的落地):
@@ -2033,7 +2039,14 @@ pub fn ui(
                             .map(|geometry| geometry.table)
                             .unwrap_or_else(|| ui.min_rect());
                             let table_action = if !live.browse_locked {
-                                draw_table_toolbar(ui, &owned, live, index, table_rect)
+                                draw_table_toolbar(
+                                    ui,
+                                    &owned,
+                                    live,
+                                    index,
+                                    table_rect,
+                                    cursor_y - gap_above,
+                                )
                             } else {
                                 TableAction::None
                             };
@@ -2778,7 +2791,14 @@ pub fn ui(
                             && !live.browse_locked
                             && live.active != Some(index)
                         {
-                            draw_table_toolbar(ui, block_text, live, index, table_rect)
+                            draw_table_toolbar(
+                                ui,
+                                block_text,
+                                live,
+                                index,
+                                table_rect,
+                                cursor_y - gap_above,
+                            )
                         } else {
                             TableAction::None
                         };
@@ -3456,17 +3476,19 @@ enum TableAction {
 }
 
 /// 表格悬停工具条：仅当指针位于表格块或工具条自身时显示，且不占布局高度。
-/// 钉在表格左上角内侧(坤哥 2026-10-23 反馈):浮在上缘外会跟上一块抢
-/// 间距 —— 块间隙只有十来像素,盖不住 20px 的条,必然压住上一块的收尾;
-/// 盖住表头左端,换「上方的块纹丝不动」。极窄表允许条右缘略出表,悬空
-/// 在留白上不遮内容。加行/加列/删除由调用方在块文本借用结束后执行；
-/// 复制直接写入剪贴板。
+/// 悬在**表格外**、上方空隙里，左缘与表格对齐（坤哥 2026-10-23 二轮反馈：
+/// 角内钉扎挡住表头首行）。上缘钳在上一块底缘（`min_top`）之下 —— 空隙
+/// 不够时向下让，宁可压回表头也不覆盖上一块；表贴视口顶、空隙滚出屏时
+/// 条不可见，退回角内保可点。`min_top` = 本块顶 - `block_gap`（调用点
+/// 传入）。加行/加列/删除由调用方在块文本借用结束后执行；复制直接写入
+/// 剪贴板。
 fn draw_table_toolbar(
     ui: &mut egui::Ui,
     block_text: &str,
     live: &LiveState,
     index: usize,
     block_rect: egui::Rect,
+    min_top: f32,
 ) -> TableAction {
     let _ = (live, index);
     let size = egui::vec2(
@@ -3476,18 +3498,26 @@ fn draw_table_toolbar(
     let count = 4.0_f32;
     let gap = 2.0;
     let total_w = count * size.x + (count - 1.0) * gap;
-    // 内缩 3px:外框 expand(3.0) 后与表格左上角齐平
+    let clip = ui.clip_rect();
+    // 下缘离表格顶 2px；上缘不越过上一块底 +1px。外框 expand(2.0),
+    // 条左缘 +2px 使外框与表格左缘齐平。
+    let mut top = (block_rect.top() - size.y - 2.0).max(min_top + 1.0);
+    if top < clip.top() {
+        top = block_rect.top() + 3.0;
+    }
     let bar_rect = egui::Rect::from_min_size(
-        egui::pos2(block_rect.left() + 3.0, block_rect.top() + 3.0),
+        egui::pos2(block_rect.left() + 2.0, top),
         egui::vec2(total_w, size.y),
     );
-    let bar_hover = ui.rect_contains_pointer(block_rect) || ui.rect_contains_pointer(bar_rect);
+    // 悬停区取表格与条的并集:条与表格之间留了 2px 空隙,指针横穿时
+    // 若按两矩形分别判定会闪断一帧。
+    let bar_hover = ui.rect_contains_pointer(block_rect.union(bar_rect));
     if !bar_hover {
         crate::ui::rich_widgets::push_table_toolbar_rects(ui.ctx(), Vec::new());
         return TableAction::None;
     }
     let mut hit_rects = Vec::new();
-    let bar_frame = bar_rect.expand(3.0);
+    let bar_frame = bar_rect.expand(2.0);
     ui.painter().rect_filled(
         bar_frame,
         crate::ui::tokens::RADIUS_SM,
@@ -5443,19 +5473,27 @@ mod tests {
             frame.toolbar_rects
         );
         assert!(frame.toolbar_rects[3].right() > frame.toolbar_rects[0].left());
-        // 钉在表格左上角:条起点不越过首个表头文字的左/上(取「a」
-        // 的墨迹矩形当表头左上参照),不得再飘到右上缘外。
+        // 悬在表格外、上方空隙里,左缘与表格对齐(取表头「a」的墨迹矩形
+        // 当表格左上参照):条底不得压进首个表头文字,条顶不得越过上一块
+        // 「标题」的墨迹底,条左缘起于表格左端而不是右上缘外。
+        let title_rect = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("标题"))
+            .expect("上一块已渲染")
+            .1;
+        let bar = frame.toolbar_rects[0];
         assert!(
-            frame.toolbar_rects[0].left() <= table_rect.left(),
-            "工具条应起于表格左端:{:?} vs {:?}",
-            frame.toolbar_rects[0],
-            table_rect
+            bar.bottom() <= table_rect.top() + 1.0,
+            "工具条不得挡表格第一行:{bar:?} vs 表头墨迹 {table_rect:?}"
         );
         assert!(
-            frame.toolbar_rects[0].top() <= table_rect.top() + 2.0,
-            "工具条应贴表格上缘:{:?} vs {:?}",
-            frame.toolbar_rects[0],
-            table_rect
+            bar.top() >= title_rect.bottom() - 1.0,
+            "工具条不得覆盖上一块:{bar:?} vs 上一块墨迹底 {title_rect:?}"
+        );
+        assert!(
+            bar.left() <= table_rect.left() + 1.0,
+            "工具条应与表格左端对齐:{bar:?} vs {table_rect:?}"
         );
     }
 
