@@ -1,0 +1,42 @@
+name: Pages
+
+# 发布 docs/site/（LaterMD 下载页）到 GitHub Pages，绑定域名 md.ailater.com。
+# 只在 main 上跑，与 rust.yml 口径一致；Pages 源为 GitHub Actions，
+# 只上传 docs/site 子目录，docs/ 其余内部规划文档不进产品域名。
+# DNS 侧需在域名服务商处把 md.ailater.com CNAME 到 ailater.github.io。
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "docs/site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy download page
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
