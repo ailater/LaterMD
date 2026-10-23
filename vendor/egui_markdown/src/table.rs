@@ -13,6 +13,46 @@ use crate::link::LinkHandler;
 use crate::style::{InlineCodeStyle, TableStyle};
 use crate::types::{Alignment, TableData, Token, TokenStyle};
 
+/// Geometry captured while rendering a table.
+#[derive(Debug, Clone)]
+pub struct TableGeometry {
+  /// Full content rectangle, including horizontally clipped content.
+  pub table: Rect,
+  /// Visible horizontal viewport rectangle.
+  pub viewport: Rect,
+  /// Cell rectangles as `(row, column, header, rect)`.
+  pub cells: Vec<(usize, usize, bool, Rect)>,
+}
+
+impl Default for TableGeometry {
+  fn default() -> Self {
+    Self { table: Rect::NOTHING, viewport: Rect::NOTHING, cells: Vec::new() }
+  }
+}
+
+/// Read geometry captured by the last render for a stable table id.
+pub fn table_geometry(ctx: &egui::Context, id: Id) -> Option<TableGeometry> {
+  ctx.data(|d| d.get_temp::<TableGeometry>(id.with("geometry")))
+}
+
+/// Callback invoked after cell padding has been applied. Returning `true` replaces
+/// the default rich cell renderer for that cell.
+pub type CellRenderer<'a> = dyn FnMut(&mut Ui, usize, usize, bool, Rect) -> bool + 'a;
+
+/// Options for [`render_table_with_options`].
+pub struct TableRenderOptions<'a> {
+  /// Optional callback that replaces the default renderer per cell.
+  pub cell_renderer: Option<&'a mut CellRenderer<'a>>,
+  /// Minimum content width before horizontal scrolling.
+  pub min_width: f32,
+}
+
+impl<'a> Default for TableRenderOptions<'a> {
+  fn default() -> Self {
+    Self { cell_renderer: None, min_width: 0.0 }
+  }
+}
+
 /// Render a markdown table using `egui_extras::TableBuilder`.
 #[allow(clippy::too_many_arguments)]
 pub fn render_table(
@@ -25,9 +65,28 @@ pub fn render_table(
   table_style: &TableStyle,
   link_handler: Option<&dyn LinkHandler>,
 ) {
+  let mut options = TableRenderOptions::default();
+  let _ =
+    render_table_with_options(ui, id, data, font_id, color, inline_code_style, table_style, link_handler, &mut options);
+}
+
+/// Render a table with the same measurement, scrolling, and chrome as [`render_table`].
+/// The returned geometry is also stored under `id.with("geometry")` for hit mapping.
+#[allow(clippy::too_many_arguments)]
+pub fn render_table_with_options(
+  ui: &mut Ui,
+  id: Id,
+  data: &TableData<'_>,
+  font_id: &FontId,
+  color: Color32,
+  inline_code_style: &InlineCodeStyle,
+  table_style: &TableStyle,
+  link_handler: Option<&dyn LinkHandler>,
+  options: &mut TableRenderOptions<'_>,
+) -> TableGeometry {
   let num_cols = data.alignments.len();
   if num_cols == 0 {
-    return;
+    return TableGeometry::default();
   }
 
   let hyperlink_color = ui.visuals().hyperlink_color;
@@ -58,14 +117,16 @@ pub fn render_table(
   let col_widths = measured.col_widths;
   let header_h = measured.header_h;
   let row_heights = measured.row_heights;
-  let table_size = Vec2::new(col_widths.iter().sum(), header_h + row_heights.iter().sum::<f32>());
+  let table_width = col_widths.iter().sum::<f32>().max(options.min_width);
+  let table_size = Vec2::new(table_width, header_h + row_heights.iter().sum::<f32>());
   let radius = table_style.corner_radius.round() as u8;
+  let mut geometry = TableGeometry::default();
 
   let output = ScrollArea::horizontal()
     .id_salt(id.with("scroll"))
     .content_margin(Margin { top: 0, right: 0, bottom: 4, left: 0 })
     .show(ui, |ui| {
-      let paint_table = |ui: &mut Ui| {
+      let mut paint_table = |ui: &mut Ui| {
         if stroke.is_some() {
           ui.spacing_mut().item_spacing = Vec2::ZERO;
         }
@@ -86,20 +147,26 @@ pub fn render_table(
                 if table_style.header_fill {
                   paint_header_fill(ui);
                 }
+                let cell_rect = ui.max_rect();
+                geometry.cells.push((0, col_idx, true, cell_rect));
                 padded_cell(ui, cell_margin, align, |ui| {
-                  render_cell(
-                    ui,
-                    cell_tokens,
-                    font_id,
-                    color,
-                    hyperlink_color,
-                    strong_color,
-                    has_bold,
-                    true,
-                    dark_mode,
-                    inline_code_style,
-                    link_handler,
-                  );
+                  let replaced =
+                    options.cell_renderer.as_deref_mut().is_some_and(|cb| cb(ui, 0, col_idx, true, cell_rect));
+                  if !replaced {
+                    render_cell(
+                      ui,
+                      cell_tokens,
+                      font_id,
+                      color,
+                      hyperlink_color,
+                      strong_color,
+                      has_bold,
+                      true,
+                      dark_mode,
+                      inline_code_style,
+                      link_handler,
+                    );
+                  }
                 });
                 if let Some(stroke) = stroke {
                   paint_cell_separators(ui, ui.max_rect(), stroke, col_idx + 1 == num_cols, data.rows.is_empty());
@@ -114,20 +181,28 @@ pub fn render_table(
               for (col_idx, cell_tokens) in row_data.iter().enumerate() {
                 let align = data.alignments.get(col_idx).copied().unwrap_or(Alignment::None);
                 row.col(|ui| {
+                  let cell_rect = ui.max_rect();
+                  geometry.cells.push((row_idx + 1, col_idx, false, cell_rect));
                   padded_cell(ui, cell_margin, align, |ui| {
-                    render_cell(
-                      ui,
-                      cell_tokens,
-                      font_id,
-                      color,
-                      hyperlink_color,
-                      strong_color,
-                      has_bold,
-                      false,
-                      dark_mode,
-                      inline_code_style,
-                      link_handler,
-                    );
+                    let replaced = options
+                      .cell_renderer
+                      .as_deref_mut()
+                      .is_some_and(|cb| cb(ui, row_idx + 1, col_idx, false, cell_rect));
+                    if !replaced {
+                      render_cell(
+                        ui,
+                        cell_tokens,
+                        font_id,
+                        color,
+                        hyperlink_color,
+                        strong_color,
+                        has_bold,
+                        false,
+                        dark_mode,
+                        inline_code_style,
+                        link_handler,
+                      );
+                    }
                   });
                   if let Some(stroke) = stroke {
                     paint_cell_separators(ui, ui.max_rect(), stroke, col_idx + 1 == num_cols, row_idx == last_body);
@@ -143,7 +218,11 @@ pub fn render_table(
       Rect::from_min_size(top_left, table_size)
     });
 
+  geometry.table = output.inner;
+  geometry.viewport = output.inner_rect;
   paint_table_chrome(ui, output.inner, output.inner_rect, stroke, radius);
+  ui.ctx().data_mut(|d| d.insert_temp(id.with("geometry"), geometry.clone()));
+  geometry
 }
 
 fn padded_cell(ui: &mut Ui, margin: Margin, align: Alignment, add: impl FnOnce(&mut Ui)) {
