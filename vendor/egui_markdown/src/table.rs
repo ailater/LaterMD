@@ -114,10 +114,17 @@ pub fn render_table_with_options(
     .then(|| Stroke::new(table_style.stroke_width, ui.visuals().widgets.noninteractive.bg_stroke.color));
   let last_body = data.rows.len().saturating_sub(1);
   let cell_margin = egui::Margin { left: pad[0] as i8, top: pad[1] as i8, right: pad[2] as i8, bottom: pad[3] as i8 };
-  let col_widths = measured.col_widths;
+  let mut col_widths = measured.col_widths;
   let header_h = measured.header_h;
   let row_heights = measured.row_heights;
-  let table_width = col_widths.iter().sum::<f32>().max(options.min_width);
+  let intrinsic_width = col_widths.iter().sum::<f32>();
+  if options.min_width > intrinsic_width && !col_widths.is_empty() {
+    let extra = (options.min_width - intrinsic_width) / col_widths.len() as f32;
+    for width in &mut col_widths {
+      *width += extra;
+    }
+  }
+  let table_width = col_widths.iter().sum::<f32>();
   let table_size = Vec2::new(table_width, header_h + row_heights.iter().sum::<f32>());
   let radius = table_style.corner_radius.round() as u8;
   let mut geometry = TableGeometry::default();
@@ -429,7 +436,9 @@ fn measure_table(
     ui.ctx().fonts_mut(|f| f.layout_job(job)).size()
   };
 
-  let mut header_h = 0.0_f32;
+  let line_height = ui.fonts_mut(|fonts| fonts.row_height(font_id));
+  let min_content_h = line_height.max(1.0);
+  let mut header_h = min_content_h;
   for (col, cell) in data.headers.iter().enumerate() {
     let size = measure(cell, true);
     widths[col] = widths[col].max(size.x + hpad);
@@ -438,7 +447,7 @@ fn measure_table(
 
   let mut row_heights = Vec::with_capacity(data.rows.len());
   for row in &data.rows {
-    let mut h = 0.0_f32;
+    let mut h = min_content_h;
     for (col, cell) in row.iter().enumerate() {
       if col < num_cols {
         let size = measure(cell, false);
