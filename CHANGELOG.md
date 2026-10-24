@@ -9,6 +9,24 @@
 > 下载表本身由 dist 生成,只含五个矩阵目标;`universal2 dmg` 是 macos-dmg job 事后回传的,
 > 永远不在这张表里,需在 Release 页面手工补一行(见 [docs/distribution.md](docs/distribution.md) §3.3)。
 
+## v0.0.10 - 2026-10-24
+
+macOS 稳定性批次:**止住 macOS 真机间歇性闪退**(accesskit 关停),连同写作模式两处真机反馈的渲染修复(表格悬停乱码、代码块进编辑框体变高)。相对 v0.0.9 共 4 个 PR,均经 MacBookPro15,4 / macOS 15.3.1 真机验证。
+
+### macOS 崩溃修复
+
+- **关闭 macOS 的 accesskit**(#328):accesskit_macos 0.26.3 的 SubclassingAdapter 类交换缺陷(上游 AccessKit/accesskit#823)让 AppKit 的 Touch Bar KVO 在 removeObserver 时抛 NSRangeException,主线程 SIGILL 闪退。macOS 关掉该 feature 止血,Windows / Linux 的屏幕阅读器支持照常保留;manifest 三条守门哨兵防退化。代价:macOS 上 VoiceOver 暂时读不到界面,上游发版后回滚
+
+### 修复
+
+- **表格悬停乱码**(#330):表格悬停工具条的图标热区从 `allocate_rect` 改为 `ui.interact` 注册——前者会把 egui 布局光标无条件拉回工具条底部(表格顶),悬停帧里表格之后的整段文档叠画进表格区域;移开指针即恢复的「放上去就乱」由此而来
+- **代码块进编辑框体变高**(#331):编辑态可见正文剥净闭合行前的尾随空行,与浏览态 `lines()` 同口径——此前点进带空行的代码块,底部凭空多一行;光标落在空行区时该行保持可见可编辑(Enter 新行不塌),离开即重新隐藏
+
+### 内部
+
+- 性能回归哨兵的 miss 帧改取多文本中位数,并按两平台重标定阈值(#329,仅测试)
+- 表格工具条与代码块高度各新增回归哨兵,修复前均实测跑红坐实
+
 ## v0.0.9 - 2026-10-23
 
 Live 原地编辑收尾批次:**代码块原地编辑**——活动围栏代码块不再塌成整块源码,与表格单元格同款的「浏览/编辑同源渲染」落地。另有表格工具条两轮悬停定位精修与配置隔离修复。相对 v0.0.8 共 11 个 PR。
