@@ -10,6 +10,7 @@
 //! 数据层 crate:不依赖 egui/eframe;把 token 流翻译为绘制是 UI 侧的职责。
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use egui_markdown::types::{TableData, Token};
@@ -158,6 +159,116 @@ fn outline_from(tokens: &[Token<'_>], spans: &[Range<usize>]) -> Vec<OutlineItem
         }
     }
     items
+}
+
+/// FNV-1a(64 位)哈希器:大纲指纹的专用廉价哈希。
+///
+/// 指纹对**每个段落行**滚动一次哈希(setext 回摘需要),SipHash
+/// (`DefaultHasher`)在这个调用面下太贵(20k 行 ≈ 0.5ms),FNV 把指纹
+/// 压回纯字节扫的量级。碰撞面 64 位,对「超集摘要」语义与性质测试
+/// (`fingerprint_equality_implies_identical_outline`)都不构成区别。
+struct Fnv1a(u64);
+
+impl Fnv1a {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl std::hash::Hasher for Fnv1a {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+/// 大纲指纹:可能影响大纲的行的超集摘要(击键帧免全篇解析的闸门)。
+///
+/// [`outline`] 的成本在 pulldown 全篇解析(634KB 文档约 4.4ms,线性),
+/// 而大纲条目只可能被少数几类行影响。本函数是**纯字节行扫**(无解析、
+/// 无按行分配,约一个数量级便宜),把标题相关行摘要成一个 `u64`:
+///
+/// - **ATX 标题行**:行首空白(任意个,含 0)后 `#`;整个 ATX 行的正文
+///   变化(含闭标记 `###`、`#` 后空格的有无)都落在这行的字节里;
+/// - **setext 下划线行**:行首空白后以 `=`/`-` 开头的行 —— 连同它上方
+///   **整个段落**(setext 标题文本可以多行,段落行本身没有任何特征
+///   字符,按下划线回摘所在段落);段落起点偏移一并入摘;
+/// - **围栏行**:行首空白后 ``` / `~~~`(切换代码态,决定之后的 `#` 行
+///   算不算标题;编辑一个 fence 会翻转其后所有标题的成色);
+/// - **容器行**:行首空白后 `>` / `-` / `*` / `+`(引用与列表项内可以有
+///   标题,pulldown 会照常产出 Heading 事件);
+/// - **HTML 块边界行**:行首空白后 `<`(HTML 块内的 `#` 行不是标题)与
+///   **空行**(空白纯度的行,HTML 块在空行处终止)。空行入摘之所以必要:
+///   等长的「空行 ↔ 非空行」对换可以在**不移动任何后续偏移**的情况下
+///   改变 HTML 块的终止位置,从而翻转其后 `#` 行的成色 —— 这是唯一
+///   能在偏移与特殊行字节全同的情况下改变大纲的上下文对换。段内打字
+///   不触碰空行,优化面不受影响;
+/// - 每个特殊行连同**行首字节偏移**与**整行字节**入摘 —— 正文里的单字
+///   符增删会平移其后所有特殊行的偏移,指纹随之变化。大纲条目的
+///   `span` 是字节区间,偏移入摘保证「指纹相等 ⟹ span 也一致」。
+///
+/// **超集性质**(随机编辑性质测试钉死):指纹相等 ⟹ 大纲条目(层级/
+/// 文本/span)必然相等;反之不成立(指纹变了而大纲没变属正常,只是
+/// 多付一次解析)。工程含义:**编辑发生在最后一个特殊行之后**(长文
+/// 末段写作,最常见)时指纹稳定,每击键一次的全篇解析由此免掉;编辑
+/// 位置之前存在特殊行时 span 本来就需要重算,重扫是语义必需而非白付。
+///
+/// 前导空白按「任意个」而非 CommonMark 的「≤3 个」判定:多算只是多付
+/// 一次解析(假阳性方向),少算才会漏(假阴性方向)。缩进代码块里的
+/// `#` 行同理 —— 它们不是标题,但照摘不误。
+pub fn outline_fingerprint(text: &str) -> u64 {
+    let mut hasher = Fnv1a::new();
+    let mut paragraph_start = 0_usize;
+    let mut paragraph_hash = 0u64;
+    let mut offset = 0_usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start_matches([' ', '\t']);
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let first = trimmed.as_bytes().first().copied();
+        let blank = body.trim().is_empty();
+        if blank
+            || matches!(
+                first,
+                Some(b'#')
+                    | Some(b'`')
+                    | Some(b'~')
+                    | Some(b'>')
+                    | Some(b'-')
+                    | Some(b'*')
+                    | Some(b'+')
+                    | Some(b'=')
+                    | Some(b'<')
+            )
+        {
+            offset.hash(&mut hasher);
+            body.hash(&mut hasher);
+        }
+        if matches!(first, Some(b'=') | Some(b'-')) {
+            // setext 下划线:标题文本是它上方的整个段落(可多行),段落
+            // 行自身无特征字符,按段落起点与累计摘要回摘。
+            paragraph_start.hash(&mut hasher);
+            paragraph_hash.hash(&mut hasher);
+        }
+        if blank {
+            paragraph_start = offset + line.len();
+            paragraph_hash = 0;
+        } else {
+            // 段落行的滚动摘要:下划线出现时,上方段落的任何编辑都已落
+            // 在这个值里。单独起一个哈希器实例滚动,与指纹主哈希器互不
+            // 污染。
+            let mut rolling = Fnv1a::new();
+            paragraph_hash.hash(&mut rolling);
+            body.hash(&mut rolling);
+            paragraph_hash = rolling.finish();
+        }
+        offset += line.len();
+    }
+    hasher.finish()
 }
 
 /// 把文档切成**块**(P3 Live Preview 的骨架):返回每个块的源码字节区间。
@@ -3727,6 +3838,208 @@ mod tests {
         assert_eq!(
             cell_text(owned_table, 1, 1),
             cell_text(borrowed_table, 1, 1)
+        );
+    }
+
+    // —— 大纲指纹(outline_fingerprint)——
+
+    /// 性质测试的语料:覆盖指纹注释里点名的全部行类(ATX/setext/围栏/
+    /// 容器/HTML 块/空行),mutant 在它上面随机打。
+    fn fingerprint_corpus() -> String {
+        [
+            "# 顶标题\n",
+            "\n",
+            "普通段落一行,带中文与 emoji 😀。\n",
+            "段落第二行(setext 的多行标题正文)。\n",
+            "===\n",
+            "\n",
+            "## 二级\n",
+            "\n",
+            "```rust\n",
+            "# 代码里的井号行不是标题\n",
+            "let x = 1;\n",
+            "```\n",
+            "\n",
+            "> 引用里的标题\n",
+            "> # 引用标题\n",
+            "\n",
+            "- 列表项\n",
+            "- # 列表里的标题\n",
+            "\n",
+            "<div>\n",
+            " \n",
+            "### 空行之后的标题\n",
+            "\n",
+            "尾段正文,写作最常见的落点。\n",
+        ]
+        .concat()
+    }
+
+    /// 确定性伪随机(线性同余):性质测试可复现,失败样本可从 seed 重放。
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+    }
+
+    /// 在语料上打一次随机编辑(字符边界安全:插入点/删除点都对齐到
+    /// char boundary)。变异面:单字符插入 / 单字符删除 / 等长字符替换 /
+    /// 整行删除 / 插入新行(含空行,针对 HTML 块边界的对换洞)。
+    fn mutate(text: &str, rng: &mut Lcg) -> String {
+        let mut owned = text.to_owned();
+        let choice = rng.below(5);
+        match choice {
+            0 => {
+                let at = owned
+                    .char_indices()
+                    .nth(rng.below(owned.chars().count()))
+                    .map_or(owned.len(), |(byte, _)| byte);
+                owned.insert(at, ['字', 'x', '#', '=', '>', '`'][rng.below(6)]);
+            }
+            1 => {
+                if !owned.is_empty() {
+                    let (at, ch) = owned
+                        .char_indices()
+                        .nth(rng.below(owned.chars().count()))
+                        .expect("非空有首字符");
+                    owned.replace_range(at..at + ch.len_utf8(), "");
+                }
+            }
+            2 => {
+                if !owned.is_empty() {
+                    let (at, ch) = owned
+                        .char_indices()
+                        .nth(rng.below(owned.chars().count()))
+                        .expect("非空有首字符");
+                    owned.replace_range(
+                        at..at + ch.len_utf8(),
+                        &['换', 'y', '~', ' ', '\n'][rng.below(5)].to_string(),
+                    );
+                }
+            }
+            3 => {
+                let lines: Vec<&str> = owned.lines().collect();
+                if !lines.is_empty() {
+                    let drop = rng.below(lines.len());
+                    owned = lines
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| *index != drop)
+                        .map(|(_, line)| *line)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        + "\n";
+                }
+            }
+            _ => {
+                let lines: Vec<&str> = owned.lines().collect();
+                let at = rng.below(lines.len() + 1);
+                let fresh = ["新段落行", "# 新标题", "  ", "=== ", "```", "- 新项"][rng.below(6)];
+                let mut rebuilt: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+                rebuilt.insert(at, fresh.to_string());
+                owned = rebuilt.join("\n") + "\n";
+            }
+        }
+        owned
+    }
+
+    /// **超集性质**:指纹相等 ⟹ 大纲条目(层级/文本/span)完全相等。
+    /// 随机编辑对(语料 × 变异),确定性 seed;撞上相等指纹时两侧 outline
+    /// 必须逐项一致。哈希碰撞(64 位)在测试样本量下概率可忽略,真撞上
+    /// 会以断言失败显形,属实现缺陷而非测试缺陷。
+    #[test]
+    fn fingerprint_equality_implies_identical_outline() {
+        let mut rng = Lcg(0x5EED_0001);
+        let corpus = fingerprint_corpus();
+        let mut equal_pairs = 0_usize;
+        for _ in 0..1500 {
+            let base = if rng.below(2) == 0 {
+                corpus.clone()
+            } else {
+                mutate(&corpus, &mut rng)
+            };
+            let variant = mutate(&base, &mut rng);
+            if outline_fingerprint(&base) == outline_fingerprint(&variant) {
+                equal_pairs += 1;
+                assert_eq!(
+                    outline(&base),
+                    outline(&variant),
+                    "指纹相等而大纲不同:\n--- base ---\n{base}\n--- variant ---\n{variant}"
+                );
+            }
+        }
+        // 健全性:样本里确实出现「指纹相等」的对(多为尾部编辑),性质
+        // 断言不是在空集上恒真。
+        assert!(
+            equal_pairs > 0,
+            "1500 组变异竟无一组指纹相等,性质测试退化成空转"
+        );
+    }
+
+    /// 工程主场景:编辑发生在最后一个特殊行之后(长文末段写作)时指纹
+    /// 稳定 —— 这正是闸门要免掉的每击键全篇解析。
+    #[test]
+    fn fingerprint_is_stable_for_prose_edits_after_the_last_special_line() {
+        let text = "# 标题\n\n正文一段。\n\n## 二级\n\n继续写作。\n";
+        assert_eq!(
+            outline_fingerprint(text),
+            outline_fingerprint("# 标题\n\n正文一段。\n\n## 二级\n\n继续写作,多打几个字。\n"),
+            "末段编辑不该触发重扫"
+        );
+    }
+
+    /// span 新鲜度:特殊行**之前**的单字符增删平移其后所有标题的偏移,
+    /// 指纹必须随之变化(大纲 span 是字节区间,不能拿旧值顶替)。
+    #[test]
+    fn fingerprint_shifts_when_edits_precede_special_lines() {
+        let text = "正文开头。\n\n# 标题\n\n后文。\n";
+        let edited = "正文开头,多一字。\n\n# 标题\n\n后文。\n";
+        assert_ne!(
+            outline_fingerprint(text),
+            outline_fingerprint(edited),
+            "标题偏移被平移,指纹必须变"
+        );
+    }
+
+    /// HTML 块边界对换(指纹设计的假阴性专项):等长的「空行 ↔ 非空行」
+    /// 不移动任何偏移,但把 `# 标题` 从块外翻进块内(或反过来)—— 空行
+    /// 入摘正是为堵这个洞。
+    #[test]
+    fn html_block_boundary_swap_changes_fingerprint_and_outline() {
+        let blank_terminated = "<div>\n \n# 标题\n";
+        let block_continues = "<div>\nx\n# 标题\n";
+        // 前置:两种文本的大纲确实不同(空行终止块,# 是标题;非空行
+        // 延续块,# 是块内文本)。
+        assert_ne!(
+            outline(blank_terminated),
+            outline(block_continues),
+            "前置:这对样本必须真的分叉,否则测试失去意义"
+        );
+        assert_ne!(
+            outline_fingerprint(blank_terminated),
+            outline_fingerprint(block_continues),
+            "空行入摘必须区分这对等长对换"
+        );
+    }
+
+    /// setext 多行标题:段落正文行没有任何特征字符,编辑它必须经
+    /// 「下划线回摘段落」路径反映到指纹。
+    #[test]
+    fn setext_paragraph_text_edit_reaches_fingerprint() {
+        let text = "标题第一行\n标题第二行\n===\n\n正文。\n";
+        let edited = "标题第一行\n改过的第二行\n===\n\n正文。\n";
+        assert_ne!(
+            outline_fingerprint(text),
+            outline_fingerprint(edited),
+            "setext 标题文本变了,指纹必须跟着变"
         );
     }
 

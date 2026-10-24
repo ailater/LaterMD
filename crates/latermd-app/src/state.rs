@@ -224,12 +224,25 @@ pub struct PreviewState {
     /// 次修订(见 [`Self::sync_outline`]),只有一个同步位就认不出「切出来
     /// 时它已经旧了」,会一直拿旧大纲糊弄读者。
     pub(crate) outline_rev: Option<u64>,
+    /// `outline` 对应的**大纲指纹**(`latermd_md::outline_fingerprint`)。
+    ///
+    /// 超集闸门(2026-10-24 击键轮):修订号前进时先算指纹(纯字节行扫,
+    /// 约一个数量级便宜),指纹不变 ⟹ 大纲条目与 span 必然不变(latermd-md
+    /// 性质测试钉死),直接推进 `outline_rev` 免掉全篇 pulldown 解析 ——
+    /// 长文末段写作(编辑在最后一个特殊行之后,最常见)由此每击键省
+    /// ~4.3ms@634KB。`None` 与 `outline_rev` 同生同灭:没算过就当指纹
+    /// 不同,首轮必然全扫。
+    pub(crate) outline_fingerprint: Option<u64>,
     /// 侧栏大纲页**此刻是否正在显示**;由 `end_of_logic` 每帧写入。
     ///
     /// 初值 `true` 是给既有语义兜底:`PreviewState::new` 是「整篇换入」,
     /// 那时算一次大纲正是应有之义(换入后大纲必然要重扫)。测试里直接走
     /// `new`/`rebuild` 的路径也靠它保持「大纲随编辑同帧重算」的既有断言。
     pub(crate) outline_shown: bool,
+    /// 全篇大纲重扫的次数(仅测试可见):断言「闸门真的拦下了重扫」的
+    /// 观察面 —— 大纲内容是否变化区分不出「重算出相同结果」与「跳过」。
+    #[cfg(test)]
+    pub(crate) outline_rescans: usize,
     //
     // P5(live-unify)瘦身:`rendered` 与四层渲染映射(`offset_map` /
     // `highlight_map` / `emoji_map` / `task_map`)、`scroll_target` 已删。
@@ -260,7 +273,10 @@ impl PreviewState {
             text: text.to_owned(),
             synced_rev: editor.revision(),
             outline_rev: Some(editor.revision()),
+            outline_fingerprint: Some(latermd_md::outline_fingerprint(text)),
             outline_shown: true,
+            #[cfg(test)]
+            outline_rescans: 1,
         }
     }
 
@@ -295,7 +311,19 @@ impl PreviewState {
             }
         }
         if self.outline_shown && self.outline_rev != Some(rev) {
-            self.outline = latermd_md::outline(editor.text());
+            // 指纹闸门(2026-10-24 击键轮):先付一次纯字节行扫(约一个
+            // 数量级便宜于全篇解析),指纹不变 ⟹ 大纲条目与 span 必然
+            // 不变(latermd-md `fingerprint_equality_implies_identical_outline`
+            // 钉死),直接推进同步位免掉 pulldown 全篇解析。
+            let fingerprint = latermd_md::outline_fingerprint(editor.text());
+            if self.outline_fingerprint != Some(fingerprint) {
+                self.outline = latermd_md::outline(editor.text());
+                self.outline_fingerprint = Some(fingerprint);
+                #[cfg(test)]
+                {
+                    self.outline_rescans += 1;
+                }
+            }
             self.outline_rev = Some(rev);
         }
     }
@@ -5168,6 +5196,72 @@ mod tests {
 
         append_heading_and_sync(&mut state, "#");
         assert!(!outline_has(&state, "后加的标题"), "禅定档不重扫");
+    }
+
+    // —— 大纲指纹闸门(2026-10-24 击键轮)——
+
+    /// 闸门的主场景:大纲正在显示,编辑发生在**最后一个特殊行之后**
+    /// (长文末段写作)—— 大纲内容与 span 都不可能变,指纹闸门拦下
+    /// 全篇解析(`outline_rescans` 不动),同步位照常推进。
+    #[test]
+    fn outline_gate_skips_rescan_for_tail_prose_edit() {
+        let mut state = State::default();
+        let tab = state.tabs.current_mut();
+        tab.editor.replace_all("# 标题\n\n正文段开始。\n");
+        tab.preview.rebuild(&tab.editor);
+        let before = tab.preview.outline_rescans;
+        assert!(before >= 1, "rebuild 后有一条基线重扫");
+
+        // 末段打字(在最后一个特殊行之后):指纹不变
+        let tab = state.tabs.current_mut();
+        tab.editor
+            .insert_chars(tab.editor.len_chars(), "继续写,这几个字都在末段。");
+        tab.preview.sync_outline(&tab.editor);
+        assert_eq!(
+            tab.preview.outline_rescans, before,
+            "末段编辑不该触发全篇重扫"
+        );
+        assert_eq!(
+            tab.preview.outline_rev,
+            Some(tab.editor.revision()),
+            "同步位照常推进(下一次编辑不再重放)"
+        );
+        assert_eq!(tab.preview.outline.len(), 1, "大纲内容原样");
+
+        // 同一行里敲出新的井号行:指纹必变,重扫并把新标题带进大纲
+        let tab = state.tabs.current_mut();
+        tab.editor
+            .insert_chars(tab.editor.len_chars(), "\n\n## 新标题\n");
+        tab.preview.sync_outline(&tab.editor);
+        assert_eq!(tab.preview.outline_rescans, before + 1, "新标题行触发重扫");
+        assert!(outline_has(&state, "新标题"), "新标题进大纲");
+    }
+
+    /// span 新鲜度:编辑发生在特殊行**之前**(平移标题偏移)时指纹必变,
+    /// 重扫发生、大纲 span 拿到新偏移 —— 闸门只拦「真不会变」的情况。
+    #[test]
+    fn outline_gate_rescans_when_edits_shift_heading_spans() {
+        let mut state = State::default();
+        let tab = state.tabs.current_mut();
+        tab.editor.replace_all("前言。\n\n# 标题\n\n尾段。\n");
+        tab.preview.rebuild(&tab.editor);
+        let span_before = tab.preview.outline[0].span.clone();
+        let rescans_before = tab.preview.outline_rescans;
+
+        // 在标题之前插入一个字符:标题 span 整体平移
+        let tab = state.tabs.current_mut();
+        tab.editor.insert_chars(0, "字");
+        tab.preview.sync_outline(&tab.editor);
+        assert_eq!(
+            tab.preview.outline_rescans,
+            rescans_before + 1,
+            "偏移平移必须重扫(span 是字节区间)"
+        );
+        assert_eq!(
+            tab.preview.outline[0].span.start,
+            span_before.start + "字".chars().next().expect("非空").len_utf8(),
+            "重扫后 span 拿到新偏移,不是旧值顶替"
+        );
     }
 
     // —— 任务列表 checkbox 回写(#63)——
