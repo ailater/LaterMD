@@ -51,39 +51,20 @@ pub(crate) fn remember_panel_width(
     }
 }
 
-/// 系统按钮的中心换算到 egui 坐标；AppKit 使用 point，egui 还可能有
-/// 用户缩放，两者不能直接混用。无原生窗口的无头帧仍用标题栏中心。
-fn header_center_y(ui: &egui::Ui, bar: Rect) -> f32 {
-    #[cfg(target_os = "macos")]
-    if let Some(center) = native_traffic_light_center(ui.ctx()) {
-        if (0.0..=bar.height()).contains(&center) {
-            return bar.top() + center;
-        }
-    }
-    let _ = ui;
+/// 标题栏内容的竖直中心:**恒为标题栏几何中心**(bar.center().y)。
+///
+/// 这里曾按 AppKit 红绿灯中心对齐(mac 惯例),但那是**随窗口聚焦态漂移
+/// 的双源**:窗口失活时 `NSApp.mainWindow`/`keyWindow` 均为 nil,取值退回
+/// 几何中心;聚焦时又回到红绿灯中心。两条中心线在本应用并不重合 —— 头部
+/// 条 40px 高(中心 20px),系统红绿灯仍按原生 28px 标题栏定位(中心
+/// ~14px),实测差 ~7px(2026-10-24 坤哥 mac 截图实测:聚焦时内容行中心
+/// 在窗顶下 12.75pt,失焦时 19pt)。于是整行内容随聚焦状态上下跳动,
+/// 聚焦态读作「标题栏不上下居中」。产品拍板取几何中心(失焦态即用户认可
+/// 的形态);红绿灯与内容线的对齐不再保留 —— 要兼得只能把系统按钮挪位
+/// (AppKit hack),不值得为此冒险。头部条高度不动:40px 是三栏工作台的
+/// 版式基线,不为迁就 28px 原生标题栏压缩。
+fn header_center_y(bar: Rect) -> f32 {
     bar.center().y
-}
-
-#[cfg(target_os = "macos")]
-fn native_traffic_light_center(ctx: &egui::Context) -> Option<f32> {
-    use objc2_app_kit::{NSApplication, NSWindowButton};
-    use objc2_foundation::MainThreadMarker;
-    let app = NSApplication::sharedApplication(MainThreadMarker::new()?);
-    // mainWindow 保持文档窗口身份，不随打开文件对话框的 keyWindow 改变。
-    let window = app.mainWindow().or_else(|| app.keyWindow())?;
-    let content = window.contentView()?;
-    let button = window.standardWindowButton(NSWindowButton::CloseButton)?;
-    let bounds = content.bounds();
-    let rect = button.convertRect_toView(button.bounds(), Some(&content));
-    // 先在 contentView 的坐标系中处理翻转；backing 坐标方向未必相同。
-    let backing_scale = content.convertRectToBacking(bounds).size.height / bounds.size.height;
-    let middle = rect.origin.y + rect.size.height / 2.0;
-    let top_down = if content.isFlipped() {
-        middle - bounds.origin.y
-    } else {
-        bounds.origin.y + bounds.size.height - middle
-    };
-    Some((top_down * backing_scale) as f32 / ctx.pixels_per_point())
 }
 
 /// 仅用于独立工具栏标签：按字形墨迹居中，避开中英文字体不同的行盒留白。
@@ -777,7 +758,7 @@ fn action(ui: &mut egui::Ui, rect: Rect, icon: Icon, tip: &str, selected: bool) 
 /// 空白处可拖窗;所有命令仍走既有消息归约,不抢编辑器焦点。
 pub fn header(ui: &mut egui::Ui, state: &mut State, outbox: &mut Vec<Message>) {
     let bar = ui.max_rect();
-    let center_y = header_center_y(ui, bar);
+    let center_y = header_center_y(bar);
     let drag_rect = Rect::from_min_max(
         bar.left_top() + egui::vec2(TRAFFIC_LIGHTS_W, 0.0),
         bar.right_bottom(),

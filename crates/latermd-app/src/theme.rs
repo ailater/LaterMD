@@ -205,6 +205,38 @@ impl ZenNavMode {
     }
 }
 
+/// 左栏外壳样式(mac 专项,2026-10-24 坤哥指令):工作台(mac 原生 chrome
+/// 搭配的「工作区下拉 + 文字页签」顶部导航)与图标栏(左缘 rail 五视图,
+/// Windows/Linux 外壳同款)。
+///
+/// **仅 macOS 生效**:其余平台的外壳本就是图标栏,该字段在那些平台上不
+/// 改变任何行为(设置行也只在 mac 渲染)。出厂默认随平台:mac 保持工作台
+/// (升级零变化,2026-10-10 #166 引入的既定形态),其他平台默认图标栏;
+/// 用户显式选择后照 settings.json 走。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarStyle {
+    /// 工作台:顶部工作区下拉 + 大纲/文件/搜索文字页签。
+    #[cfg_attr(target_os = "macos", default)]
+    Workbench,
+    /// 图标栏:左缘 rail 图标轨道,与其他平台一致。
+    #[cfg_attr(not(target_os = "macos"), default)]
+    Rail,
+}
+
+impl SidebarStyle {
+    /// 设置页可选项顺序(工作台 → 图标栏,当前默认在前)。
+    pub const ALL: [SidebarStyle; 2] = [Self::Workbench, Self::Rail];
+
+    /// 设置页显示名。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Workbench => "工作台",
+            Self::Rail => "图标栏",
+        }
+    }
+}
+
 /// 启动时的默认视图模式(写作 / 源码 / 对照 / 上次选择)。作用于启动装载
 /// (`State::restore_layout`)与新建文档(`FileCmd::New`);会话内的模式切换
 /// 仍实时记进布局存档,供「上次选择」档恢复。
@@ -342,6 +374,11 @@ pub struct ThemeSettings {
     /// 开关先例落 settings.json(旧档缺字段由 struct 级 `#[serde(default)]`
     /// 兜底回悬停)。关闭档在禅定帧走零路径(不进任何绘制分支)。
     pub zen_nav: ZenNavMode,
+    /// 左栏外壳样式(mac 专项,见 [`SidebarStyle`]):全局偏好,照 #57
+    /// zen_nav 同款通路落 settings.json(旧档缺字段由 struct 级
+    /// `#[serde(default)]` 兜底)。出厂默认随平台(mac 工作台 / 其余图标
+    /// 栏),仅在 macOS 上改变行为。
+    pub sidebar_style: SidebarStyle,
     /// 启动默认视图模式(写作/源码/对照/上次选择):启动装载与新建文档
     /// 共同遵循;
     /// 会话内切档不受限。出厂「上次选择」= 既有行为(升级用户零变化);
@@ -384,6 +421,7 @@ impl Default for ThemeSettings {
             show_focus_mode: false,
             show_selection_ai: true,
             zen_nav: ZenNavMode::default(),
+            sidebar_style: SidebarStyle::default(),
             default_view_mode: DefaultViewMode::default(),
             overrides: None,
             emoji_recent: Vec::new(),
@@ -1379,6 +1417,44 @@ mod tests {
             TitleWidthMode::Full
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 左栏外壳样式(mac 专项)随 settings.json 往返;旧文件缺该项由
+    /// `#[serde(default)]` 兜底回随平台的出厂默认(mac = 工作台,升级
+    /// 零变化;其余平台 = 图标栏,与本平台既有外壳一致)。
+    #[test]
+    fn sidebar_style_round_trips_and_old_settings_fall_back() {
+        let dir = temp_dir("sidebar-style");
+        let settings = ThemeSettings {
+            sidebar_style: SidebarStyle::Rail,
+            ..ThemeSettings::default()
+        };
+        settings.save_to(Some(&dir)).unwrap();
+        assert_eq!(ThemeSettings::load_from(&dir).unwrap(), settings);
+        // 落盘的 JSON 里是可读的小写值(手改配置可辨认)
+        let json = std::fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap();
+        assert!(json.contains(r#""sidebar_style": "rail""#), "{json}");
+
+        // 旧版 settings.json 没有 sidebar_style:兜底回随平台默认
+        std::fs::write(dir.join(SETTINGS_FILE), br#"{"mode":"dark"}"#).unwrap();
+        assert_eq!(
+            ThemeSettings::load_from(&dir).unwrap().sidebar_style,
+            SidebarStyle::default()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `SidebarStyle` 的出厂默认随平台:mac 出工作台(升级零变化),其余
+    /// 平台出图标栏(与两平台既有外壳一致)。cfg_attr 钉住,防止将来有人
+    /// 把 `#[default]` 挪到单一变体上悄悄改掉另一平台的开箱形态。
+    #[test]
+    fn sidebar_style_default_follows_platform() {
+        let expected = if cfg!(target_os = "macos") {
+            SidebarStyle::Workbench
+        } else {
+            SidebarStyle::Rail
+        };
+        assert_eq!(SidebarStyle::default(), expected);
     }
 
     /// #23 排版偏好默认值:字号 15.0pt、行距 1.5 —— 默认值落在手动

@@ -825,6 +825,10 @@ fn appearance_legacy(
         });
         ui.weak("左缘标签导航:悬停=移近左缘唤出;常显=进入禅定即显示;关闭=不渲染。");
 
+        // 左栏外壳样式(mac 专项):仅 mac 原生外观页(macos::appearance)
+        // 渲染该行 —— 其他平台外壳恒为图标栏,该偏好不改变行为;mac 走
+        // 分发器,本 legacy 页在 mac 上不会被调用。
+
         // 标签标题宽度(#37):此前只在标签条右键菜单,收进外观页(与
         // 禅定导航同款 selectable_label 三态行)。
         settings_row(ui, "标签标题", |ui| {
@@ -2895,6 +2899,72 @@ mod tests {
                 );
             }
             assert!(last_outbox.is_empty(), "{mode:?}: 无交互帧不产出消息");
+        }
+    }
+
+    /// 左栏外壳选择(mac 专项):外观页真实渲出两态选择并与 theme 绑定
+    /// (zen_nav 选择器同款口径)。仅 macOS 断言——其他平台该行不渲染,
+    /// 测试形态与生产行为保持同一开关。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn appearance_page_renders_sidebar_style_selector_bound_to_theme() {
+        let mut state = State::default();
+        let ctx = egui::Context::default();
+        state.theme.apply(&ctx, state.theme.mode);
+
+        for style in crate::theme::SidebarStyle::ALL {
+            state.theme.sidebar_style = style;
+            let skins = state.skins.clone();
+            let mut last_shapes = Vec::new();
+            let mut last_outbox = Vec::new();
+            let system_theme_ok = state.system_theme_ok;
+            let resolved = resolved_theme_for_test(&state);
+            for _ in 0..3 {
+                let State {
+                    settings, theme, ..
+                } = &mut state;
+                let mut outbox = Vec::new();
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            egui::vec2(1200.0, 800.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            appearance(
+                                ui,
+                                settings,
+                                theme,
+                                &skins,
+                                system_theme_ok,
+                                resolved,
+                                &mut outbox,
+                            );
+                        });
+                    },
+                );
+                let mut output = output;
+                output.textures_delta.clear();
+                last_shapes = output.shapes;
+                last_outbox = outbox;
+            }
+            let texts: Vec<&str> = last_shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(t) => Some(t.galley.text().trim()),
+                    _ => None,
+                })
+                .collect();
+            for label in crate::theme::SidebarStyle::ALL.map(|style| style.label()) {
+                assert!(
+                    texts.contains(&label),
+                    "{style:?}: 两态选项「{label}」未渲出,文本形状:{texts:?}"
+                );
+            }
+            assert!(last_outbox.is_empty(), "{style:?}: 无交互帧不产出消息");
         }
     }
 

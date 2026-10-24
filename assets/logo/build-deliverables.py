@@ -44,6 +44,12 @@ WEB_DIR = os.path.join(DIST, "web")
 SIZES = [1024, 512, 256, 192, 128, 96, 64, 48, 36, 32, 24, 16]
 
 # macOS iconset：(输出名, 像素边长)。命名与 @2x 语义由 Apple 规定，勿改。
+# 各档**不经全出血直渲**：按 Apple Big Sur 图标网格（1024 画布、内容
+# 824×824、四周 100px 透明边距）缩放居中 —— macOS 的 Dock/访达按画布
+# 等比摆位，全出血图标会比同排其他应用明显大一圈（2026-10-24 mac 真机
+# 反馈）。其他平台（Windows ICO / Linux hicolor / web favicon）维持
+# 全出血：那些系统按内容本身摆位，不留边。
+MACOS_INNER_SCALE = 824 / 1024
 ICONSET = [
     ("icon_16x16.png", 16),
     ("icon_16x16@2x.png", 32),
@@ -87,6 +93,29 @@ def render(src, out, width, height=None):
         check=True,
         capture_output=True,
     )
+
+
+def render_padded(src, out, width, height=None, inner=1.0):
+    """SVG -> 带透明边距的 PNG：内容先渲成 inner*width/height，再用
+    ImageMagick 居中扩到完整画布（透明底）。macOS iconset 专用
+    （MACOS_INNER_SCALE），渲染路径与全出血档共用 [`render`]。"""
+    height = height or width
+    inner_w = max(1, round(width * inner))
+    inner_h = max(1, round(height * inner))
+    staged = f"{out}.inner{inner_w}.png"
+    render(src, staged, inner_w, inner_h)
+    subprocess.run(
+        [
+            "convert", staged,
+            "-background", "none",
+            "-gravity", "center",
+            "-extent", f"{width}x{height}",
+            out,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    os.remove(staged)
 
 
 def png(size):
@@ -136,12 +165,18 @@ def main():
     )
 
     # --- macOS iconset + icns ---
+    # 内容按 Apple 图标网格留边（MACOS_INNER_SCALE）；icns 直接吃 iconset
+    # 的留边档（ICNS_TYPES 的七个尺寸 ICONSET 全覆盖），保证两条 macOS
+    # 产物同一份像素。
     iconset_dir = os.path.join(MAC_DIR, "AppIcon.iconset")
     os.makedirs(iconset_dir, exist_ok=True)
+    iconset_by_size = {}
     for name, size in ICONSET:
-        render(SRC_ICON, os.path.join(iconset_dir, name), size)
+        path = os.path.join(iconset_dir, name)
+        render_padded(SRC_ICON, path, size, inner=MACOS_INNER_SCALE)
+        iconset_by_size[size] = path
     with open(os.path.join(MAC_DIR, "AppIcon.icns"), "wb") as fh:
-        fh.write(build_icns([(t, png(s)) for t, s in ICNS_TYPES]))
+        fh.write(build_icns([(t, iconset_by_size[s]) for t, s in ICNS_TYPES]))
 
     # --- web favicon ---
     os.makedirs(WEB_DIR, exist_ok=True)

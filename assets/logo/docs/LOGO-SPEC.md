@@ -29,6 +29,7 @@
 | 画布 | 1024 × 1024 |
 | 圆角半径 | 225（占 22.0%） |
 | 渐变方向 | 45°（左上 → 右下），linear 单段 |
+| macOS iconset 内容边长 | 824（= 1024 × `MACOS_INNER_SCALE`，四周 100px 透明边距，见下） |
 
 | 角色 | HEX | 使用位置 |
 |---|---|---|
@@ -39,6 +40,13 @@
 | 单色版（深底） | `#FFFFFF` | `latermd-mark-white.svg` |
 
 单段渐变是刻意的：多段渐变在低端屏会产生色带。
+
+> **macOS 网格留边（2026-10-24）**：源 SVG 是全出血构图，但 macOS 的
+> Dock / 访达按**画布**等比摆位，全出血直渲的 AppIcon 在 Dock 里比同排
+> 其他应用明显大一圈（真机反馈）。故 `build-deliverables.py` 对
+> `AppIcon.iconset` 十档按 Apple Big Sur 图标网格缩放居中：内容
+> 824×824、画布 1024×1024。其他平台（Windows ICO / Linux hicolor /
+> web favicon / 窗口图标）维持全出血 —— 那些系统按内容本身摆位。
 
 ---
 

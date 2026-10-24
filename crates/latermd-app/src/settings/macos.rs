@@ -425,6 +425,26 @@ pub(super) fn appearance(
                 outbox.push(Message::ZenNavModeChanged(modes[i]));
             }
         });
+        rule(ui);
+        // 左栏外壳样式(mac 专项,2026-10-24 坤哥指令「左侧文件导航跟别的
+        // 平台不一致,弄一个配置项」):工作台 = 顶部工作区下拉 + 文字页签
+        // (mac 出厂默认,升级零变化);图标栏 = Windows/Linux 同款左缘
+        // rail。切完即生效,下一帧 `ui::layout::draw` 按新值换外壳。
+        row(ui, "侧栏外壳", |ui| {
+            let styles = crate::theme::SidebarStyle::ALL;
+            let labels: Vec<_> = styles.iter().map(|style| style.label()).collect();
+            if let Some(i) = segments(
+                ui,
+                &labels,
+                styles
+                    .iter()
+                    .position(|s| *s == theme.sidebar_style)
+                    .unwrap_or(0),
+            ) {
+                outbox.push(Message::SidebarStyleChanged(styles[i]));
+            }
+        });
+        ui.small("工作台=顶部工作区下拉+文字页签;图标栏=左缘图标轨道(其他平台同款)。");
     });
     section(ui, "分享皮肤", |ui| {
         row(ui, "导出皮肤", |ui| {
