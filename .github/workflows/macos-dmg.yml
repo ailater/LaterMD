@@ -54,25 +54,36 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: 下载两个架构的 tar.xz
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # dmg 二进制改自建(2026-10-24,#163):dist 的 tar.xz 是纯 wgpu 默认
+      # features 产物,而 mac dmg 要带 glow 逃生口(LATERMD_RENDERER=glow,
+      # 绕开问题 GPU 驱动的唯一手段——AGENTS.md §5 修订)。给 dist 全局开
+      # glow 会连 Windows/Linux 产物一起变,故 mac 专属的自建通道最贴身。
+      - name: Rust 工具链(钉 1.98.0,AGENTS.md §4;含交叉 x86_64)
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust 构建缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: macos-dmg-glow
+
+      - name: 构建双架构二进制(带 glow 逃生口)
         run: |
-          gh release download "${{ steps.ver.outputs.tag }}" \
-            --repo "${{ github.repository }}" \
-            --pattern 'latermd-*-apple-darwin.tar.xz'
-          ls -l
+          set -euo pipefail
+          cargo build --release --locked -p latermd-app --bin latermd \
+            --features glow \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
 
       - name: lipo 合一
         run: |
           set -euo pipefail
-          tar -xf latermd-x86_64-apple-darwin.tar.xz
-          tar -xf latermd-aarch64-apple-darwin.tar.xz
           lipo -create \
             -output latermd-universal \
-            latermd-x86_64-apple-darwin/latermd \
-            latermd-aarch64-apple-darwin/latermd
-          # 两个架构都在,缺一个说明 dist 矩阵漏了目标
+            target/x86_64-apple-darwin/release/latermd \
+            target/aarch64-apple-darwin/release/latermd
+          # 两个架构都在,缺一个说明构建矩阵漏了目标
           lipo -archs latermd-universal | tee /dev/stderr | grep -q x86_64
           lipo -archs latermd-universal | tee /dev/stderr | grep -q arm64
 
@@ -115,9 +126,11 @@ jobs:
             --repo "${{ github.repository }}"
 
       # 清理发布冗余资产:macOS 分发只走 universal2 dmg(AGENTS.md §5),
-      # 每架构 tar.xz 只是本 job 的 dmg 原料;dist 的 source.tar.gz 与 GitHub
-      # 自动生成的 source 归档重复。dist 无产物白名单配置,只能发布后清理。
-      # 放在本 job 尾部(原料已用完、dmg 已回传)才不会与下载步竞态;
+      # 每架构 tar.xz 对 mac 用户是冗余(dmg 二进制已改本 job 自建带 glow,
+      # tar.xz 不再是 dmg 原料,但也没有独立分发渠道);dist 的 source.tar.gz
+      # 与 GitHub 自动生成的 source 归档重复。dist 无产物白名单配置,只能
+      # 发布后清理。
+      # 放在本 job 尾部(dmg 已回传)才不会与其它消费步竞态;
       # 每个资产容忍缺失(只 echo 不标红),命名漂移靠 docs/distribution.md 表 2 核对。
       # 已知代价:sha256.sum 是 dist 生成的全量清单,仍含已删条目,接受。
       - name: 清理冗余资产
