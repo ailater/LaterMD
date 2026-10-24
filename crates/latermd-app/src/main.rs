@@ -18,6 +18,7 @@ mod assets;
 mod backlink_panel;
 mod bed;
 mod cli;
+mod cli_install;
 mod clipboard;
 mod command;
 mod compose;
