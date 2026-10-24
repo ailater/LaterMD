@@ -2090,6 +2090,7 @@ pub fn ui(
                                     &owned,
                                     live,
                                     index,
+                                    editor_id,
                                     table_rect,
                                     cursor_y - gap_above,
                                 )
@@ -2872,6 +2873,7 @@ pub fn ui(
                                 block_text,
                                 live,
                                 index,
+                                editor_id,
                                 table_rect,
                                 cursor_y - gap_above,
                             )
@@ -3586,10 +3588,11 @@ fn draw_table_toolbar(
     block_text: &str,
     live: &LiveState,
     index: usize,
+    editor_id: egui::Id,
     block_rect: egui::Rect,
     min_top: f32,
 ) -> TableAction {
-    let _ = (live, index);
+    let _ = live;
     let size = egui::vec2(
         crate::ui::tokens::ICON_SM + 2.0 * crate::ui::tokens::SPACE_XS,
         18.0,
@@ -3654,10 +3657,18 @@ fn draw_table_toolbar(
     ];
     let mut action = TableAction::None;
     let mut cursor_x = bar_rect.left();
-    for (icon, tip, effect) in actions {
+    for (icon_idx, (icon, tip, effect)) in actions.into_iter().enumerate() {
         let rect = egui::Rect::from_min_size(egui::pos2(cursor_x, bar_rect.top()), size);
         cursor_x += size.x + gap;
-        let response = ui.allocate_rect(rect, egui::Sense::click());
+        // 悬浮 UI 必须用 `interact` 注册命中:`allocate_rect` 会把 top-down
+        // 光标**无条件**推到 rect 底部(egui `advance_after_rects` 不看方向),
+        // 矩形悬在表格上方时等于把光标拉回表顶 —— 表格之后的所有块从此
+        // 叠画进表格区域(2026-10-24 真机乱码,悬停才触发的根因)。
+        let response = ui.interact(
+            rect,
+            editor_id.with(("live-table-toolbar", index, icon_idx)),
+            egui::Sense::click(),
+        );
         let (fill, color) = if response.hovered() {
             (
                 Some(ui.visuals().widgets.hovered.bg_fill),
@@ -6331,6 +6342,70 @@ mod tests {
             );
         }
         assert_eq!(cursor.byte, Some("标题".len()), "落在上一块可见末尾");
+    }
+
+    /// 工具条悬停帧不得把布局光标拉回 —— 悬停后表格**之后**的块必须仍在
+    /// 表格下方,而不是叠画进表格区域(2026-10-24 真机乱码:悬浮图标曾用
+    /// `allocate_rect` 注册,egui 的 `advance_after_rects` 会把 top-down 光标
+    /// 无条件推到 rect 底部,矩形在表格上方 = 光标被拉回表顶,后续整段
+    /// 文档从此叠进表格)。
+    #[test]
+    fn live_table_toolbar_hover_keeps_following_blocks_below_table() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new(
+            "标题\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\n尾部段落\n",
+        );
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let (_, table_rect) = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains('a'))
+            .expect("表格已渲染");
+        let tail_top = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("尾部段落"))
+            .expect("表格后的段落已渲染")
+            .1
+            .top();
+        assert!(
+            tail_top >= table_rect.bottom(),
+            "静帧:尾段应在表格下方 {tail_top} < {}",
+            table_rect.bottom()
+        );
+
+        let frame = live_frame(
+            &ctx,
+            vec![egui::Event::PointerMoved(table_rect.center())],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(!frame.toolbar_rects.is_empty(), "悬停应显示工具条");
+        let tail_top_hover = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("尾部段落"))
+            .expect("悬停帧尾段仍应渲染")
+            .1
+            .top();
+        assert!(
+            tail_top_hover >= table_rect.bottom() - 1.0,
+            "悬停帧:尾段被拉进表格区域 {tail_top_hover} < 表底 {}",
+            table_rect.bottom()
+        );
     }
 
     /// 表格工具条仅在悬停时出现；静帧不占布局，悬停后四枚按钮贴近表格。
