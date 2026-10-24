@@ -72,6 +72,9 @@ impl LaterMdApp {
         outbox.extend(state.poll_about());
         // 剪贴板图片读取收流:同上(D 段,arboard 的阻塞 IO 在后台线程)
         outbox.extend(state.poll_clipboard());
+        // 命令行工具安装收流(2026-10-23 mac 反馈 #3):同上,osascript
+        // 授权弹窗在后台线程,结果只落提示行
+        outbox.extend(state.poll_cli_install());
         // 文件拖入由 egui-winit 汇进 raw input,`RawInput::take` 每帧清空,
         // 这里取走即消费。Markdown 文件走与文件树相同的 `FileSelected`
         // 打开流程；图片文件走资源导入流程；其它文件忽略。读文件与落盘

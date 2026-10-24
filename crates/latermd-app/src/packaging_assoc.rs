@@ -234,6 +234,66 @@ fn windows_inno_setup_registers_both_extensions_under_hkcu() {
     );
 }
 
+/// 守 Windows 安装器的 PATH 注册(2026-10-24 反馈 #3):终端里
+/// `latermd 文档.md` 直开,靠的是安装目录进了用户 PATH。整段被删/写法
+/// 漂移(RegWriteExPandedValue 误换成 RegWriteStringValue、ChangesEnvironment
+/// 丢失)在本机(Linux,无 iscc)完全测不出来 —— 与文件关联守门同理由。
+#[test]
+fn windows_inno_setup_adds_to_path_via_code_section() {
+    let iss = read_packaging("packaging/windows/latermd.iss");
+
+    // 广播指令:没有它,装完要注销/重启资源管理器新终端才认新 PATH
+    assert!(
+        iss.contains("ChangesEnvironment=yes"),
+        ".iss 缺 ChangesEnvironment=yes:PATH 写进去了也不广播,\
+         新开的终端照样找不到 latermd 命令"
+    );
+
+    // 任务项存在且默认勾选:不写 Flags 即默认勾选(与 mdassoc 同判据,
+    // 「有 checked」那种子串判断恒真,见上方踩坑注释)
+    assert!(
+        iss.contains("Name: \"addpath\""),
+        ".iss 缺 addpath 任务项(用户应能在向导里拒绝 PATH 注册)"
+    );
+    let task_line = iss
+        .lines()
+        .find(|line| line.starts_with("Name: \"addpath\""))
+        .expect("已断言存在");
+    assert!(
+        !inno_flags_of_line(task_line)
+            .iter()
+            .any(|flag| flag == "unchecked"),
+        "PATH 注册应默认勾选:{task_line}"
+    );
+
+    // PATH 只能「读-改-写」:[Registry] 段整值覆盖会把用户已有 PATH 条目
+    // 焊死丢失,所以写入必须在 [Code] 段完成
+    assert!(
+        iss.contains("RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path'"),
+        "PATH 应在 [Code] 段读-改-写,不能用 [Registry] 整值覆盖"
+    );
+    // 写回必须保 REG_EXPAND_SZ 类型:RegWriteStringValue 会把类型降成
+    // REG_SZ,用户 Path 里的 %USERPROFILE% 之类变量从此不再展开
+    assert!(
+        iss.contains("RegWriteExPandedValue"),
+        "PATH 写回应使用 RegWriteExPandedValue(保 REG_EXPAND_SZ 类型)"
+    );
+    // 装时按任务勾选决定写入,卸载时清理本应用条目
+    assert!(
+        iss.contains("WizardIsTaskSelected('addpath')"),
+        "装时应按 addpath 任务勾选决定是否写入"
+    );
+    assert!(
+        iss.contains("CurUninstallStepChanged"),
+        "卸载时应把本应用条目从 PATH 移除"
+    );
+    // 只碰 HKCU:配合按用户安装不需要 UAC,也不动其它用户的 PATH
+    assert!(
+        !iss.contains("HKEY_LOCAL_MACHINE"),
+        "PATH 注册不该碰 HKLM:会要管理员权限,与按用户装冲突"
+    );
+}
+
 /// 守 `.iss` 里 `[Tasks]` 段的 Flags 只用文档白名单里的值。
 ///
 /// 为什么单独立一条:v0.0.7(2026-10-18)把 Windows 安装器整包发没了 ——

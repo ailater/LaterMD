@@ -24,6 +24,7 @@ use crate::ai::AiState;
 use crate::ai_config::AiConfig;
 use crate::ai_key::AiKeyState;
 use crate::bed::{BedState, BedUploadPurpose};
+use crate::cli_install::CliInstallState;
 use crate::clipboard::ClipboardState;
 use crate::command::Command;
 use crate::export;
@@ -460,6 +461,9 @@ pub struct State {
     /// 剪贴板图片读取(docs/image-plan.md D 段):后台线程 + channel 的
     /// 接收端,生命周期与 `BedState` 同构(发起/收流/收尾三原语)。
     pub clipboard: ClipboardState,
+    /// 命令行工具安装(2026-10-23 mac 反馈 #3):后台线程 + channel 的
+    /// 接收端,与 `clipboard` 同构;发起入口只在 macOS 原生菜单。
+    pub cli_install: CliInstallState,
     /// 快捷键蒙层(#54 M1):长按平台主修饰键 3s 的检测状态机。会话级
     /// 状态,不持久化——挂在 State 上随帧推进,切窗口/切标签不重建,
     /// 失焦帧由取消判定收口(不存在「失忆后拿残影计时」的面)。
@@ -602,6 +606,7 @@ impl Default for State {
             image_dialog: ImageDialogState::default(),
             emoji: EmojiPanelState::default(),
             clipboard: ClipboardState::default(),
+            cli_install: CliInstallState::default(),
             shortcut_overlay: ShortcutOverlayState::default(),
             zen_nav: ZenNavState::default(),
             ai_commit_suggestion: None,
@@ -774,6 +779,21 @@ pub enum Message {
         /// 成功 = PNG 字节(解码与重编码已在后台线程完成);失败 = 面向
         /// 用户的错误文案。
         result: Result<Vec<u8>, String>,
+    },
+    /// 请求安装命令行工具(2026-10-23 mac 反馈 #3;macOS 原生菜单
+    /// 「安装命令行工具…」产出,其余平台无入口):归约校验运行环境
+    /// (仅 .app 打包运行才装)后发起后台安装线程,osascript 的管理员
+    /// 授权弹窗在后台线程,不卡 UI。收尾见
+    /// [`Message::CliInstallFinished`]。
+    // 唯一的生产构造方在 mac_menu(macOS cfg);Linux 上由归约测试构造。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    InstallCliRequested,
+    /// 命令行安装收尾(后台线程经 channel 回传):结果只落提示行,
+    /// 文档与一切编辑状态不动(与图床上传失败同口径);重试 = 再点
+    /// 一次菜单(`ln -sf` 覆盖式,幂等)。
+    CliInstallFinished {
+        /// 成功 = 软链已建好;失败 = 面向用户的错误文案。
+        result: Result<(), String>,
     },
     /// 拖入图片文件(docs/image-plan.md D 段):归约里读文件、过白名单与
     /// 5MB 上限、落 `.assets/` 并在光标处插引用。文件读取是本地磁盘
@@ -1314,6 +1334,8 @@ impl State {
             Message::ImageUploadFinished { seq, result } => self.finish_image_upload(seq, result),
             Message::ImagePasteRequested => self.request_image_paste(),
             Message::ImagePasteFinished { result } => self.finish_image_paste(result),
+            Message::InstallCliRequested => self.request_cli_install(),
+            Message::CliInstallFinished { result } => self.finish_cli_install(result),
             Message::ImageFileDropped(path) => self.drop_image_file(&path),
             Message::EmojiPickerToggle(open) => self.toggle_emoji_panel(open),
             Message::EmojiInserted(emoji) => self.insert_emoji(&emoji),
@@ -2158,6 +2180,11 @@ impl State {
         self.clipboard.poll()
     }
 
+    /// 命令行工具安装的收流(与 [`Self::poll_clipboard`] 同分工)。
+    pub fn poll_cli_install(&mut self) -> Vec<Message> {
+        self.cli_install.poll()
+    }
+
     /// 当前应渲染的明暗:`System` 已在 [`ThemeMode::resolve`] 里落到确定值,
     /// 绘制前一律用它,不直接读 `theme.mode`。
     pub fn resolved_theme(&self) -> ThemeMode {
@@ -2977,6 +3004,37 @@ impl State {
     fn request_image_paste(&mut self) {
         // 系统剪贴板读取和 PNG 编码可能阻塞；完成后主动唤醒一帧收口。
         self.clipboard.start_with_repaint(self.repaint.clone());
+    }
+
+    /// 发起命令行工具安装(`Message::InstallCliRequested` 的归约,
+    /// 2026-10-23 mac 反馈 #3):仅 .app 打包运行才装 —— 开发裸跑装出去
+    /// 的软链指向 target/debug 的临时二进制,重编译即失效。osascript 的
+    /// 管理员授权弹窗与等待都在后台线程,归约立即返回;防重入不拦
+    /// (换接收端,与剪贴板读取同手法)。
+    fn request_cli_install(&mut self) {
+        let bundled = std::env::current_exe()
+            .ok()
+            .filter(|exe| crate::cli_install::is_bundled_macos_app(exe));
+        let Some(exe) = bundled else {
+            self.tabs.current_mut().document.notice =
+                Some("命令行工具仅在 .app 安装运行时提供(开发运行不安装)".to_owned());
+            return;
+        };
+        self.cli_install
+            .start_with_repaint(self.repaint.clone(), exe);
+    }
+
+    /// 命令行安装收尾(`Message::CliInstallFinished` 的归约):结果只落
+    /// 提示行,失败不动任何状态(重试 = 再点一次菜单,`ln -sf` 幂等)。
+    fn finish_cli_install(&mut self, result: Result<(), String>) {
+        self.cli_install.finish();
+        let notice = match result {
+            Ok(()) => "已安装 latermd 命令到 /usr/local/bin —— 新开终端即可 \
+                       latermd 文档.md 打开文档"
+                .to_owned(),
+            Err(error) => format!("命令行工具安装失败:{error}"),
+        };
+        self.tabs.current_mut().document.notice = Some(notice);
     }
 
     /// 剪贴板读取收尾(`Message::ImagePasteFinished` 的归约):PNG 字节过
@@ -11542,6 +11600,56 @@ mod tests {
             Some("剪贴板里没有可用的图片")
         );
         assert!(!state.clipboard.is_reading());
+    }
+
+    /// 命令行安装请求(非 .app 运行,测试进程必是裸二进制):只落提示,
+    /// 不起安装线程。两平台 CI 的测试进程都不满足 bundle 判定,断言
+    /// 因此确定可复现。
+    #[test]
+    fn install_cli_request_outside_bundle_only_notices() {
+        let mut state = State::default();
+        state.apply(Message::InstallCliRequested);
+        assert!(!state.cli_install.is_installing(), "裸二进制不发起安装线程");
+        let notice = state
+            .tabs
+            .current()
+            .document
+            .notice
+            .as_deref()
+            .unwrap_or("");
+        assert!(notice.contains(".app"), "提示指向 .app 安装运行:{notice}");
+    }
+
+    /// 命令行安装收尾:成功/失败都只落提示行,接收端清空、编辑状态
+    /// 一字不动(与图床上传失败同口径)。
+    #[test]
+    fn install_cli_finish_only_notices_both_ways() {
+        let mut state = State::default();
+        state.tabs.current_mut().editor.replace_all("原样");
+        state.cli_install.rx = Some(std::sync::mpsc::channel::<Result<(), String>>().1);
+
+        state.apply(Message::CliInstallFinished { result: Ok(()) });
+        assert!(!state.cli_install.is_installing(), "收尾清接收端");
+        let notice = state
+            .tabs
+            .current()
+            .document
+            .notice
+            .as_deref()
+            .unwrap_or("");
+        assert!(
+            notice.contains("/usr/local/bin") && notice.contains("latermd"),
+            "成功提示指路:{notice}"
+        );
+
+        state.apply(Message::CliInstallFinished {
+            result: Err("已取消授权,未安装".to_owned()),
+        });
+        assert_eq!(
+            state.tabs.current().document.notice.as_deref(),
+            Some("命令行工具安装失败:已取消授权,未安装")
+        );
+        assert_eq!(state.tabs.current().editor.text(), "原样", "文档不动");
     }
 
     /// 超过 5MB 的剪贴板图片:拒绝并提示,不落盘(字节入口的上限判定)。

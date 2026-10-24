@@ -35,6 +35,9 @@ enum Action {
     Settings(SettingsTab),
     About,
     Edit(EditAction),
+    /// 安装命令行工具(2026-10-23 mac 反馈 #3):软链 latermd 到
+    /// /usr/local/bin,管理员授权在后台线程的 osascript 里弹。无快捷键。
+    InstallCli,
 }
 
 struct TargetIvars {
@@ -125,6 +128,7 @@ impl NativeMenu {
             "设置…",
             Action::Settings(SettingsTab::Appearance),
         );
+        this.add(mtm, &application, "安装命令行工具…", Action::InstallCli);
         application.addItem(&NSMenuItem::separatorItem(mtm));
         let services = submenu(mtm, &application, "服务");
         // SAFETY: AppKit retains the menu; all calls are on the main thread.
@@ -297,6 +301,7 @@ fn dispatch(action: Action, ctx: &egui::Context, outbox: &mut Vec<Message>) {
         Action::Command(cmd) => outbox.push(cmd.message()),
         Action::Settings(tab) => outbox.push(Message::SettingsOpened(tab)),
         Action::About => outbox.push(Message::AboutOpened),
+        Action::InstallCli => outbox.push(Message::InstallCliRequested),
         Action::Edit(edit) => {
             let event = match edit {
                 EditAction::Copy => egui::Event::Copy,
