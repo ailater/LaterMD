@@ -400,7 +400,15 @@ impl LaterMdApp {
         // 左缘的汉堡按钮(`ui::titlebar` → `menubar::hamburger_button_at`,
         // Zed 同款形态,坤哥指定)。编辑区上沿净高 +26px;mac 原生装饰
         // 路径(workbench-header)本就没有 in-app 菜单行,不受影响。
-        let workbench = cfg!(target_os = "macos") && !self.frameless;
+        // mac 原生 chrome 路径下左栏外壳可配置(mac 专项,2026-10-24 坤哥
+        // 指令「左侧文件导航跟别的平台不一致,弄一个配置项」):工作台 =
+        // 顶部工作区下拉 + 文字页签(#166 既有形态,mac 出厂默认);图标栏
+        // = Windows/Linux 同款左缘 rail。设置在
+        // `theme.sidebar_style`(Settings 外观页),头部条不受它影响 ——
+        // 红绿灯偏移是窗口事,不是侧栏事。非 mac 平台恒为图标栏路径。
+        let workbench = cfg!(target_os = "macos")
+            && !self.frameless
+            && self.state.theme.sidebar_style == crate::theme::SidebarStyle::Workbench;
 
         // ② 底部状态栏:散落在工具栏/侧边栏边缘的只读信息收成一行
         // (docs/ui-polish.md §4),工具栏得以只留动作。
@@ -6945,6 +6953,98 @@ mod tests {
             assert!(
                 !app.state.layout.zen,
                 "原生装饰下浮层仍是退出出口,点击应真退出禅定"
+            );
+        }
+    }
+
+    /// 左栏外壳样式切换(mac 专项,2026-10-24 坤哥指令):**同一点击坐标**
+    /// 在两套外壳下命中不同的东西 —— 工作台(出厂默认)该点落在顶部的
+    /// 工作区下拉上,不产生视图切换;`SidebarStyleChanged(Rail)` 归约后的
+    /// 下一帧,同一坐标落在 rail 首枚(大纲)上,产生 `SidebarTabChanged`。
+    /// 钉住「设置真的换了外壳」,而不是只在 settings.json 里存了个值。
+    ///
+    /// 仅 macOS:其他平台恒为图标栏路径,`SidebarStyle` 不改变行为,无此
+    /// 分叉可言(与设置行的渲染开关同口径)。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sidebar_style_switch_swaps_the_left_shell() {
+        // rail 首枚(大纲)的中心:图标栏模式下 nav 面板左 margin 为 0,
+        // rail 贴窗左缘,首枚自 SPACE_XS 起、RAIL_ITEM 见方;面板顶 =
+        // workbench 头部条底。工作台模式下同一坐标在顶部工作区下拉内。
+        let hit = egui::pos2(
+            tokens::SPACE_XS + tokens::RAIL_ITEM / 2.0,
+            crate::ui::workbench::HEADER_H + tokens::RAIL_ITEM / 2.0,
+        );
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let click = |pressed| Event::PointerButton {
+            pos: hit,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        // 绘制帧必须连续(hit_test 读上一 pass 的注册表,禅定测试同口径)
+        let click_frames = |app: &mut LaterMdApp, ctx: &egui::Context| {
+            for events in [
+                Vec::new(),
+                vec![Event::PointerMoved(hit)],
+                vec![click(true)],
+                vec![click(false)],
+                Vec::new(),
+            ] {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| app.draw(ui),
+                )
+                .drop_without_applying_deltas();
+            }
+        };
+
+        // 工作台(默认):该点在工作区下拉里,点击不切视图。
+        {
+            let ctx = egui::Context::default();
+            let mut app = LaterMdApp {
+                frameless: false,
+                ..Default::default()
+            };
+            app.state.layout.left = true;
+            click_frames(&mut app, &ctx);
+            assert!(
+                !app.outbox
+                    .iter()
+                    .any(|m| matches!(m, Message::SidebarTabChanged(_))),
+                "工作台外壳:该坐标是工作区下拉,不得切视图,{:?}",
+                app.outbox
+            );
+        }
+
+        // 切图标栏后:同一点击命中 rail 首枚,大纲被选中。
+        {
+            let ctx = egui::Context::default();
+            let mut app = LaterMdApp {
+                frameless: false,
+                ..Default::default()
+            };
+            app.state.layout.left = true;
+            app.state.apply(Message::SidebarStyleChanged(
+                crate::theme::SidebarStyle::Rail,
+            ));
+            click_frames(&mut app, &ctx);
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.reduce(ui.ctx()),
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(
+                app.state.layout.left_view,
+                state::SidebarTab::Outline,
+                "图标栏外壳:该坐标是 rail 首枚(大纲),点击应切到大纲"
             );
         }
     }

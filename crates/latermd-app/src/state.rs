@@ -1264,6 +1264,10 @@ pub enum Message {
     /// 归约同时复位会话级悬停态:新模式从干净状态起算(常显不继承旧会话
     /// 的去抖残值,关闭后再开悬停不带着残置可见位)。
     ZenNavModeChanged(crate::theme::ZenNavMode),
+    /// 左栏外壳样式切换(mac 专项):外观页二态选择产出,落
+    /// `theme.sidebar_style` 并即时写 settings.json(zen_nav 同款通路)。
+    /// 仅 macOS 改变行为;下一帧 `ui::layout::draw` 按新值换外壳。
+    SidebarStyleChanged(crate::theme::SidebarStyle),
     /// 设置页改「默认视图模式」(写作/源码/对照/上次选择):落
     /// `theme.default_view_mode` 并即时写 settings.json。只影响下次启动
     /// (`State::restore_layout` 消费),当前会话的视图不动 —— 改偏好不
@@ -1571,6 +1575,12 @@ impl State {
             Message::ZenNavModeChanged(mode) => {
                 self.theme.zen_nav = mode;
                 self.zen_nav = ZenNavState::default();
+                self.persist_theme();
+            }
+            Message::SidebarStyleChanged(style) => {
+                // 纯显示偏好:只动 theme 字段并落盘(与 zen_nav 同款),
+                // 不碰布局态 —— 侧栏宽度/可见性两套外壳共用同一份存档。
+                self.theme.sidebar_style = style;
                 self.persist_theme();
             }
             Message::DefaultViewModeChanged(mode) => {
@@ -10771,6 +10781,55 @@ mod tests {
                 .iter()
                 .all(|entry| entry.file_name() == "settings.json"),
             "切换不写任何文档文件,目录里只有 settings.json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 左栏外壳样式切换(mac 专项):偏好落 settings.json 且重新 load 后
+    /// 保持;不触碰任何文档状态(与标题宽度切换同款口径)。归约侧只动
+    /// `theme.sidebar_style`,布局态(侧栏宽度/可见性)两套外壳共用同一份
+    /// 存档,切换不该动它们。
+    #[test]
+    fn sidebar_style_switch_persists_without_touching_layout() {
+        let dir = temp_path("sidebar-style-state");
+        let mut state = State {
+            settings_dir: Some(dir.clone()),
+            ..State::default()
+        };
+        let (left_before, width_before) = (state.layout.left, state.layout.left_width);
+
+        state.apply(Message::SidebarStyleChanged(
+            crate::theme::SidebarStyle::Rail,
+        ));
+        assert_eq!(state.theme.sidebar_style, crate::theme::SidebarStyle::Rail);
+        state.apply(Message::SidebarStyleChanged(
+            crate::theme::SidebarStyle::Workbench,
+        ));
+        assert_eq!(
+            state.theme.sidebar_style,
+            crate::theme::SidebarStyle::Workbench
+        );
+        assert_eq!(
+            (state.layout.left, state.layout.left_width),
+            (left_before, width_before),
+            "切外壳不动侧栏可见性与宽度"
+        );
+
+        // 持久化:settings.json 落了最后一次切换的值,重新 load 拿回
+        state.apply(Message::SidebarStyleChanged(
+            crate::theme::SidebarStyle::Rail,
+        ));
+        let json = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(
+            json.contains(r#""sidebar_style": "rail""#),
+            "settings.json 落了图标栏:{json}"
+        );
+        assert_eq!(
+            crate::theme::ThemeSettings::load_from(&dir)
+                .unwrap()
+                .sidebar_style,
+            crate::theme::SidebarStyle::Rail,
+            "重启后保持用户选择"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
