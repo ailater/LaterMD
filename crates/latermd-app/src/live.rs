@@ -3749,34 +3749,52 @@ fn draw_active_code_block(
     // 落到字体自然行高;TextEdit 侧显式钉同一值,两侧逐像素同高。
     let row_height = ui.fonts_mut(|f| f.row_height(&code_font));
 
-    // 可见正文:剥掉与闭合行相邻的一个换行(\r\n 或 \n)。浏览态 galley
-    // 由 lines() 切行,同样看不见它;留在编辑视图会在进入编辑瞬间把块
-    // 撑高一行。
+    // 可见正文:尾部换行全部剥掉,与浏览态 galley 对齐 —— pad_code_body
+    // 走 lines() 切行,闭合行前的空行在浏览态**全部隐藏**;编辑态只剥一
+    // 个的话,正文里预存的空行会在进入编辑瞬间把框撑高一行(2026-10-24
+    // 真机反馈「点进去底部多一行」,实测 +1 行/空行)。剥掉后光标若落在
+    // 尾随空行区(刚按过 Enter、光标停在空行上),可见范围跟到光标为止:
+    // 那些行对光标可见可编辑,光标离开即重新隐藏 —— 与活动文本块的
+    // visible_chars = max(内容, 光标) 同一语义。
     let full_body = &block_text[parts.body.clone()];
-    let visible_body_bytes = match full_body.as_bytes() {
-        [.., b'\r', b'\n'] => full_body.len() - 2,
-        [.., b'\n'] => full_body.len() - 1,
-        _ => full_body.len(),
-    };
     let body_start_byte = block_start_byte + parts.body.start;
     let body_start_char = editor.byte_to_char(body_start_byte);
-    let visible_body = &full_body[..visible_body_bytes];
-    let body_len_chars = visible_body.chars().count();
+    let edit_id = editor_id.with(("live-code-edit", index));
+    let content_bytes = full_body.trim_end_matches(['\r', '\n']).len();
+    let content_chars = full_body[..content_bytes].chars().count();
+    let full_chars = full_body.chars().count();
 
-    // pending_caret 落地:块内字符偏移钳进可见正文(点击头部/框内距/
+    // pending_caret 落地:块内字符偏移钳进正文全区间(点击头部/框内距/
     // 兜底块尾都在钳位里归一),焦点与光标一并写入。
     let mut land = None;
     if let Some((block, char_idx)) = live.pending_caret.take() {
         if block == index {
             let body_start_local = block_text[..parts.body.start].chars().count();
-            let local = char_idx.clamp(body_start_local, body_start_local + body_len_chars)
-                - body_start_local;
+            let local =
+                char_idx.clamp(body_start_local, body_start_local + full_chars) - body_start_local;
             land = Some(local);
             live.caret_follow = false;
         } else {
             live.pending_caret = Some((block, char_idx));
         }
     }
+    // 光标位置提示(正文内字符):本帧落点优先,否则读 TextEdit 持久
+    // 状态里上一帧的光标(同一 edit_id,激活期间帧间连续)。
+    let caret_hint = land.or_else(|| {
+        egui::widgets::text_edit::TextEditState::load(ui.ctx(), edit_id)
+            .and_then(|state| state.cursor.char_range())
+            .map(|range| range.primary.index.0)
+    });
+    let visible_chars = caret_hint
+        .unwrap_or(content_chars)
+        .max(content_chars)
+        .min(full_chars);
+    let visible_body_bytes = full_body
+        .char_indices()
+        .nth(visible_chars)
+        .map_or(full_body.len(), |(byte, _)| byte);
+    let visible_body = &full_body[..visible_body_bytes];
+    let body_len_chars = visible_body.chars().count();
 
     // 编辑态高亮排版:作业按(内容, 字号, 明暗, 主题, ppp)指纹缓存,
     // 稳态帧复用 Arc<LayoutJob>(克隆 job 远比 syntect 重跑便宜)。
@@ -3841,7 +3859,6 @@ fn draw_active_code_block(
     });
 
     let mut focus = None;
-    let edit_id = editor_id.with(("live-code-edit", index));
     {
         // 正文渲染闭包:块文本的借用在这里让位给 BlockBuffer 的 &mut。
         let mut body = |ui: &mut egui::Ui| -> egui::Vec2 {
@@ -6342,6 +6359,131 @@ mod tests {
             );
         }
         assert_eq!(cursor.byte, Some("标题".len()), "落在上一块可见末尾");
+    }
+
+    /// 代码块进入编辑帧几何零变化:闭合行前预存的空行在浏览态被隐藏
+    /// (pad_code_body 走 lines()),编辑态同样剥掉 —— 否则点进去底部
+    /// 凭空多一行(2026-10-24 真机反馈;实测每个空行 +1 行高)。
+    /// 尾随空行只对落在其上的光标可见:正文尾按 Enter,新行显示且帧间
+    /// 不塌;失活再激活后重新隐藏,回到与浏览态同高。
+    #[test]
+    fn active_code_block_hides_trailing_blank_lines_until_caret_needs_them() {
+        // (空行数, 激活落点 = 正文末的块内字符偏移)
+        for (blanks, doc) in [
+            (1, "标题\n\n```rust\nlet a = 1;\n\n```\n\n正文\n"),
+            (2, "标题\n\n```rust\nlet a = 1;\n\n\n```\n\n正文\n"),
+        ] {
+            let ctx = egui::Context::default();
+            let mut editor = EditorBuffer::new(doc);
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState::default();
+            let _ = live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            let editor_id = egui::Id::new("live-copy-test");
+            let browse = egui_markdown::code_block_geometry(
+                &ctx,
+                editor_id.with(("live-render", 1)).with(("code_block", 0)),
+            )
+            .expect("浏览态几何");
+
+            // 激活(落正文末):框高与浏览态同高 —— 尾部空行不撑框
+            live.active = Some(1);
+            live.sync(&editor, None);
+            live.pending_caret = Some((1, 8 + 10));
+            let _ = live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            let edit = egui_markdown::code_block_geometry(&ctx, editor_id.with(("live-code", 1)))
+                .expect("编辑态几何");
+            assert!(
+                (edit.frame.height() - browse.frame.height()).abs() < 1.5,
+                "{blanks} 空行:进编辑框高漂移(空行漏藏?):浏览 {:.1} vs 编辑 {:.1}",
+                browse.frame.height(),
+                edit.frame.height()
+            );
+
+            // 正文尾按 Enter:新空行对光标可见 —— 框高出一行,且下一帧不塌
+            let chars_before_enter = editor.text().chars().count();
+            let enter = egui::Event::Key {
+                key: egui::Key::Enter,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+                physical_key: None,
+            };
+            let _ = live_frame(
+                &ctx,
+                vec![enter],
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            let _ = live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            let edit = egui_markdown::code_block_geometry(&ctx, editor_id.with(("live-code", 1)))
+                .expect("Enter 后几何");
+            assert!(
+                edit.frame.height() >= browse.frame.height() + 11.0,
+                "{blanks} 空行:Enter 新行应可见(框高一行):浏览 {:.1} vs 编辑 {:.1}",
+                browse.frame.height(),
+                edit.frame.height()
+            );
+            assert_eq!(
+                editor.text().chars().count(),
+                chars_before_enter + 1,
+                "{blanks} 空行:Enter 应往共享缓冲插一个换行:{:?}",
+                editor.text()
+            );
+
+            // 失活 → 重新激活(落正文末):空行重新隐藏,回到与浏览态同高
+            live.active = None;
+            live.sync(&editor, None);
+            let _ = live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            live.active = Some(1);
+            live.pending_caret = Some((1, 8 + 10));
+            let _ = live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            let edit = egui_markdown::code_block_geometry(&ctx, editor_id.with(("live-code", 1)))
+                .expect("重激活几何");
+            assert!(
+                (edit.frame.height() - browse.frame.height()).abs() < 1.5,
+                "{blanks} 空行:重激活框高应回到浏览态同高:浏览 {:.1} vs 编辑 {:.1}",
+                browse.frame.height(),
+                edit.frame.height()
+            );
+        }
     }
 
     /// 工具条悬停帧不得把布局光标拉回 —— 悬停后表格**之后**的块必须仍在
