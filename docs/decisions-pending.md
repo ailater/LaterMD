@@ -3,7 +3,7 @@
 > 自动开发循环遇到「本该问用户」的岔路口时，在这里登记：**岔路是什么、自动选了什么、为什么、想改怎么改**。
 > 选择由循环自行做出并继续执行，不阻塞；用户事后翻此文件，按「如何改」一节操作即可推翻。
 > #30 曾是「等待型」条目（改窗口形态本身，返工成本高），2026-09-26 用户放行后已按默认全部落地（M1–M4 合入 main）。
-> 编号 #161 为当前最新条目(2026-10-24 #160 macOS accesskit 止血、#161 命令行入口安装;2026-10-19 写作模式体验批次为 #154–#159;此前 #149–#153 为 live-unify P6 批次)。历史遗留:#22/#30 各存在两条(2026-09-25/26 旧批次撞号,非 #66 引入;重编号牵连 auto-plan/README/commit 信息等跨文件引用,待专项处理)。跨分支预警(2026-10-09,#72 文档收尾记):孤儿 commit `0820817`(#70 落档,PR#146 合入后补推在 feature/titlebar-search-and-view-switch,未进 main)亦定义 #133/#134(#70 设置弹窗两条);本轮 #133/#134(#72 查找/跳转浮卡)已被 `crates/latermd-app/src/ui/layout.rs` 注释与 #135 引用,不动;该线内容将来搬运进 main 时须给其重编号(建议顺延 #136/#137)——已于 #70 收口移植(2026-10-09)执行:该线两条现编为 #136/#137(见下),撞号解除。
+> 编号 #163 为当前最新条目(2026-10-24 #160 macOS accesskit 止血、#161 命令行入口、#162 大纲指纹闸门、#163 mac dmg 带 glow;2026-10-19 写作模式体验批次为 #154–#159)。历史遗留:#22/#30 各存在两条(2026-09-25/26 旧批次撞号,非 #66 引入;重编号牵连 auto-plan/README/commit 信息等跨文件引用,待专项处理)。跨分支预警(2026-10-09,#72 文档收尾记):孤儿 commit `0820817`(#70 落档,PR#146 合入后补推在 feature/titlebar-search-and-view-switch,未进 main)亦定义 #133/#134(#70 设置弹窗两条);本轮 #133/#134(#72 查找/跳转浮卡)已被 `crates/latermd-app/src/ui/layout.rs` 注释与 #135 引用,不动;该线内容将来搬运进 main 时须给其重编号(建议顺延 #136/#137)——已于 #70 收口移植(2026-10-09)执行:该线两条现编为 #136/#137(见下),撞号解除。
 
 ## #142 minimap「全屏不可拖」是真缺陷,不是实例/面板问题:`jump_ratio` 的第一道闸门把「minimap 铺不满窄条」误判为「编辑器滚不动」,短文档在全屏下拖不动;#132 结论被取代(2026-10-09,#68 后续复核·自动拍板)
 
@@ -1387,3 +1387,20 @@
 - **口径**:应用内通道(macos)开发裸跑(非 `.app`)只落提示不安装 —— 装出去的软链指向 `target/debug` 临时二进制,重编译即失效(`is_bundled_macos_app` 判定 `*.app/Contents/MacOS` 三段连续);用户取消授权(osascript 报 `User canceled`)翻译成「已取消授权,未安装」,其余 stderr 原样透传;路径过两层引号(shell 单引号 + AppleScript 双引号)各为独立纯函数逐字钉死。Windows 侧 zip/裸 exe 分发形态没有安装器,PATH 由用户自理(README 口径,不做应用内写注册表 —— 安装器已有勾选项,双通道重复且写 HKCU 该走系统惯例)。装之前就开着的终端 Windows 与 mac 都不热更新环境,重开终端即认(广播已尽人事)。
 - **如何改**:mac 要换落点改 `cli_install.rs` 的 `LINK_DIR`(同步改成功提示文案与本条);要去应用内通道删 `mac_menu.rs` 的 `InstallCli` 项与 `state.rs` 的两条消息;要撤 brew 通道删 tap 仓库 `Casks/latermd.rb` 的 `binary` 行。Windows 要撤 PATH 注册删 `.iss` 的 `addpath` 任务与 `[Code]` 段(守门 `windows_inno_setup_adds_to_path_via_code_section` 会红,连带更新);将来若做正式安装器(pkg/msi),各平台通道都可退役。
 - **验证**:纯函数(两层转义/命令拼装/bundle 判定/`run_command` 三分支/取消翻译)与状态机生命周期(恰一条结果/断连兜底/收尾)全平台无头测试,归约侧(裸二进制拒绝/收尾双向落提示)无头测试;Windows 侧 `.iss` 文本层守门(`packaging_assoc.rs`,本机无 iscc,与文件关联守门同理由):ChangesEnvironment/addpath 默认勾选/读-改-写/REG_EXPAND_SZ/卸载清理/不碰 HKLM 六判据;Linux 侧 `/usr/bin` 落点由 linux-deb.yml 产线钉住。**真机留人工**(blocked_external):mac 授权弹窗与软链生效、Windows 安装器勾选后新终端 `latermd 文档.md` 直开与卸载清理。
+
+## #162 击键帧的大纲开销:指纹闸门替代每击键一次的全篇标题解析(2026-10-23 mac 反馈批次后的击键轮·自动拍板)
+
+- **岔路**:大纲显示中(可见性闸门 e9fad20 之后)每次击键仍要付 `latermd_md::outline` 的全篇 pulldown 解析(634KB ≈ 4.3ms,线性;20k 行 Live+Outline 击键帧 14.06ms 贴 60fps 预算)。三条路:①**指纹闸门** —— 纯字节行扫的超集摘要,指纹不变 ⟹ 大纲必然不变,免解析;②**节流/防抖** —— 大纲滞后 ~150ms,定时器唤醒;③**增量 outline** —— rope 上的增量标题扫描。
+- **自动选择**:①。`outline_fingerprint`(latermd-md):ATX 行 / setext 下划线行连同上方**整个段落**(setext 标题文本可多行且无特征字符)/ 围栏行 / 容器行(`>` `-` `*` `+`)/ HTML 块边界(`<` 行与**空行**),各带行首字节偏移与整行字节,哈希器 FNV-1a。偏移入摘保证 span 新鲜度(编辑平移标题 ⟹ 指纹必变);空行入摘堵住「等长空行↔非空行对换改变 HTML 块终止位置」这个唯一的偏移不变假阴性(专项回归测试)。
+- **理由**:②引入时序与陈旧大纲(span 漂移会让跳转落点偏移,虽有钳制兜底),③工程量与 CommonMark 语义对齐风险不成比例;①是纯函数、同步、零语义变化,主场景(长文末段写作,编辑在最后一个特殊行之后)指纹稳定,其余情况重扫本就是 span 正确性的语义必需。性质测试 1500 组确定性随机变异钉「指纹相等 ⟹ outline 逐项相等」。
+- **验证**:同哨兵复测 20k Live+Outline 击键 14.06 → 11.46ms(−19%),大纲侧开销(Files vs Outline 击键差)4.3 → 1.4ms;其余七档持平或向好(Source+Outline 20k 9.42 → 6.59ms)。
+- **遗留(下一棒排序第一)**:击键帧剩余大头 = `LiveState::sync` 的 `latermd_md::blocks()` 每修订号**两次**全篇解析(vendored parse + `construct_spans` 原生 parse,~3ms@634KB)+ TextEdit 整篇重排(egui 内建,~3ms)。blocks 增量化动的是「任意字节必须落在恰好一个块内」的红线(违者敲字静默丢失),候选路线:单行非结构编辑的**边界保持 + 后续 span 平移**(判定:编辑行旧/新内容均非结构前缀、插入无换行、编辑点远离块缘),性质测试对照全量重算;独立一轮做,不与本次混提。
+- **如何改**:要撤闸门删 `outline_fingerprint` 与 `PreviewState.outline_fingerprint` 两处(测试同步);要调「特殊行」口径改 `outline_fingerprint` 的前缀集合(动前先跑性质测试)。
+
+## #163 mac dmg 带 glow 逃生口:自建双架构二进制替代消费 dist tar.xz(2026-10-23 mac 反馈「疑似 GPU 渲染异常」·自动拍板)
+
+- **岔路**:mac 用户反馈渲染乱码「刷新/重开就好」,怀疑 GPU 支持(Intel Iris Plus 645 + wgpu/Metal)。AGENTS §5 既定「不要启用 glow,仅保留 LATERMD_RENDERER=glow 逃生口」——但 **dmg 是纯 wgpu 默认 features 产物,环境变量在用户机上形同虚设**(rust.yml 只验 glow 可编译,不进产物)。三条路:①不动,让怀疑 GPU 的用户自己编;②dist 全局开 glow(Windows/Linux 产物连带变化);③mac dmg 自建带 glow(wgpu 仍是默认后端)。
+- **自动选择**:③。`macos-dmg.yml` 不再下载 dist 的 tar.xz,自建 `cargo build --release --locked --features glow --target aarch64/x86_64-apple-darwin` 后 lipo;AGENTS §5 同步修订(Windows/Linux 产物维持纯 wgpu);dmg 体积涨一个 glow 后端的量级。
+- **理由**:逃生口的全部价值在「用户机上可用」——反馈场景正是需要它的时候;①把验证成本推给用户,②把 mac 特有的取舍强加给另外两个平台(OpenGL 在 mac 被废弃的既定判断不变,glow 只是逃生口不是默认);macOS 15 仍带 OpenGL 实现,Intel 核显上可用。渲染异常的根因(缓存失效?字体图集?Metal?)未定,**切后端是隔离变量最快的诊断步**:glow 下复现 ⟹ 应用层缓存问题;glow 下消失 ⟹ wgpu/Metal 栈,再按层排查。
+- **验证**:本机 Linux 无法跑该 workflow;结构审查 + 下一版 Release 实跑(workflow_dispatch 可对测试 tag 预演)。真机复验留人工:装新 dmg → `LATERMD_RENDERER=glow open -a LaterMD` → 乱码是否复现。
+- **如何改**:要撤回改 `macos-dmg.yml` 回下载 tar.xz 并还原 AGENTS §5;根因定位后若确认与 GPU 无关,可再评估是否撤逃生口(建议保留,成本只剩体积)。

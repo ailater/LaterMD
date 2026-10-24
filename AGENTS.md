@@ -81,8 +81,11 @@ channel = "1.98.0"
 ## 5. 平台与渲染后端
 
 - 平台基线：**Windows 11 / macOS 14 / Linux**。**显式不支持 Win10 与 macOS 13**，写进 README。
-- 渲染后端：**wgpu**（eframe 默认）。**不要启用 `glow`** —— macOS 上 OpenGL 已被 Apple 废弃。
-  仅保留 `LATERMD_RENDERER=glow` 环境变量作为驱动黑名单的逃生口，并在 Settings 面板显示当前后端。
+- 渲染后端：**wgpu**（eframe 默认）。**Windows/Linux 产物不要启用 `glow`** —— macOS 上 OpenGL 已被 Apple 废弃。
+  `LATERMD_RENDERER=glow` 环境变量是驱动黑名单的逃生口，并在 Settings 面板显示当前后端。
+  **mac dmg 例外（2026-10-24 修订，#163）**：dmg 二进制由 `macos-dmg.yml` 自建并带 `glow` feature（wgpu 仍是默认后端）——
+  逃生口必须随正式产物分发才有用（此前 dmg 纯 wgpu，环境变量在用户机上形同虚设）；动因是 2026-10-23 mac 真机反馈
+  疑似 GPU 渲染异常，用户需要一条不改代码即可切换后端的验证路径。dist 的 tar.xz（Windows/Linux 产物）维持纯 wgpu。
 - Linux 开发机（Deepin + rolling kernel）：若 Wayland 下 `egui_wgpu` 起不来，**直接切 X11 会话**，不要在此耗时。
 - **分发策略（2026-09-24 定）：无签名证书路线。** 主渠道 GitHub Release；macOS 经 Homebrew tap [`crazykun/homebrew-ailater`](https://github.com/crazykun/homebrew-ailater) 以 **cask** 分发，**复刻 `lscreen` 模式**：universal2 单 dmg（双架构 lipo 合一）+ `postflight` 执行 `xattr -dr com.apple.quarantine` 消除 Gatekeeper 拦截 + `livecheck :github_latest` 自动发现新版本。**不做 codesign 公证，不买证书。**
 - Windows 无证书直下会触发 SmartScreen，README 写明「更多信息 → 仍要运行」，不视为缺陷。
