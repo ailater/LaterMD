@@ -288,11 +288,16 @@ mod tests {
         }
     }
 
-    /// run_command 三分支穷尽:成功 / 非零退出(优先 stderr)/ 启动失败。
-    /// /bin/true、/bin/false、/bin/sh 在 mac 与 Linux 都在,全平台可测。
+    /// run_command 三分支穷尽:成功 / 非零退出(优先 stderr)/ 空 stderr
+    /// 回退退出码 / 启动失败。
+    ///
+    /// **不许用 `/bin/true` / `/bin/false`**:Apple 自 macOS 15 起已把它们
+    /// 从 /bin 移除(本机 Sequoia 15.3 与 GitHub `macos-26-arm64` runner
+    /// 实测均无,CI 当场红);`/bin/sh` 仍在。成功与空 stderr 两档都用
+    /// `sh -c exit N` 表达,mac/Linux 同款可用。
     #[test]
     fn run_command_covers_success_stderr_and_launch_failure() {
-        assert!(run_command("/bin/true", &[]).is_ok());
+        assert!(run_command("/bin/sh", &["-c".to_owned(), "exit 0".to_owned()]).is_ok());
         assert_eq!(
             run_command(
                 "/bin/sh",
@@ -301,7 +306,7 @@ mod tests {
             Err("boom".to_owned()),
             "非零退出优先回传 stderr"
         );
-        let failure = run_command("/bin/false", &[]).unwrap_err();
+        let failure = run_command("/bin/sh", &["-c".to_owned(), "exit 5".to_owned()]).unwrap_err();
         assert!(
             failure.contains("退出码非零"),
             "空 stderr 回退退出码:{failure}"
