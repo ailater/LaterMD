@@ -26,6 +26,10 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=latermd.ico
 UninstallDisplayIcon={app}\latermd.exe
+; PATH 注册(2026-10-24 反馈 #3)后广播 WM_SETTINGCHANGE("Environment"):
+; 资源管理器与之后新开的终端立刻拿到新 PATH;装之前就开着的终端要
+; 重开一次才认(Windows 不热更新已开进程的环境)。
+ChangesEnvironment=yes
 
 [Files]
 Source: "latermd.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -44,6 +48,11 @@ Name: "desktop"; Description: "Create a desktop shortcut (创建桌面快捷方�
 ; (2026-10-18 v0.0.7 实测:release.yml 的 windows-installer job 红,Release
 ; 里只剩 zip + 裸 exe)。要表达「默认不勾」才写 Flags: unchecked。
 Name: "mdassoc"; Description: "Associate .md and .markdown files with LaterMD (关联 .md / .markdown 文件,可在系统「默认应用」中改为其它程序)"
+; 命令行入口(2026-10-24 反馈 #3):把安装目录追加进用户 PATH,终端里
+; `latermd 文档.md` 直开。默认勾选(不写 Flags,与 mdassoc 同口径);
+; 实际写入在 [Code] 段(HKCU\Environment 的 Path 只能读改写,[Registry]
+; 段的整值覆盖会把用户已有 PATH 焊死)。
+Name: "addpath"; Description: "Add LaterMD to PATH (添加到 PATH,可在命令行用 latermd 命令打开文档)"
 
 [Icons]
 Name: "{group}\LaterMD"; Filename: "{app}\latermd.exe"
@@ -81,3 +90,111 @@ Root: HKCU; Subkey: "Software\Classes\Applications\latermd.exe\SupportedTypes"; 
 
 [Run]
 Filename: "{app}\latermd.exe"; Description: "Launch LaterMD now"; Flags: nowait postinstall skipifsilent
+
+; ---------------------------------------------------------------------------
+; 命令行入口:把 {app} 追加进用户 PATH(2026-10-24 反馈 #3)
+; ---------------------------------------------------------------------------
+; 为什么在 [Code] 而不在 [Registry]:HKCU\Environment 的 Path 是「读出来、
+; 追加、写回」的复合操作 —— [Registry] 段只会整值覆盖,等于把用户已有的
+; PATH 条目全部焊死丢失。以下实现照抄 Inno 官方 FAQ 的 PATH 做法:
+; - 读:`RegQueryStringValue` 读 REG_EXPAND_SZ 拿到的是**未展开**原文
+;   (%USERPROFILE% 之类保持变量形态),因此写回必须用
+;   `RegWriteExPandedValue` 保住 REG_EXPAND_SZ 类型 —— 换成
+;   RegWriteStringValue 会把类型降成 REG_SZ,用户 Path 里的变量从此
+;   不再展开;
+; - 去重按「分号切开的整条目」精确比较(大小写不敏感),不做子串判断
+;   —— D:\Tools 匹配不了 D:\Tools2;
+; - 只写 HKCU:配合 PrivilegesRequired=lowest 不需要 UAC,也不碰机器
+;   上其它用户的 PATH(与文件关联的 mdassoc 任务同口径);
+; - 卸载时把本应用那条目从 Path 里移除(装时没勾 addpath 的用户卸载
+;   也无损伤:切分重拼等于原值),PATH 被清空则删值不删键。
+
+[Code]
+const
+  EnvironmentKey = 'Environment';
+
+{ 把 Path 值按分号切进列表(Delphi/Pascal 没有内建 Split,手写循环)。 }
+procedure SplitPathEntries(const Value: String; Entries: TStringList);
+var
+  Rest: String;
+  Cut: Integer;
+begin
+  Rest := Value;
+  while Rest <> '' do
+  begin
+    Cut := Pos(';', Rest);
+    if Cut > 0 then
+    begin
+      Entries.Add(Copy(Rest, 1, Cut - 1));
+      Delete(Rest, 1, Cut);
+    end
+    else
+    begin
+      Entries.Add(Rest);
+      Rest := '';
+    end;
+  end;
+end;
+
+procedure AddToPath();
+var
+  PathValue: String;
+  AppDir: String;
+begin
+  AppDir := ExpandConstant('{app}');
+  if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', PathValue) then
+    PathValue := '';
+  // 已含本目录(整条目精确比较)则不动:重装/升级幂等
+  if Pos(';' + LowerCase(AppDir) + ';', ';' + LowerCase(PathValue) + ';') > 0 then
+    exit;
+  if PathValue <> '' then
+    PathValue := PathValue + ';' + AppDir
+  else
+    PathValue := AppDir;
+  RegWriteExPandedValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', PathValue);
+end;
+
+procedure RemoveFromPath();
+var
+  PathValue: String;
+  AppDir: String;
+  Entries: TStringList;
+  Rebuilt: String;
+  Index: Integer;
+begin
+  AppDir := ExpandConstant('{app}');
+  if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', PathValue) then
+    exit;
+  Entries := TStringList.Create;
+  try
+    SplitPathEntries(PathValue, Entries);
+    Rebuilt := '';
+    for Index := 0 to Entries.Count - 1 do
+      if CompareText(Entries.Strings[Index], AppDir) <> 0 then
+        if Rebuilt = '' then
+          Rebuilt := Entries.Strings[Index]
+        else
+          Rebuilt := Rebuilt + ';' + Entries.Strings[Index];
+    // 条目没变(装时就没勾 addpath):原样写回也无害,但少一次写注册表
+    if CompareText(Rebuilt, PathValue) = 0 then
+      exit;
+    if Rebuilt = '' then
+      RegDeleteValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path')
+    else
+      RegWriteExPandedValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Rebuilt);
+  finally
+    Entries.Free;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('addpath') then
+    AddToPath();
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveFromPath();
+end;
