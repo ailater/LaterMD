@@ -112,10 +112,22 @@ jobs:
         run: |
           set -euo pipefail
           DMG="latermd-v${VERSION}-universal2-apple-darwin.dmg"
-          hdiutil create -volname "LaterMD" -srcfolder LaterMD.app \
-            -ov -format UDZO "$DMG"
+          # 不用 `hdiutil create -srcfolder` 的一步式:它按源目录**估算**
+          # 镜像容量,codesign 的 xattr/资源叉不计入 —— v0.0.11 两次实跑都
+          # 在拷贝段炸 `No space left on device`(df 明明有 38Gi 可用,
+          # 见 2026-10-25 run 40151400200 / 40153872774)。改为显式分步:
+          # 固定大小空镜像 → 挂载 → ditto 拷入 → 卸载 → convert 压缩,
+          # 每一步可独立归因。
+          df -h /System/Volumes/Data || true
+          du -sh LaterMD.app || true
+          hdiutil create -size 512m -fs "HFS+" -volname "LaterMD" \
+            -attach -ov "${RUNNER_TEMP}/latermd-staging.dmg"
+          ditto LaterMD.app "/Volumes/LaterMD/LaterMD.app"
+          hdiutil detach "/Volumes/LaterMD"
+          hdiutil convert "${RUNNER_TEMP}/latermd-staging.dmg" \
+            -format UDZO -o "$DMG"
           echo "file=$DMG" >> "$GITHUB_OUTPUT"
-          SHA=$(shasum -a 256 "$DMG" | cut -d' ' -f1)
+          SHA=$(shasum -a 256 "$DMG" | cut -d ' ' -f1)
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           {
             echo "### macOS universal2 dmg"
