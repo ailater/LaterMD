@@ -37,6 +37,7 @@
 
 - README 增加界面截图:无头软件光栅化测试生成(跑完整应用帧采样字体图集),仓库内可随时复现
 - CI 修复:`run_command` 用 `sh -c` 替代 macOS 15 已移除的 `/bin/true`(#337,修 main 三连挂);tab 往返缓存哨兵改三次中位数,修 aarch64 runner 单次抖动假红(#340)
+- Windows 安装器 PATH 写回的 Inno 函数名勘误:`RegWriteExPandedValue` → 文档真名 `RegWriteExpandStringValue`(首发布编译期被 iscc 拦下,未流入任何产物);守门测试同步改对,并新增「[Code] 段 Reg* 调用必须在文档白名单」哨兵防臆造函数名复发
 
 ## v0.0.10 - 2026-10-24
 

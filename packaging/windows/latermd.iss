@@ -99,7 +99,7 @@ Filename: "{app}\latermd.exe"; Description: "Launch LaterMD now"; Flags: nowait 
 ; PATH 条目全部焊死丢失。以下实现照抄 Inno 官方 FAQ 的 PATH 做法:
 ; - 读:`RegQueryStringValue` 读 REG_EXPAND_SZ 拿到的是**未展开**原文
 ;   (%USERPROFILE% 之类保持变量形态),因此写回必须用
-;   `RegWriteExPandedValue` 保住 REG_EXPAND_SZ 类型 —— 换成
+;   `RegWriteExpandStringValue` 保住 REG_EXPAND_SZ 类型 —— 换成
 ;   RegWriteStringValue 会把类型降成 REG_SZ,用户 Path 里的变量从此
 ;   不再展开;
 ; - 去重按「分号切开的整条目」精确比较(大小写不敏感),不做子串判断
@@ -151,7 +151,7 @@ begin
     PathValue := PathValue + ';' + AppDir
   else
     PathValue := AppDir;
-  RegWriteExPandedValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', PathValue);
+  RegWriteExpandStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', PathValue);
 end;
 
 procedure RemoveFromPath();
@@ -181,7 +181,7 @@ begin
     if Rebuilt = '' then
       RegDeleteValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path')
     else
-      RegWriteExPandedValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Rebuilt);
+      RegWriteExpandStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Rebuilt);
   finally
     Entries.Free;
   end;
