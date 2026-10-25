@@ -37,3 +37,8 @@ mod tab_switch_perf;
 /// 应用启动):纯测试模块,生产构建不编译。
 #[cfg(test)]
 mod perf_finding;
+
+/// README 截图生成器 harness(无头整帧 + 软件光栅化):纯测试模块,
+/// 生产构建不编译。跑法见模块文档。
+#[cfg(test)]
+mod screenshot_gen;
