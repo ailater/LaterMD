@@ -9,8 +9,18 @@
 **跨平台、版本化、可对话、可演化的 Markdown 知识工作台** —— Markdown 是内容层,AI 是智能层,Git 是时间层。
 
 纯 Rust(egui + eframe),Windows / macOS / Linux 三平台原生界面,无 Web 栈。
-当前版本 **v0.0.7**(2026-10-16):三态视图(写作 / 源码 / 源码+对照)、搜索替换、AI 流式写作、Git 只读集成与主工作区 diff 审阅、双击 `.md` 文件关联、MCP 服务器与 macOS 全量支持均已可用。
+当前版本 **v0.0.11**(2026-10-25):三态视图(写作 / 源码 / 源码+对照)、搜索替换、AI 流式写作、Git 只读集成与主工作区 diff 审阅、双击 `.md` 文件关联、mermaid 图表预览与图表/源码切换、`latermd` 命令行直开(三平台)均已可用。
 技术决策见 [docs/](docs/README.md),演进路线见 [docs/roadmap.md](docs/roadmap.md)。
+
+## 界面截图
+
+| 写作 · 深色(大纲面板) | 写作 · 浅色(大纲面板) |
+|:---:|:---:|
+| ![深色主题](assets/screenshot/live-dark-outline.png) | ![浅色主题](assets/screenshot/live-light-outline.png) |
+
+源码模式(行号 gutter、Markdown 原始标记):
+
+![源码模式](assets/screenshot/source-dark.png)
 
 ## 功能特性
 
@@ -19,6 +29,7 @@
 - 默认进入「写作」；标题栏三段开关在 写作 / 源码 / 源码+对照(分栏) 三档间循环(Ctrl/Cmd+/)；分栏的右栏是同一份文档的**只读** Live 富渲染。支持 CommonMark + GFM，全项目仅 pulldown-cmark 一个解析器
 - 三档共用同一缓冲与撤销栈;写作档下撤销按块分段(Ctrl+Z 先撤当前块内的修改,跨块的修改需先把光标移回对应块逐块撤销)
 - 多标签编辑,代码块语法高亮与一键复制
+- mermaid 图表渲染,块头「图表 / 源码」一键切换;图表态预览只读
 - Zed 式汉堡菜单栏:标题栏左缘汉堡展开八个菜单组,Alt+字母 直达;禅定模式、打字机专注、minimap 代码地图、Ctrl+G 行跳转、任务勾选回写、TOC 生成
 - 页内查找:Ctrl+F 聚焦查找条,全部命中浅底高亮;搜索替换 VS Code 化(行内匹配高亮、内联全部替换)
 
