@@ -87,6 +87,16 @@ jobs:
           lipo -archs latermd-universal | tee /dev/stderr | grep -q x86_64
           lipo -archs latermd-universal | tee /dev/stderr | grep -q arm64
 
+      # 磁盘腾挪(2026-10-25,v0.0.11 首跑踩坑):lipo 完成后二进制已抽到
+      # 仓库根,两份 target 目录(合计 >10GB)只剩缓存价值;macos runner
+      # 可用磁盘 ~14GB,不清就轮到 hdiutil 报 No space left on device。
+      # 代价:rust-cache 的 post 步存不到 target,下次发版全量重建
+      # (~11min)—— 发布频次(天级)下可接受,磁盘爆是每次必挂。
+      - name: 清理构建产物腾磁盘
+        run: |
+          rm -rf target/x86_64-apple-darwin target/aarch64-apple-darwin
+          df -h /
+
       - name: 组装 .app bundle
         env:
           VERSION: ${{ steps.ver.outputs.version }}
