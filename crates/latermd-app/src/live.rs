@@ -4176,6 +4176,15 @@ fn clicked_for_edit(
     {
         return None;
     }
+    // mermaid 图表态(2026-10-24,「可切换代码/预览,预览只读」):图表
+    // 与回落态整块只读(改图走块头「源码」钮);源码态只免头带,点代码
+    // 体照常进编辑。
+    if crate::ui::mermaid::read_only_rects(ui.ctx())
+        .iter()
+        .any(|rect| rect.contains(pos))
+    {
+        return None;
+    }
     // 任务 checkbox(#63):点击归 checkbox 切换(帧内探针几何,由 paint
     // 先于本判定写入),不连带进编辑。
     if crate::ui::rich_widgets::task_checkbox_rects(ui.ctx())
@@ -7099,6 +7108,66 @@ mod tests {
             !frame.button_rects.is_empty(),
             "回落块应保留复制按钮:{:?}",
             frame.button_rects
+        );
+    }
+
+    /// mermaid「预览只读」(2026-10-24):块矩形登记进只读探针(图表态
+    /// 由 `ui::mermaid::block_widget` 每帧登记)后,落块内的主键点击不进
+    /// 编辑;未登记(源码态的代码体/非 mermaid 块)照常进编辑。
+    #[test]
+    fn clicked_for_edit_respects_mermaid_read_only_rects() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(700.0, 900.0));
+        let block = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(600.0, 200.0));
+        let click = block.center();
+        let events = vec![
+            egui::Event::PointerMoved(click),
+            egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        // 对照:未登记(源码态代码体/普通块)—— 点击进编辑。
+        let mut unguarded = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: events.clone(),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                unguarded = clicked_for_edit(ui, block, egui::Id::new("t"), false);
+            },
+        );
+        output.drop_without_applying_deltas();
+        assert!(unguarded.is_some(), "未登记只读矩形的块,点击照常进编辑");
+
+        // 图表态:同帧登记(生产由 block_widget 先于 clicked_for_edit 写
+        // 入)后,点击不进编辑。
+        let mut guarded = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                crate::ui::mermaid::register_read_only_rect(ui.ctx(), block);
+                guarded = clicked_for_edit(ui, block, egui::Id::new("t"), false);
+            },
+        );
+        output.drop_without_applying_deltas();
+        assert!(
+            guarded.is_none(),
+            "mermaid 图表态的点击不得连带进编辑(预览只读)"
         );
     }
 
