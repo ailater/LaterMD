@@ -641,6 +641,9 @@ fn markdown_cache_hits_in_steady_state_and_misses_on_text_change() {
 /// 往返首帧与稳态同量级,而不是重新全量解析。egui 0.36 temp memory 无按帧
 /// 回收(egui src/util/id_type_map.rs:temp 仅在 clear/remove 时清),缓存
 /// 跨帧存活是这一机制的前提;时间断言口径同上一条(命中 < 冷帧 20%)。
+/// 2026-10-25 起往返帧取**三次中位数**:aarch64-apple-darwin 共享 runner
+/// 上单次命中帧抖到 3.147ms(阈值 2.825ms,超 11%)假红过一回(main #339),
+/// 与上一条 2026-10-24 的「单次抖动原样进比值」同根同修。
 #[test]
 fn preview_cache_survives_tab_roundtrip_with_per_tab_ids() {
     let rendered_a = latermd_md::expand_wikilinks(&sample_doc(6, 300));
@@ -654,16 +657,32 @@ fn preview_cache_survives_tab_roundtrip_with_per_tab_ids() {
 
     let cold_a = label_frame_with_id(&ctx, &id_a, &rendered_a);
     let cold_b = label_frame_with_id(&ctx, &id_b, &rendered_b);
-    // A→B→A 往返:切回 A 的一帧,不得重新全量解析
-    let back_a = label_frame_with_id(&ctx, &id_a, &rendered_a);
+    // A→B→A 往返三轮取中位数:切到 B 的一帧不计入,只计切回 A 的帧。
+    // 若 B 的渲染覆盖/清掉了 A 的缓存,三轮每帧都会全量重解析,中位数
+    // 稳稳落在冷帧量级 —— 中位数只是滤单次抖动,不稀释真回归。
+    let back_a = median(
+        (0..3)
+            .map(|_| {
+                let _ = label_frame_with_id(&ctx, &id_b, &rendered_b);
+                label_frame_with_id(&ctx, &id_a, &rendered_a)
+            })
+            .collect(),
+    );
     assert!(
         back_a.as_secs_f64() < cold_a.as_secs_f64() * 0.2,
-        "往返切回 A 首帧 {back_a:?} 应命中 A 自己的缓存槽位(冷帧 {cold_a:?} 的 20% 以内);若红了说明 B 的渲染覆盖/清掉了 A 的缓存"
+        "往返切回 A 中位帧 {back_a:?} 应命中 A 自己的缓存槽位(冷帧 {cold_a:?} 的 20% 以内);若红了说明 B 的渲染覆盖/清掉了 A 的缓存"
     );
-    // 再切回 B 同样命中:B 的槽位也没被 A 的往返破坏
-    let back_b = label_frame_with_id(&ctx, &id_b, &rendered_b);
+    // 再切回 B 同样命中(同口径取三轮中位数):B 的槽位也没被 A 的往返破坏
+    let back_b = median(
+        (0..3)
+            .map(|_| {
+                let _ = label_frame_with_id(&ctx, &id_a, &rendered_a);
+                label_frame_with_id(&ctx, &id_b, &rendered_b)
+            })
+            .collect(),
+    );
     assert!(
         back_b.as_secs_f64() < cold_b.as_secs_f64() * 0.2,
-        "再切回 B 首帧 {back_b:?} 应命中 B 自己的缓存槽位(冷帧 {cold_b:?} 的 20% 以内)"
+        "再切回 B 中位帧 {back_b:?} 应命中 B 自己的缓存槽位(冷帧 {cold_b:?} 的 20% 以内)"
     );
 }
