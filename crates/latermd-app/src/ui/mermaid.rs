@@ -43,18 +43,101 @@ pub(crate) fn is_mermaid_info(language: Option<&str>) -> bool {
     language.is_some_and(|info| info.split_whitespace().next() == Some("mermaid"))
 }
 
+/// mermaid 块查看态(2026-10-24,需求「可切换代码/预览,预览只读」)的
+/// temp 键:`false`(默认)= 图表(渲染图,整块只读);`true` = 源码
+/// (高亮代码块,头带只读、代码体照常点进编辑)。会话级 UI 态,不持久化,
+/// 键与布局缓存同源(外层 label id + 块序号)。
+fn source_view_key(ui: &egui::Ui, index: usize) -> egui::Id {
+    mermaid_widget_id(ui, index).with("src-view")
+}
+
 /// mermaid 块渲染入口(vendored `block_code_widget` 的分派目标)。
 ///
 /// `index` 是本帧文档序的 mermaid 块序号(由调用方 handler 按渲染顺序
 /// 递增,照 ```ai 卡的 `card_count` 模式)—— widget id 与缓存键的稳定
 /// 成分,内容变化不改变它。`text` 是围栏内纯文本(vendored parser 已去
 /// 块尾换行,不经任何 Markdown 再解析,铁律 1)。
+///
+/// 块头常驻「图表/源码」切换 + 复制(2026-10-24):图表态含解析回落
+/// (回落显示的也是源码,但**意图**仍是图表)整块只读 —— 点击落图不
+/// 进编辑,改图走「源码」钮;源码态只免头带,点代码体即进编辑。
 pub(crate) fn block_widget(ui: &mut egui::Ui, index: usize, text: &str) -> egui::Response {
     let font = diagram_font(ui);
-    match cached_diagram(ui, index, text, &font) {
-        Ok(diagram) => paint_diagram(ui, index, &diagram, &font),
-        Err(err) => paint_fallback(ui, index, text, &err),
-    }
+    let view_key = source_view_key(ui, index);
+    let show_source = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(view_key))
+        .unwrap_or(false);
+    let top = ui.cursor().top();
+    let header_rect = view_header(ui, text, show_source, view_key);
+    let response = if show_source {
+        paint_source(ui, index, text, None, true)
+    } else {
+        match cached_diagram(ui, index, text, &font) {
+            Ok(diagram) => paint_diagram(ui, index, &diagram, &font),
+            Err(err) => paint_fallback(ui, index, text, &err),
+        }
+    };
+    let bottom = ui.cursor().top().max(top + 1.0);
+    let full = egui::Rect::from_min_max(
+        egui::pos2(ui.min_rect().left(), top),
+        egui::pos2(ui.min_rect().right(), bottom),
+    );
+    register_read_only_rect(ui.ctx(), if show_source { header_rect } else { full });
+    response
+}
+
+/// 块头:查看态切换(图表/源码)+ 复制与语言标签(复用代码块头部件,
+/// 观感/已复制 ✓ 反馈/点击排除探针全部同源)。返回头带矩形 —— 源码态
+/// 的只读排除范围(代码体不排除,点进编辑)。
+fn view_header(ui: &mut egui::Ui, text: &str, show_source: bool, view_key: egui::Id) -> egui::Rect {
+    let top = ui.cursor().top();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = crate::ui::tokens::SPACE_XS;
+        if view_toggle(ui, !show_source, "图表", false, "渲染为流程图(只读)") {
+            ui.ctx().data_mut(|d| d.insert_temp(view_key, false));
+            ui.ctx().request_repaint();
+        }
+        if view_toggle(
+            ui,
+            show_source,
+            "源码",
+            true,
+            "显示 mermaid 源码(点击代码进入编辑)",
+        ) {
+            ui.ctx().data_mut(|d| d.insert_temp(view_key, true));
+            ui.ctx().request_repaint();
+        }
+        crate::ui::rich_widgets::code_header_buttons(ui, text, "mermaid", None);
+    });
+    let bottom = ui.cursor().top();
+    egui::Rect::from_min_max(
+        egui::pos2(ui.min_rect().left(), top),
+        egui::pos2(ui.min_rect().right(), bottom),
+    )
+}
+
+/// 查看态小切换钮:`selected` 决定强调与弱化,`is_source` 只用于测试探针
+/// 标注。命中返回 true(切换与重绘由调用方处理)。
+fn view_toggle(
+    ui: &mut egui::Ui,
+    selected: bool,
+    label: &str,
+    is_source: bool,
+    hint: &str,
+) -> bool {
+    let response = ui.selectable_label(
+        selected,
+        egui::RichText::new(label).small().color(if selected {
+            ui.visuals().text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        }),
+    );
+    register_toggle_rect(ui.ctx(), response.rect, is_source);
+    let clicked = response.clicked();
+    response.on_hover_text(hint);
+    clicked
 }
 
 /// 节点标签/边标签字体:预览正文同源(用户字号偏好 + 预览专用族,
@@ -304,6 +387,7 @@ fn paint_diagram(
         ProbeBlock {
             rendered: true,
             error: None,
+            source_view: false,
             nodes,
             edges: diagram.edges.len(),
         },
@@ -332,19 +416,30 @@ fn paint_arrow(
     ));
 }
 
-// —— 源码回落 ——
+// —— 源码视图与回落(共用嵌套 label 渲染)——
 
-/// 解析/布局失败(含 Live 流式围栏未闭合)的回落:一行克制提示
-/// (small + weak,hover 可看具体错误)+ 嵌套 `MarkdownLabel` 渲染原围栏
-/// 源码。嵌套 label **不传 link_handler** → `is_block_code_widget` 恒
-/// false → mermaid 围栏走 vendored 普通代码块路径:语法高亮与复制按钮
-/// (`code_copy_buttons`)原样复用,且天然不可能递归回本 widget。
-fn paint_fallback(ui: &mut egui::Ui, index: usize, text: &str, err: &str) -> egui::Response {
-    let note = ui
-        .label(egui::RichText::new(FALLBACK_NOTE).small().weak())
-        .on_hover_text(err);
+/// 嵌套 `MarkdownLabel` 渲染 mermaid 源码围栏。嵌套 label **不传
+/// link_handler** → `is_block_code_widget` 恒 false → mermaid 围栏走
+/// vendored 普通代码块路径:语法高亮与复制按钮(`code_copy_buttons`)
+/// 原样复用,且天然不可能递归回本 widget。
+///
+/// 两个消费方:`source`(用户切到「源码」视图,无提示行,块可点进
+/// 编辑)与 `fallback`(解析/布局失败含流式围栏未闭合的回落,带提示
+/// 行,整块只读)。
+fn paint_source(
+    ui: &mut egui::Ui,
+    index: usize,
+    text: &str,
+    note: Option<(&str, &str)>,
+    source_view: bool,
+) -> egui::Response {
+    let note_response = note.map(|(note_text, err)| {
+        ui.label(egui::RichText::new(note_text).small().weak())
+            .on_hover_text(err)
+    });
     let fenced = format!("```mermaid\n{text}\n```");
-    MarkdownLabel::new(mermaid_widget_id(ui, index).with("fallback"), &fenced)
+    let id_salt = if note.is_some() { "fallback" } else { "source" };
+    MarkdownLabel::new(mermaid_widget_id(ui, index).with(id_salt), &fenced)
         .font(diagram_font(ui))
         .wrap()
         .scroll_code_blocks(true)
@@ -357,12 +452,20 @@ fn paint_fallback(ui: &mut egui::Ui, index: usize, text: &str, err: &str) -> egu
         index,
         ProbeBlock {
             rendered: false,
-            error: Some(err.to_owned()),
+            error: note.map(|(_, err)| err.to_owned()),
+            source_view,
             nodes: Vec::new(),
             edges: 0,
         },
     );
-    note
+    // 提示行响应只是悬停提示载体,块交互响应取代码块本体的。
+    note_response.unwrap_or_else(|| ui.response())
+}
+
+/// 解析/布局失败(含 Live 流式围栏未闭合)的回落:一行克制提示
+/// (small + weak,hover 可看具体错误)+ 源码视图。
+fn paint_fallback(ui: &mut egui::Ui, index: usize, text: &str, err: &str) -> egui::Response {
+    paint_source(ui, index, text, Some((FALLBACK_NOTE, err)), false)
 }
 
 // —— 探针(生产只写不读;无头验收读,照 copy_button_probe 手法) ——
@@ -378,6 +481,9 @@ struct NodeProbe {
 struct ProbeBlock {
     rendered: bool,
     error: Option<String>,
+    /// 本帧处于「源码」视图(用户切换;回落态为 false —— 回落显示源码
+    /// 但意图仍是图表)。
+    source_view: bool,
     nodes: Vec<NodeProbe>,
     edges: usize,
 }
@@ -402,6 +508,7 @@ fn write_probe(ui: &egui::Ui, index: usize, block: ProbeBlock) {
         widget_id,
         rendered: block.rendered,
         error: block.error,
+        source_view: block.source_view,
         nodes: block
             .nodes
             .into_iter()
@@ -420,8 +527,73 @@ pub(crate) struct ProbeSnapshot {
     pub(crate) widget_id: egui::Id,
     pub(crate) rendered: bool,
     pub(crate) error: Option<String>,
+    pub(crate) source_view: bool,
     pub(crate) nodes: Vec<(String, egui::Rect, egui::Rect)>,
     pub(crate) edges: usize,
+}
+
+// —— 只读排除与切换钮探针(照 copy_button / table_toolbar 同手法)——
+
+fn read_only_rects_id() -> egui::Id {
+    egui::Id::new("latermd-mermaid-readonly-rects")
+}
+
+/// 记录本帧 mermaid 块的只读矩形(图表态=整块,源码态=仅头带);帧号
+/// 变了重开清单。`live::clicked_for_edit` 按它把「预览只读」落地:点击
+/// 落图(或头带)不连带切入编辑。`pub(crate)` 供 live 侧测试注入。
+pub(crate) fn register_read_only_rect(ctx: &egui::Context, rect: egui::Rect) {
+    let id = read_only_rects_id();
+    let frame = ctx.cumulative_pass_nr();
+    let mut rects = ctx
+        .data(|d| d.get_temp::<(u64, Vec<egui::Rect>)>(id))
+        .filter(|(seen, _)| *seen == frame)
+        .map(|(_, rects)| rects)
+        .unwrap_or_default();
+    rects.push(rect);
+    ctx.data_mut(|d| d.insert_temp(id, (frame, rects)));
+}
+
+/// 本帧 mermaid 只读矩形清单(帧号核对通过才返回;生产读法)。
+pub(crate) fn read_only_rects(ctx: &egui::Context) -> Vec<egui::Rect> {
+    let id = read_only_rects_id();
+    let frame = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<(u64, Vec<egui::Rect>)>(id))
+        .filter(|(seen, _)| *seen == frame)
+        .map(|(_, rects)| rects)
+        .unwrap_or_default()
+}
+
+/// 原始探针(最后写入帧,不做帧号核对):测试在 run_ui 之后读取。
+#[cfg(test)]
+pub(crate) fn read_only_probe(ctx: &egui::Context) -> Vec<egui::Rect> {
+    ctx.data(|d| d.get_temp::<(u64, Vec<egui::Rect>)>(read_only_rects_id()))
+        .map(|(_, rects)| rects)
+        .unwrap_or_default()
+}
+
+fn toggle_probe_id() -> egui::Id {
+    egui::Id::new("latermd-mermaid-toggle-rects")
+}
+
+/// 记录本帧「图表/源码」切换钮的矩形与身份(测试找按钮用)。
+fn register_toggle_rect(ctx: &egui::Context, rect: egui::Rect, is_source: bool) {
+    let id = toggle_probe_id();
+    let frame = ctx.cumulative_pass_nr();
+    let mut rects = ctx
+        .data(|d| d.get_temp::<(u64, Vec<(egui::Rect, bool)>)>(id))
+        .filter(|(seen, _)| *seen == frame)
+        .map(|(_, rects)| rects)
+        .unwrap_or_default();
+    rects.push((rect, is_source));
+    ctx.data_mut(|d| d.insert_temp(id, (frame, rects)));
+}
+
+/// 原始探针(最后写入帧,不做帧号核对):测试在 run_ui 之后读取。
+#[cfg(test)]
+pub(crate) fn toggle_probe(ctx: &egui::Context) -> Vec<(egui::Rect, bool)> {
+    ctx.data(|d| d.get_temp::<(u64, Vec<(egui::Rect, bool)>)>(toggle_probe_id()))
+        .map(|(_, rects)| rects)
+        .unwrap_or_default()
 }
 
 /// 测试读侧:本帧(最后写入帧)的全部 mermaid 块探针(preview/live
@@ -505,6 +677,19 @@ mod tests {
         label_id: &'static str,
         with_handler: bool,
     ) -> FrameEvidence {
+        render_frame_events(ctx, dark, doc, label_id, with_handler, Vec::new())
+    }
+
+    /// [`render_frame`] 的注入事件版:切换钮点击等交互验收用(照
+    /// `fallback_copy_button_copies_mermaid_source` 的点击注入手法)。
+    fn render_frame_events(
+        ctx: &egui::Context,
+        dark: bool,
+        doc: &str,
+        label_id: &'static str,
+        with_handler: bool,
+        events: Vec<egui::Event>,
+    ) -> FrameEvidence {
         ThemeSettings::default().apply(
             ctx,
             if dark {
@@ -517,6 +702,7 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(700.0, 900.0));
         let raw = RawInput {
             screen_rect: Some(screen),
+            events,
             ..RawInput::default()
         };
         let (mut node_fill, mut code_bg) = (egui::Color32::BLACK, egui::Color32::WHITE);
@@ -1003,6 +1189,170 @@ mod tests {
         assert!(
             mixed.probe.iter().any(|b| b.rendered),
             "混排文档的 mermaid 块应出图"
+        );
+    }
+
+    /// 查看态切换验收(2026-10-24「可切换代码/预览」):默认图表;点「源码」
+    /// 钮当帧切到源码视图(嵌套高亮代码块,无解析错误);点「图表」切回,
+    /// widget id 全程稳定。点击注入照 `fallback_copy_button` 的手法。
+    #[test]
+    fn view_toggles_between_diagram_and_source_and_back() {
+        if cjk_fonts_missing() {
+            eprintln!("本机无 CJK 字体,mermaid 切换验收跳过");
+            return;
+        }
+        let ctx = fresh_ctx();
+        // 帧 1:默认图表态。
+        let ev = render_frame(&ctx, false, TD_DOC, "mermaid-view-toggle", true);
+        let [block] = ev.probe.as_slice() else {
+            panic!("应有且仅有一个 mermaid 块探针");
+        };
+        assert!(block.rendered, "默认出图");
+        assert!(!block.source_view, "默认图表态");
+        let id_first = block.widget_id;
+        let source_toggle = toggle_probe(&ctx)
+            .into_iter()
+            .find(|(_, is_source)| *is_source)
+            .map(|(rect, _)| rect)
+            .expect("块头应挂出「源码」切换钮");
+
+        // 点击帧的标志位在帧尾翻转,视图在**下一帧**物化(生产环境
+        // request_repaint 自动补帧,用户无感)—— 每次点击后渲染一帧
+        // 静默帧再断言。
+        let click = |pos: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ]
+        };
+        let quiet =
+            |ctx: &egui::Context| render_frame(ctx, false, TD_DOC, "mermaid-view-toggle", true);
+        // 帧 2:点「源码」;帧 3(静默)物化为源码视图。
+        render_frame_events(
+            &ctx,
+            false,
+            TD_DOC,
+            "mermaid-view-toggle",
+            true,
+            click(source_toggle.center()),
+        );
+        let ev = quiet(&ctx);
+        let [block] = ev.probe.as_slice() else {
+            panic!("切换后仍应有恰好一个探针");
+        };
+        assert!(!block.rendered, "源码态不出图");
+        assert!(block.source_view, "探针应标记源码视图");
+        assert!(
+            block.error.is_none(),
+            "源码视图是用户选择,不是解析失败:{:?}",
+            block.error
+        );
+        assert_eq!(block.widget_id, id_first, "切换不改 widget id(缓存纪律)");
+        // 源码视图真的画成了代码块:code_bg 进 mesh 且成块。
+        assert!(ev.code_bg_bbox.is_some(), "源码视图应渲染为代码块背景");
+        let diagram_toggle = toggle_probe(&ctx)
+            .into_iter()
+            .find(|(_, is_source)| !*is_source)
+            .map(|(rect, _)| rect)
+            .expect("源码态块头应挂出「图表」切换钮");
+
+        // 帧 4:点「图表」;帧 5(静默)切回出图。
+        render_frame_events(
+            &ctx,
+            false,
+            TD_DOC,
+            "mermaid-view-toggle",
+            true,
+            click(diagram_toggle.center()),
+        );
+        let ev = quiet(&ctx);
+        let [block] = ev.probe.as_slice() else {
+            panic!("切回后仍应有恰好一个探针");
+        };
+        assert!(block.rendered, "切回图表态出图");
+        assert!(!block.source_view);
+        assert_eq!(block.widget_id, id_first, "往返切换 id 稳定");
+    }
+
+    /// 只读范围验收(「预览只读」):图表态的只读矩形覆盖整块(含图与
+    /// 头带);源码态只覆盖头带(代码体不登记,点进去编辑)。回调态的回落
+    /// 与图表态同宽(整块只读)。
+    #[test]
+    fn read_only_rect_spans_full_block_in_diagram_view_and_header_only_in_source_view() {
+        if cjk_fonts_missing() {
+            eprintln!("本机无 CJK 字体,mermaid 只读范围验收跳过");
+            return;
+        }
+        let ctx = fresh_ctx();
+        // 帧外读原始探针(生产读法带帧号核对,帧外恒空)。
+        let ro_height = |ctx: &egui::Context| {
+            read_only_probe(ctx)
+                .iter()
+                .map(|rect| rect.height())
+                .fold(0.0_f32, f32::max)
+        };
+        // 图表态:整块(头 + 图,TD 图 4 层必然显著高于头带)。
+        render_frame(&ctx, false, TD_DOC, "mermaid-ro-full", true);
+        let diagram_ro = ro_height(&ctx);
+        assert!(
+            diagram_ro > 80.0,
+            "图表态只读矩形应覆盖整块(实际高 {diagram_ro:.0}px)"
+        );
+        // 回落态(sequenceDiagram):同为图表意图,整块只读。
+        render_frame(&ctx, false, SEQ_DOC, "mermaid-ro-fallback", true);
+        let fallback_ro = ro_height(&ctx);
+        assert!(
+            fallback_ro > 60.0,
+            "回落态只读矩形应覆盖整块(实际高 {fallback_ro:.0}px)"
+        );
+        // 源码态:点「源码」后补一帧静默帧物化(标志位帧尾翻转)。
+        let source_toggle = toggle_probe(&ctx)
+            .into_iter()
+            .find(|(_, is_source)| *is_source)
+            .map(|(rect, _)| rect)
+            .expect("前置:切换钮在场");
+        render_frame_events(
+            &ctx,
+            false,
+            SEQ_DOC,
+            "mermaid-ro-fallback",
+            true,
+            vec![
+                egui::Event::PointerMoved(source_toggle.center()),
+                egui::Event::PointerButton {
+                    pos: source_toggle.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: source_toggle.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        render_frame(&ctx, false, SEQ_DOC, "mermaid-ro-fallback", true);
+        assert!(
+            read_probe(&ctx).iter().all(|block| block.source_view),
+            "前置:已切到源码视图"
+        );
+        let source_ro = ro_height(&ctx);
+        assert!(
+            source_ro < 40.0,
+            "源码态只读矩形应只剩头带(实际高 {source_ro:.0}px)"
         );
     }
 }
