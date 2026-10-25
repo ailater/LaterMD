@@ -236,8 +236,9 @@ fn windows_inno_setup_registers_both_extensions_under_hkcu() {
 
 /// 守 Windows 安装器的 PATH 注册(2026-10-24 反馈 #3):终端里
 /// `latermd 文档.md` 直开,靠的是安装目录进了用户 PATH。整段被删/写法
-/// 漂移(RegWriteExPandedValue 误换成 RegWriteStringValue、ChangesEnvironment
-/// 丢失)在本机(Linux,无 iscc)完全测不出来 —— 与文件关联守门同理由。
+/// 漂移(RegWriteExpandStringValue 误换成 RegWriteStringValue、
+/// ChangesEnvironment 丢失)在本机(Linux,无 iscc)完全测不出来 ——
+/// 与文件关联守门同理由。
 #[test]
 fn windows_inno_setup_adds_to_path_via_code_section() {
     let iss = read_packaging("packaging/windows/latermd.iss");
@@ -275,8 +276,8 @@ fn windows_inno_setup_adds_to_path_via_code_section() {
     // 写回必须保 REG_EXPAND_SZ 类型:RegWriteStringValue 会把类型降成
     // REG_SZ,用户 Path 里的 %USERPROFILE% 之类变量从此不再展开
     assert!(
-        iss.contains("RegWriteExPandedValue"),
-        "PATH 写回应使用 RegWriteExPandedValue(保 REG_EXPAND_SZ 类型)"
+        iss.contains("RegWriteExpandStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path'"),
+        "PATH 写回应使用 RegWriteExpandStringValue(保 REG_EXPAND_SZ 类型)"
     );
     // 装时按任务勾选决定写入,卸载时清理本应用条目
     assert!(
@@ -389,6 +390,87 @@ fn extensions_match_runtime_table() {
         "latermd_search::MARKDOWN_EXTENSIONS 变了 —— 三平台关联清单要同步,\
          否则「程序打不开」与「系统不让选」两处症状会分叉"
     );
+}
+
+/// Inno Setup [Code] 段注册表支持函数的**文档白名单**
+/// (jrsoftware.org/ishelp 的 support functions 章)。
+///
+/// 为什么需要:v0.0.11(2026-10-25)真实踩过 —— 把真名
+/// `RegWriteExpandStringValue` 臆造成不存在的 `RegWriteExPandedValue`,
+/// iscc **编译期**报 Unknown identifier 后整个 windows-installer job 红,
+/// Release 缺 setup.exe;而本机没有 iscc,当时守门断言还照着错名写,
+/// 「测试全绿」与「发布物缺失」并存(与 v0.0.7 的 Flags:checked 同款)。
+/// 白名单抄自官方文档而非从 .iss 反推,臆造的新名字会红,现有写法保持绿。
+const INNO_REG_FUNCTIONS: [&str; 7] = [
+    "RegCreateKeyEx",
+    "RegDeleteKeyIncludingSubkeys",
+    "RegDeleteKey",
+    "RegDeleteValue",
+    "RegQueryDWORDValue",
+    "RegQueryStringValue",
+    "RegWriteExpandStringValue",
+];
+
+/// [Code] 段里 `Reg*` 形态的调用标识符必须在文档白名单里。
+///
+/// 节头按「整行 trim 后恰为 `[Code]`」识别 —— `split_once("[Code]")` 会
+/// 命中 `[Tasks]` 注释里提到的「写入在 [Code] 段」字样,把注释当正文扫。
+/// 扫描前先剥注释:整行 `;` 注释、Pascal 花括号 `{ ... }` 注释,以及
+/// 行内 `;` 之后的部分(`;` 在字符串字面量里的情形对 Reg* 扫描无影响 ——
+/// 被截断的行里不再有注册表调用)。
+#[test]
+fn inno_code_section_registry_calls_use_documented_functions() {
+    let iss = read_packaging("packaging/windows/latermd.iss");
+    assert!(
+        iss.lines().any(|line| line.trim() == "[Code]"),
+        ".iss 缺 [Code] 段"
+    );
+    let code_section = iss
+        .lines()
+        .skip_while(|line| line.trim() != "[Code]")
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for line in code_section.lines() {
+        // 剥 `{...}` 花括号注释(本文件均为单行)与 `;` 之后的内容
+        let mut code = String::new();
+        let mut in_brace = false;
+        for ch in line.chars() {
+            match ch {
+                '{' => in_brace = true,
+                '}' => in_brace = false,
+                ';' => break,
+                _ if !in_brace => code.push(ch),
+                _ => {}
+            }
+        }
+        // 抽 `Reg` 开头的标识词:match_indices 只在字符边界命中(Reg 是
+        // ASCII,不会被多字节中文字符截开),命中点的前一个字符不能是
+        // 字母/数字/下划线(否则是 URL 或变量名后缀),词尾取到第一个
+        // 非标识符字符为止
+        for (start, _) in code.match_indices("Reg") {
+            let is_word_start = start == 0 || {
+                let prev = code.as_bytes()[start - 1];
+                !(prev.is_ascii_alphanumeric() || prev == b'_')
+            };
+            if !is_word_start {
+                continue;
+            }
+            let end = code[start..]
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map(|offset| start + offset)
+                .unwrap_or(code.len());
+            let ident = &code[start..end];
+            assert!(
+                INNO_REG_FUNCTIONS.contains(&ident),
+                "[Code] 用了文档里不存在的注册表函数 `{ident}`:iscc 编译期报 \
+                 Unknown identifier,windows-installer 整个发不出来(合法值:Reg* \
+                 支持 {} 等),行:{line}",
+                INNO_REG_FUNCTIONS.join(" / ")
+            );
+        }
+    }
 }
 
 /// 三平台都必须认这两个扩展名 —— 拆成一条是为了报错时直接点出是哪个
