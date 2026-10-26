@@ -888,7 +888,9 @@ pub(crate) fn code_header_buttons(
                     ui.visuals().widgets.hovered.bg_fill,
                 );
             }
-            crate::ui::icons::Icon::Close.draw(
+            // 删除字形与表格工具条同款(2026-10-26 坤哥「弄个一样的」):
+            // 两处破坏性入口统一垃圾桶,悬停/底色行为本就同参。
+            crate::ui::icons::Icon::Trash.draw(
                 painter,
                 crect.center(),
                 crate::ui::tokens::ICON,
@@ -899,7 +901,7 @@ pub(crate) fn code_header_buttons(
             close.sink.borrow_mut().push(close.index);
             ui.ctx().request_repaint();
         }
-        close_response.on_hover_text("关闭代码块,转为普通文本");
+        close_response.on_hover_text("删除代码块围栏,转为普通文本");
         close_rect = Some(crect);
     }
 

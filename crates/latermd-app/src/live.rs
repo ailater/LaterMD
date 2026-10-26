@@ -235,7 +235,7 @@ impl PendingBlockAction {
     fn dialog_text(self) -> (&'static str, String, &'static str, &'static str) {
         match self {
             Self::CodeClose(_) => (
-                "关闭代码块",
+                "删除代码块围栏",
                 "把此代码块转为普通文本。".to_owned(),
                 "围栏标记将被移除,代码内容保留为正文;Ctrl+Z 可撤销。",
                 "转为普通文本",
