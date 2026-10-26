@@ -2768,24 +2768,33 @@ pub fn ui(
                         // decisions-pending 在册)。task 坐标域带块首字节;
                         // emoji 收集器全块共享。
                         let dark_mode = matches!(ui.ctx().theme(), egui::Theme::Dark);
-                        let rich_handler = RichLinkHandler::new(
-                            TaskProbeDomain::Live(range.start),
-                            dark_mode,
-                            ui.visuals().text_color(),
-                            std::rc::Rc::clone(&emoji_rects),
-                        )
-                        .with_ai(crate::ui::rich_widgets::ai_link_color(dark_mode), ai);
                         // 代码块头部按钮(复制 + 关闭):可写列的**围栏代码块**
                         // 才挂关闭 —— 缩进代码块没有围栏可去(关了还是缩进块),
                         // 对照列只读。关闭点击只把块序号推进 sink,确认弹窗
                         // 在帧末统一渲染(见 `pending_block_action`)。
-                        // sink 只在围栏代码块上分配:普通块每帧零分配。
+                        // sink 只在围栏代码块上分配:普通块每帧零分配。mermaid
+                        // 块头的删除钮(mermaid chrome 2026-10-26)也进同一 sink。
                         let fenced_header =
                             kind == BlockKind::Widget && closeable_fence(block_text);
                         let close_sink = if fenced_header && !live.browse_locked {
                             Some(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())))
                         } else {
                             None
+                        };
+                        let rich_handler = {
+                            let handler = RichLinkHandler::new(
+                                TaskProbeDomain::Live(range.start),
+                                dark_mode,
+                                ui.visuals().text_color(),
+                                std::rc::Rc::clone(&emoji_rects),
+                            )
+                            .with_ai(crate::ui::rich_widgets::ai_link_color(dark_mode), ai);
+                            match close_sink.as_ref() {
+                                Some(sink) => {
+                                    handler.with_code_close(index, std::rc::Rc::clone(sink))
+                                }
+                                None => handler,
+                            }
                         };
                         let with_close = close_sink.as_ref().map(|sink| {
                             let sink = std::rc::Rc::clone(sink);
@@ -7286,6 +7295,88 @@ mod tests {
         assert!(
             guarded.is_none(),
             "mermaid 图表态的点击不得连带进编辑(预览只读)"
+        );
+    }
+
+    /// mermaid 块删除流程全路径(live 列):源码态下点块头删除钮 →
+    /// pending_block_action 挂起,且源码视图态不得被重置(2026-10-26
+    /// 真机「取消删除后视图跳回图表」回归)。
+    #[test]
+    fn live_mermaid_delete_click_keeps_source_view_and_pends_action() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorBuffer::new("```mermaid\nflowchart TD\nA --> B\n```\n\n正文。\n");
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(
+            crate::ui::mermaid::read_probe(&ctx)[0].rendered,
+            "合法图应出图"
+        );
+        // 「源码」切换钮(头带左起第一枚,探针标注 is_source)。
+        let src_toggle = crate::ui::mermaid::toggle_probe(&ctx)
+            .into_iter()
+            .find(|(_, is_source)| *is_source)
+            .map(|(rect, _)| rect)
+            .expect("mermaid 块头应挂出切换钮");
+        for events in click_events(src_toggle.center()) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert!(
+            crate::ui::mermaid::read_probe(&ctx)[0].source_view,
+            "已切到源码态"
+        );
+        // 删除钮 = 按钮探针第二枚(复制之后)。
+        let buttons = frame.button_rects.clone();
+        assert!(buttons.len() >= 2, "可写列头带应有复制+删除:{buttons:?}");
+        for events in click_events(buttons[1].center()) {
+            live_frame(
+                &ctx,
+                events,
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+        }
+        live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        assert_eq!(
+            live.pending_block_action,
+            Some(PendingBlockAction::CodeClose(0)),
+            "删除点击应挂起 CodeClose(mermaid 块 = 块 0)"
+        );
+        assert!(
+            crate::ui::mermaid::read_probe(&ctx)[0].source_view,
+            "删除点击后源码态不得被重置"
         );
     }
 

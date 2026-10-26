@@ -117,6 +117,9 @@ pub(crate) struct RichLinkHandler {
     /// Live 侧每块一个 handler,序号在块内从 0 起;widget id 另有块标签
     /// 的 id 命名空间兜住,两块各序 0 不相撞。
     mermaid_count: Cell<usize>,
+    /// 可写列的代码块删除入口(块序号 + CodeClose sink,`Some` 时 mermaid
+    /// 块头挂删除钮进既有确认弹窗通道;预览/估高臂为 None)。
+    code_close: Option<(usize, std::rc::Rc<std::cell::RefCell<Vec<usize>>>)>,
     /// 本帧各卡片的 widget id(渲染序);测试借它断言 id 稳定性。
     card_ids: RefCell<Vec<egui::Id>>,
     /// 本帧画过的 `emoji://` inline widget 区块(屏幕坐标,含纹理缺失只留
@@ -145,6 +148,7 @@ impl RichLinkHandler {
             task_domain,
             card_count: Cell::new(0),
             mermaid_count: Cell::new(0),
+            code_close: None,
             card_ids: RefCell::new(Vec::new()),
             emoji_rects,
         }
@@ -159,6 +163,17 @@ impl RichLinkHandler {
         self.color = Some(color);
         self.streaming = ai.is_streaming();
         self.last_prompt = ai.last_prompt.clone();
+        self
+    }
+
+    /// D2' 可写列代码块删除入口(mermaid 块头删除钮 → CodeClose 确认弹窗)。
+    /// 预览/估高臂不挂(只读面无删除)。
+    pub(crate) fn with_code_close(
+        mut self,
+        block_index: usize,
+        sink: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+    ) -> Self {
+        self.code_close = Some((block_index, sink));
         self
     }
 
@@ -449,7 +464,13 @@ impl LinkHandler for RichLinkHandler {
         if crate::ui::mermaid::is_mermaid_info(language) {
             let index = self.mermaid_count.get();
             self.mermaid_count.set(index + 1);
-            return Some(crate::ui::mermaid::block_widget(ui, index, text));
+            let close = self.code_close.as_ref().map(|(block_index, sink)| {
+                crate::ui::rich_widgets::CodeClose {
+                    index: *block_index,
+                    sink,
+                }
+            });
+            return Some(crate::ui::mermaid::block_widget(ui, index, text, close));
         }
         if self.color.is_none() || !is_instruction_info(language) {
             return None;

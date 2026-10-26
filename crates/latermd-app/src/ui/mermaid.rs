@@ -15,7 +15,7 @@
 
 use eframe::egui;
 use egui::epaint::Shape;
-use egui_markdown::MarkdownLabel;
+use egui_markdown::layout::highlight_code;
 use latermd_render::mermaid as md;
 use latermd_render::mermaid::{Diagram, TextMeasurer};
 use std::cell::RefCell;
@@ -51,17 +51,32 @@ fn source_view_key(ui: &egui::Ui, index: usize) -> egui::Id {
     mermaid_widget_id(ui, index).with("src-view")
 }
 
+/// 头带高度:与 vendored `render_code_block` 的 CODE_BLOCK_HEADER_HEIGHT
+/// 同值(那边是私有常量,宿主侧照抄;上游若调,最坏是头带高度差 1-2px)。
+const HEADER_HEIGHT: f32 = 24.0;
+
 /// mermaid 块渲染入口(vendored `block_code_widget` 的分派目标)。
 ///
 /// `index` 是本帧文档序的 mermaid 块序号(由调用方 handler 按渲染顺序
 /// 递增,照 ```ai 卡的 `card_count` 模式)—— widget id 与缓存键的稳定
 /// 成分,内容变化不改变它。`text` 是围栏内纯文本(vendored parser 已去
-/// 块尾换行,不经任何 Markdown 再解析,铁律 1)。
+/// 块尾换行,不经任何 Markdown 再解析,铁律 1)。`close` 是可写列传入的
+/// 删除入口(预览/估高臂为 None):进既有 CodeClose 确认弹窗通道。
 ///
-/// 块头常驻「图表/源码」切换 + 复制(2026-10-24):图表态含解析回落
-/// (回落显示的也是源码,但**意图**仍是图表)整块只读 —— 点击落图不
-/// 进编辑,改图走「源码」钮;源码态只免头带,点代码体即进编辑。
-pub(crate) fn block_widget(ui: &mut egui::Ui, index: usize, text: &str) -> egui::Response {
+/// 代码块同款外框(2026-10-26,坤哥「样式弄成和代码块类似」):代码底 +
+/// 描边 + 圆角 + 顶部 24px 头带,功能按钮全在头带**右侧** —— 左→右:
+/// 图表/源码切换、删除(🗑)、复制(⧉);绘图区垫「画纸」底色与块底
+/// 区分。图表态含解析回落(回落显示的也是源码,但**意图**仍是图表)
+/// 整块只读 —— 点击落图不进编辑,改图走「源码」钮;源码态只免头带,
+/// 点代码体即进编辑。
+pub(crate) fn block_widget(
+    ui: &mut egui::Ui,
+    index: usize,
+    text: &str,
+    close: Option<crate::ui::rich_widgets::CodeClose<'_>>,
+) -> egui::Response {
+    let style = egui_markdown::global_style(ui.ctx());
+    let p = &style.code_block.padding;
     let font = diagram_font(ui);
     let view_key = source_view_key(ui, index);
     let show_source = ui
@@ -69,56 +84,81 @@ pub(crate) fn block_widget(ui: &mut egui::Ui, index: usize, text: &str) -> egui:
         .data(|d| d.get_temp::<bool>(view_key))
         .unwrap_or(false);
     let top = ui.cursor().top();
-    let header_rect = view_header(ui, text, show_source, view_key);
-    let response = if show_source {
-        paint_source(ui, index, text, None, true)
-    } else {
-        match cached_diagram(ui, index, text, &font) {
-            Ok(diagram) => paint_diagram(ui, index, &diagram, &font),
-            Err(err) => paint_fallback(ui, index, text, &err),
+    let stroke = egui::Stroke::new(
+        style.code_block.stroke_width,
+        ui.visuals().widgets.noninteractive.bg_stroke.color,
+    );
+    let frame = egui::Frame::NONE
+        .fill(ui.visuals().code_bg_color)
+        .stroke(stroke)
+        .corner_radius(style.code_block.corner_radius)
+        .inner_margin(egui::Margin {
+            left: p[0] as i8,
+            top: (p[1] + HEADER_HEIGHT) as i8,
+            right: p[2] as i8,
+            bottom: p[3] as i8,
+        });
+    let frame_response = frame.show(ui, |ui| {
+        // 撑满整列:图表态本就按可用宽画,源码态同宽 —— 两态切换框宽
+        // 零变化(与 vendored 非收缩代码块同款)。
+        ui.set_min_width(ui.available_width());
+        if show_source {
+            paint_source(ui, index, text, None, true)
+        } else {
+            match cached_diagram(ui, index, text, &font) {
+                Ok(diagram) => paint_diagram(ui, index, &diagram, &font),
+                Err(err) => paint_fallback(ui, index, text, &err),
+            }
         }
-    };
+    });
+    let outer = frame_response.response.rect;
+    // 头带覆盖在顶部内距带上(right_to_left,代码块头部同款):先加的
+    // 贴右 —— 复制最右、删除次之、图表/源码切换组最左。lang 标签传空
+    // 串隐藏:切换钮已表明内容,重复的「mermaid」只挤位置。
+    let header_rect = egui::Rect::from_min_max(
+        egui::pos2(outer.left(), outer.top()),
+        egui::pos2(outer.right(), outer.top() + HEADER_HEIGHT),
+    );
+    let mut header_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(header_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    crate::ui::rich_widgets::code_header_buttons(&mut header_ui, text, "", close);
+    // right_to_left 先加贴右:欲读序「图表 源码」,先源码后图表。
+    if view_toggle(
+        &mut header_ui,
+        show_source,
+        "源码",
+        true,
+        "显示 mermaid 源码(点击代码进入编辑)",
+    ) {
+        header_ui.ctx().data_mut(|d| d.insert_temp(view_key, true));
+        header_ui.ctx().request_repaint();
+    }
+    if view_toggle(
+        &mut header_ui,
+        !show_source,
+        "图表",
+        false,
+        "渲染为流程图(只读)",
+    ) {
+        header_ui.ctx().data_mut(|d| d.insert_temp(view_key, false));
+        header_ui.ctx().request_repaint();
+    }
     let bottom = ui.cursor().top().max(top + 1.0);
     let full = egui::Rect::from_min_max(
         egui::pos2(ui.min_rect().left(), top),
         egui::pos2(ui.min_rect().right(), bottom),
     );
     register_read_only_rect(ui.ctx(), if show_source { header_rect } else { full });
-    response
-}
-
-/// 块头:查看态切换(图表/源码)+ 复制与语言标签(复用代码块头部件,
-/// 观感/已复制 ✓ 反馈/点击排除探针全部同源)。返回头带矩形 —— 源码态
-/// 的只读排除范围(代码体不排除,点进编辑)。
-fn view_header(ui: &mut egui::Ui, text: &str, show_source: bool, view_key: egui::Id) -> egui::Rect {
-    let top = ui.cursor().top();
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = crate::ui::tokens::SPACE_XS;
-        if view_toggle(ui, !show_source, "图表", false, "渲染为流程图(只读)") {
-            ui.ctx().data_mut(|d| d.insert_temp(view_key, false));
-            ui.ctx().request_repaint();
-        }
-        if view_toggle(
-            ui,
-            show_source,
-            "源码",
-            true,
-            "显示 mermaid 源码(点击代码进入编辑)",
-        ) {
-            ui.ctx().data_mut(|d| d.insert_temp(view_key, true));
-            ui.ctx().request_repaint();
-        }
-        crate::ui::rich_widgets::code_header_buttons(ui, text, "mermaid", None);
-    });
-    let bottom = ui.cursor().top();
-    egui::Rect::from_min_max(
-        egui::pos2(ui.min_rect().left(), top),
-        egui::pos2(ui.min_rect().right(), bottom),
-    )
+    frame_response.response
 }
 
 /// 查看态小切换钮:`selected` 决定强调与弱化,`is_source` 只用于测试探针
-/// 标注。命中返回 true(切换与重绘由调用方处理)。
+/// 标注。命中返回 true(切换与重绘由调用方处理)。固定 20px 高自绘
+/// (表格工具条同手法):selectable_label 的行盒吃主题行距投影,在 24px
+/// 头带里会撑到 29px 溢出(2026-10-26 实测)。
 fn view_toggle(
     ui: &mut egui::Ui,
     selected: bool,
@@ -126,15 +166,35 @@ fn view_toggle(
     is_source: bool,
     hint: &str,
 ) -> bool {
-    let response = ui.selectable_label(
-        selected,
-        egui::RichText::new(label).small().color(if selected {
-            ui.visuals().text_color()
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let text_color = if selected {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let text_size = ui.fonts_mut(|f| {
+        f.layout_no_wrap(label.to_owned(), font.clone(), text_color)
+            .size()
+    });
+    let size = (text_size + egui::vec2(2.0 * crate::ui::tokens::SPACE_XS, 0.0))
+        .max(egui::vec2(20.0, 20.0));
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let bg = if selected {
+            Some(ui.visuals().selection.bg_fill)
+        } else if response.hovered() {
+            Some(ui.visuals().widgets.hovered.bg_fill)
         } else {
-            ui.visuals().weak_text_color()
-        }),
-    );
-    register_toggle_rect(ui.ctx(), response.rect, is_source);
+            None
+        };
+        if let Some(bg) = bg {
+            painter.rect_filled(rect, crate::ui::tokens::RADIUS_SM, bg);
+        }
+        let galley = painter.layout(label.to_owned(), font, text_color, f32::INFINITY);
+        painter.galley(rect.center() - galley.size() / 2.0, galley, text_color);
+    }
+    register_toggle_rect(ui.ctx(), rect, is_source);
     let clicked = response.clicked();
     response.on_hover_text(hint);
     clicked
@@ -258,6 +318,12 @@ fn paint_diagram(
     if !ui.is_rect_visible(rect) {
         return response;
     }
+    // 「画纸」底色(2026-10-26,坤哥「绘图的背景色和这个块的背景色区分
+    // 下」):外框是代码底,绘图区垫 **内容区底**(window_fill —— 亮色
+    // 纯白 / 暗色 #292A2D,皮肤里与代码底恒反差;extreme_bg 在本应用皮肤
+    // 里与代码底同 token,不可用),小圆角成画布感。
+    ui.painter()
+        .rect_filled(rect, 4.0, ui.visuals().window_fill);
     // 当帧 visuals 取色(须在 painter 借用 ui 之前取全):节点盒与既有
     // 卡片(AI 指令卡/代码块)同档的 inactive 底 + inactive 描边;连线/
     // 箭头取弱化前景,文字取正文色,边标签垫底用 faint 底。
@@ -426,6 +492,9 @@ fn paint_arrow(
 /// 两个消费方:`source`(用户切到「源码」视图,无提示行,块可点进
 /// 编辑)与 `fallback`(解析/布局失败含流式围栏未闭合的回落,带提示
 /// 行,整块只读)。
+/// 源码体:高亮 galley 直接铺在块外框的内容区(2026-10-26 外框上收后
+/// 不再嵌套 MarkdownLabel —— 那会画出第二层代码框;超宽横向滚动,与
+/// 代码块正文同管线同参)。
 fn paint_source(
     ui: &mut egui::Ui,
     index: usize,
@@ -437,16 +506,19 @@ fn paint_source(
         ui.label(egui::RichText::new(note_text).small().weak())
             .on_hover_text(err)
     });
-    let fenced = format!("```mermaid\n{text}\n```");
-    let id_salt = if note.is_some() { "fallback" } else { "source" };
-    MarkdownLabel::new(mermaid_widget_id(ui, index).with(id_salt), &fenced)
-        .font(diagram_font(ui))
-        .wrap()
-        .scroll_code_blocks(true)
-        .shrink_code_blocks(true)
-        .code_block_min_width(Some(200.0))
-        .code_block_buttons(&crate::ui::rich_widgets::code_copy_buttons)
-        .show(ui);
+    let style = egui_markdown::global_style(ui.ctx());
+    let mut job = highlight_code(ui, text, "mermaid", style.code_font_size, None);
+    job.wrap.max_width = f32::INFINITY;
+    job.break_on_newline = true;
+    job.keep_trailing_whitespace = true;
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    egui::ScrollArea::horizontal()
+        .id_salt(mermaid_widget_id(ui, index).with("src-scroll"))
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+            ui.painter()
+                .galley(rect.min, galley, ui.visuals().text_color());
+        });
     write_probe(
         ui,
         index,
@@ -458,7 +530,7 @@ fn paint_source(
             edges: 0,
         },
     );
-    // 提示行响应只是悬停提示载体,块交互响应取代码块本体的。
+    // 提示行响应只是悬停提示载体,块交互响应取外框本体的。
     note_response.unwrap_or_else(|| ui.response())
 }
 
@@ -613,6 +685,7 @@ mod tests {
     use crate::fonts;
     use crate::theme::{ThemeMode, ThemeSettings};
     use eframe::egui::RawInput;
+    use egui_markdown::MarkdownLabel;
 
     /// TD 验收样例(与 M1 单测同图):4 盒 4 边,三种形状 + 两条带标签边。
     const TD_DOC: &str = concat!(
@@ -662,8 +735,13 @@ mod tests {
         colors: Vec<egui::Color32>,
         node_fill: egui::Color32,
         code_bg: egui::Color32,
+        /// 绘图区画纸底(2026-10-26 外框验收:与块代码底恒可区分)。
+        paper: egui::Color32,
         copy_buttons: Vec<egui::Rect>,
         code_bg_bbox: Option<(f32, f32, f32, f32)>,
+        /// code_bg 顶点清单(2026-10-26 mermaid 外框也涂代码底后,整体
+        /// bbox 是多块的并集;按 y 分隔单块的断言用这份原始清单)。
+        code_bg_vertices: Vec<(f32, f32)>,
     }
 
     /// 生产链路渲染一帧:出厂字体 + `ThemeSettings::default().apply` +
@@ -705,10 +783,15 @@ mod tests {
             events,
             ..RawInput::default()
         };
-        let (mut node_fill, mut code_bg) = (egui::Color32::BLACK, egui::Color32::WHITE);
+        let (mut node_fill, mut code_bg, mut paper) = (
+            egui::Color32::BLACK,
+            egui::Color32::WHITE,
+            egui::Color32::WHITE,
+        );
         let mut output = ctx.run_ui(raw, |panel| {
             node_fill = panel.visuals().widgets.inactive.bg_fill;
             code_bg = panel.visuals().code_bg_color;
+            paper = panel.visuals().window_fill;
             let font = egui::FontId::new(
                 crate::theme::editor_font_size(panel.ctx()),
                 fonts::preview_body_family(panel.ctx()),
@@ -733,6 +816,7 @@ mod tests {
         output.drop_without_applying_deltas();
         let mut colors = Vec::new();
         let mut bbox: Option<(f32, f32, f32, f32)> = None;
+        let mut code_bg_vertices = Vec::new();
         for cp in &primitives {
             if let egui::epaint::Primitive::Mesh(mesh) = &cp.primitive {
                 for vertex in &mesh.vertices {
@@ -741,6 +825,7 @@ mod tests {
                     }
                     if vertex.color == code_bg {
                         let (x, y) = (vertex.pos.x, vertex.pos.y);
+                        code_bg_vertices.push((x, y));
                         bbox = Some(match bbox {
                             None => (x, y, x, y),
                             Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
@@ -754,8 +839,10 @@ mod tests {
             colors,
             node_fill,
             code_bg,
+            paper,
             copy_buttons: crate::ui::rich_widgets::copy_button_probe(ctx).1,
             code_bg_bbox: bbox,
+            code_bg_vertices,
         }
     }
 
@@ -926,6 +1013,208 @@ mod tests {
             // 复制按钮经嵌套 label 的 code_block_buttons 挂载(仍可用)。
             assert!(!ev.copy_buttons.is_empty(), "{name}:回落块应保留复制按钮");
         }
+    }
+
+    /// 代码块同款外框验收(2026-10-26,坤哥「样式弄成和代码块类似 +
+    /// 功能按钮都弄到右侧 + 绘图背景与块底区分」):块底 = 代码底,绘图
+    /// 区垫画纸底(extreme_bg,与代码底恒反差);头带三组功能钮(图表/
+    /// 源码切换、删除、复制)全部落在头带(顶部 24px)**右半**。
+    #[test]
+    fn mermaid_block_has_code_frame_with_right_aligned_header() {
+        if cjk_fonts_missing() {
+            eprintln!("本机无 CJK 字体,mermaid 外框验收跳过");
+            return;
+        }
+        let ctx = fresh_ctx();
+        let ev = render_frame(&ctx, false, TD_DOC, "mermaid-chrome", true);
+        let [block] = ev.probe.as_slice() else {
+            panic!("应有且仅有一个 mermaid 块探针");
+        };
+        assert!(block.rendered, "合法图应出图");
+        // 块底 = 代码底;画纸底在场且与块底、节点底均可区分。
+        assert!(ev.colors.contains(&ev.code_bg), "外框应涂代码底");
+        assert!(
+            ev.colors.contains(&ev.paper),
+            "绘图区应垫画纸底 {:?}(实际 {:?})",
+            ev.paper,
+            ev.colors
+        );
+        assert_ne!(ev.paper, ev.code_bg, "画纸底应与块底可区分");
+        assert_ne!(ev.paper, ev.node_fill, "画纸底应与节点底可区分");
+        // 头带几何:整体代码底 bbox ≈ 外框;全部按钮 rect 落在顶部 24px
+        // 带的右半(预览 handler 不挂删除 → 探针只有复制一枚 + 切换两枚)。
+        let (bx0, by0, bx1, _) = ev.code_bg_bbox.expect("外框应有代码底");
+        assert!(
+            bx1 - bx0 >= 300.0,
+            "外框应撑满整列(实际 {bx0:.0}..{bx1:.0})"
+        );
+        for rect in &ev.copy_buttons {
+            assert!(
+                rect.top() >= by0 - 2.0 && rect.bottom() <= by0 + 26.0,
+                "按钮应落在头带({rect:?} vs 带顶 {by0:.0})"
+            );
+            assert!(
+                rect.left() > (bx0 + bx1) * 0.5,
+                "按钮应在外框右半({rect:?} vs 中线 {:.0})",
+                (bx0 + bx1) * 0.5
+            );
+        }
+        for (rect, _) in toggle_probe(&ctx) {
+            assert!(
+                rect.top() >= by0 - 2.0 && rect.bottom() <= by0 + 26.0,
+                "切换钮应落在头带({rect:?} vs 带顶 {by0:.0})"
+            );
+            assert!(
+                rect.left() > (bx0 + bx1) * 0.5,
+                "切换钮应在外框右半({rect:?})"
+            );
+        }
+        assert_eq!(ev.copy_buttons.len(), 1, "预览面只有复制钮");
+        assert_eq!(toggle_probe(&ctx).len(), 2, "图表/源码两枚切换钮");
+    }
+
+    /// 删除通道(2026-10-26):可写列 handler 挂 code_close 后,块头第二
+    /// 枚按钮(删除,探针紧随复制之后)点击把块序号推进 CodeClose sink
+    /// —— 预览面(未挂)无删除钮。
+    #[test]
+    fn mermaid_header_delete_pushes_block_index_to_sink() {
+        if cjk_fonts_missing() {
+            eprintln!("本机无 CJK 字体,mermaid 删除验收跳过");
+            return;
+        }
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let ctx = fresh_ctx();
+        ThemeSettings::default().apply(&ctx, ThemeMode::Dark);
+        ctx.options_mut(|o| o.tessellation_options.feathering = false);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(700.0, 900.0));
+        let sink = Rc::new(RefCell::new(Vec::new()));
+        let render = |events: Vec<egui::Event>| {
+            let raw = RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..RawInput::default()
+            };
+            let out = ctx.run_ui(raw, |panel| {
+                let handler = crate::ui::ai_card::RichLinkHandler::new(
+                    crate::ui::rich_widgets::TaskProbeDomain::Preview,
+                    false,
+                    egui::Color32::WHITE,
+                    Default::default(),
+                )
+                .with_code_close(7, Rc::clone(&sink));
+                MarkdownLabel::new(egui::Id::new("mermaid-delete"), TD_DOC)
+                    .font(egui::FontId::new(
+                        crate::theme::editor_font_size(panel.ctx()),
+                        fonts::preview_body_family(panel.ctx()),
+                    ))
+                    .wrap()
+                    .link_handler(&handler)
+                    .show(panel);
+            });
+            out.drop_without_applying_deltas();
+        };
+        render(Vec::new());
+        let buttons = crate::ui::rich_widgets::copy_button_probe(&ctx).1;
+        assert!(buttons.len() >= 2, "头带应有复制 + 删除两枚:{buttons:?}");
+        let close_rect = buttons[1];
+        render(vec![
+            egui::Event::PointerMoved(close_rect.center()),
+            egui::Event::PointerButton {
+                pos: close_rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: close_rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]);
+        assert_eq!(
+            sink.borrow().as_slice(),
+            &[7],
+            "点删除钮应把块序号推进 CodeClose sink"
+        );
+    }
+
+    /// 源码态下点删除钮,源码视图标志不得被重置(2026-10-26 真机
+    /// 「取消删除后视图跳回图表」回归)。
+    #[test]
+    fn delete_click_keeps_source_view_state() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let ctx = fresh_ctx();
+        ThemeSettings::default().apply(&ctx, ThemeMode::Dark);
+        ctx.options_mut(|o| o.tessellation_options.feathering = false);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(700.0, 900.0));
+        let sink = Rc::new(RefCell::new(Vec::new()));
+        let render = |events: Vec<egui::Event>| {
+            let raw = RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..RawInput::default()
+            };
+            let out = ctx.run_ui(raw, |panel| {
+                let handler = crate::ui::ai_card::RichLinkHandler::new(
+                    crate::ui::rich_widgets::TaskProbeDomain::Preview,
+                    false,
+                    egui::Color32::WHITE,
+                    Default::default(),
+                )
+                .with_code_close(3, Rc::clone(&sink));
+                MarkdownLabel::new(egui::Id::new("mermaid-del-src"), TD_DOC)
+                    .font(egui::FontId::new(
+                        crate::theme::editor_font_size(panel.ctx()),
+                        fonts::preview_body_family(panel.ctx()),
+                    ))
+                    .wrap()
+                    .link_handler(&handler)
+                    .show(panel);
+            });
+            out.drop_without_applying_deltas();
+        };
+        let click = |pos: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ]
+        };
+        render(Vec::new());
+        assert!(!read_probe(&ctx)[0].source_view, "默认图表态");
+        // 切「源码」。
+        let src_toggle = toggle_probe(&ctx)
+            .into_iter()
+            .find(|(_, is_source)| *is_source)
+            .map(|(rect, _)| rect)
+            .expect("块头应挂出「源码」切换钮");
+        render(click(src_toggle.center()));
+        render(Vec::new());
+        assert!(read_probe(&ctx)[0].source_view, "已切到源码态");
+        // 点删除钮(按钮探针第二枚,复制之后)→ sink 进块序号,且视图
+        // 仍是源码态。
+        let buttons = crate::ui::rich_widgets::copy_button_probe(&ctx).1;
+        assert!(buttons.len() >= 2, "头带应有复制+删除:{buttons:?}");
+        render(click(buttons[1].center()));
+        render(Vec::new());
+        assert_eq!(sink.borrow().as_slice(), &[3], "删除点击应进 sink");
+        assert!(
+            read_probe(&ctx)[0].source_view,
+            "删除点击后源码态不得被重置"
+        );
     }
 
     /// #51 M3 验收 4(回落复制可用):点回落块头部的复制按钮 → 整块
@@ -1176,7 +1465,29 @@ mod tests {
         let plain = render_frame(&ctx, false, rust_doc, "mermaid-mixed-plain", true);
         let mixed = render_frame(&ctx, false, mixed_doc, "mermaid-mixed-mixed", true);
         let (px0, py0, px1, py1) = plain.code_bg_bbox.expect("纯 rust 文档应有代码块背景");
-        let (mx0, my0, mx1, my1) = mixed.code_bg_bbox.expect("混排文档应有代码块背景");
+        // mermaid 外框(2026-10-26)也涂代码底,整体 bbox 是「mermaid 框 ∪
+        // rust 块」的并集 —— 按探针里 mermaid 块的最低节点 y 分隔,只取
+        // 其下方的顶点还原 rust 块自身的几何。
+        let mermaid_bottom = mixed
+            .probe
+            .iter()
+            .filter(|b| b.rendered)
+            .flat_map(|b| b.nodes.iter().map(|(_, r, _)| r.max.y))
+            .fold(0.0f32, f32::max)
+            + 20.0;
+        let mut rust_vertices = mixed
+            .code_bg_vertices
+            .iter()
+            .filter(|(_, y)| *y > mermaid_bottom);
+        let (mut mx0, mut my0, mut mx1, mut my1) = rust_vertices
+            .next()
+            .map_or((0.0, 0.0, 0.0, 0.0), |(x, y)| (*x, *y, *x, *y));
+        for (x, y) in rust_vertices {
+            mx0 = mx0.min(*x);
+            my0 = my0.min(*y);
+            mx1 = mx1.max(*x);
+            my1 = my1.max(*y);
+        }
         assert!(
             ((px1 - px0) - (mx1 - mx0)).abs() < 1.0,
             "代码块背景宽应不变(纯 {px1:.0}-{px0:.0} vs 混 {mx1:.0}-{mx0:.0})"
