@@ -51,9 +51,11 @@ fn source_view_key(ui: &egui::Ui, index: usize) -> egui::Id {
     mermaid_widget_id(ui, index).with("src-view")
 }
 
-/// 头带高度:与 vendored `render_code_block` 的 CODE_BLOCK_HEADER_HEIGHT
-/// 同值(那边是私有常量,宿主侧照抄;上游若调,最坏是头带高度差 1-2px)。
-const HEADER_HEIGHT: f32 = 24.0;
+/// 头带高度:vendored `render_code_block` 的 CODE_BLOCK_HEADER_HEIGHT 是
+/// 24,但那边按钮只有一枚且无选中底片,24 里居中仅剩 2px 上缝;mermaid
+/// 头带是「切换组+删除+复制」三组,选中片贴着顶边显挤(2026-10-26 坤哥
+/// 「按钮太靠上了」)——放宽到 28,居中后上下各 4px 呼吸。
+const HEADER_HEIGHT: f32 = 28.0;
 
 /// mermaid 块渲染入口(vendored `block_code_widget` 的分派目标)。
 ///
