@@ -1144,6 +1144,10 @@ mod tests {
     /// 「取消删除后视图跳回图表」回归)。
     #[test]
     fn delete_click_keeps_source_view_state() {
+        if cjk_fonts_missing() {
+            eprintln!("本机无 CJK 字体,mermaid 删除回归跳过");
+            return;
+        }
         use std::cell::RefCell;
         use std::rc::Rc;
         let ctx = fresh_ctx();
