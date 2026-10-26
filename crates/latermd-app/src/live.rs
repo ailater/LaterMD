@@ -3890,19 +3890,31 @@ fn draw_active_code_block(
                         .sum::<f32>()
                 })
                 .fold(0.0_f32, f32::max);
+            // 行距偏好归零(theme.rs 把用户的「行距」设置全局投影到
+            // spacing.extra_text_line_spacing):TextEdit 的 min_inner_height
+            // 按行数 × (行高 + 该加值) 取整框,会把编辑框撑得比富渲染代码
+            // 行高出一截(2026-10-24 坤哥反馈「编辑的时候还是会稍微高一点」
+            // 实测 +15.5px)。富渲染代码行不吃这个偏好,原地编辑同参:作用
+            // 域内归零,出域即恢复。
+            let editor_line_spacing = ui.spacing().extra_text_line_spacing;
+            ui.spacing_mut().extra_text_line_spacing = 0.0;
+            // 行首补偿必须走 frame 的 inner_margin:egui 0.36 的 `.margin()`
+            // 只是「未设 frame 时的默认内距」,一旦给了自定义 `.frame()` 就被
+            // 丢弃 —— 用 `.margin()` 时编辑态字形整体左移一个 pad 空格宽,
+            // 进/出编辑整块文字横向弹跳(被感知为「闪一下」)。
             let edit = egui::TextEdit::multiline(&mut buffer)
                 .id(edit_id)
                 .font(code_font.clone())
                 .desired_width((content_width + space_w).max(24.0))
                 .desired_rows(rows.clamp(1, 40))
-                .frame(egui::Frame::NONE.inner_margin(egui::Margin::ZERO))
-                .lock_focus(true)
-                .margin(egui::Margin {
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin {
                     left: space_w.round() as i8,
                     ..egui::Margin::ZERO
-                })
+                }))
+                .lock_focus(true)
                 .layouter(&mut layouter);
             let output = edit.show(ui);
+            ui.spacing_mut().extra_text_line_spacing = editor_line_spacing;
             if let Some(lchar) = land {
                 let mut state = output.state.clone();
                 state
@@ -6034,12 +6046,31 @@ mod tests {
             .expect("编辑态仍渲染代码正文")
             .1;
         assert!(
-            (edit_body.left() - browse_body.left()).abs() < 2.0,
-            "正文 x 漂移(左内距未同参?):浏览 {browse_body:?} vs 编辑 {edit_body:?}"
-        );
-        assert!(
             (edit_body.top() - browse_body.top()).abs() < 2.0,
             "正文 y 漂移(行高未同参?):浏览 {browse_body:?} vs 编辑 {edit_body:?}"
+        );
+        // 字形级 x 同位:浏览态 galley 每行带一个 pad 前导空格(占_advance_
+        // 不产字形,galley 原点/文本 shape rect 都看不见它),编辑态用 frame
+        // 左内距等量补偿 —— 断言必须比到首个字形 x,shape rect 级测不出
+        // (2026-10-24 坤哥反馈「往左缩进」= 这 6-8px 漏补偿;`.margin()`
+        // 在设了自定义 `.frame()` 时被 egui 丢弃,补偿必须走 frame 内距)。
+        let browse_glyph_x = frame
+            .glyph_chars
+            .iter()
+            .find(|(text, _)| text.contains("let a = 1;"))
+            .and_then(|(_, glyphs)| glyphs.first())
+            .map(|(_, pos)| pos.x)
+            .expect("浏览态首字形已收集");
+        let edit_glyph_x = frame
+            .glyph_chars
+            .iter()
+            .find(|(text, _)| text.contains("let a = 1;"))
+            .and_then(|(_, glyphs)| glyphs.first())
+            .map(|(_, pos)| pos.x)
+            .expect("编辑态首字形已收集");
+        assert!(
+            (edit_glyph_x - browse_glyph_x).abs() < 1.0,
+            "首字形 x 漂移(pad 空格补偿缺失?):浏览 {browse_glyph_x} vs 编辑 {edit_glyph_x}"
         );
         let edit_geometry =
             egui_markdown::code_block_geometry(&ctx, editor_id.with(("live-code", 1)))
@@ -6265,6 +6296,93 @@ mod tests {
             assert!(
                 doc.contains("```") == frame.texts.iter().any(|(text, _)| text.contains("```")),
                 "源码 TextEdit 保留围栏可见:{doc:?}"
+            );
+        }
+    }
+
+    /// 真字体 + CJK 代码内容下的逐像素同位(应用安装的 CJK face 行高与
+    /// 默认字体不同,坤哥 2026-10-24 反馈编辑态整体偏高,本测试量化)。
+    #[test]
+    fn active_code_block_real_fonts_cjk_keeps_browse_geometry() {
+        for ppp in [1.0f32, 1.25, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            let installed = crate::fonts::install(&ctx);
+            ctx.set_pixels_per_point(ppp);
+            ctx.set_theme(egui::Theme::Light);
+            let style = crate::theme::effective_markdown_style(
+                &ctx,
+                egui_markdown::MarkdownStyle::default(),
+            );
+            egui_markdown::set_style(&ctx, style);
+            // 模拟 theme.rs 的「行距」偏好全局投影:TextEdit 的
+            // min_inner_height 会据此撑高,原地编辑必须域内归零同参。
+            for theme in [egui::Theme::Light, egui::Theme::Dark] {
+                ctx.style_mut_of(theme, |style| {
+                    style.spacing.extra_text_line_spacing = 5.0;
+                });
+            }
+            run_real_fonts_case(&ctx, ppp, installed.clone());
+        }
+    }
+
+    fn run_real_fonts_case(ctx: &egui::Context, ppp: f32, _installed: Option<String>) {
+        let ctx = ctx.clone();
+        {
+            let mut editor = EditorBuffer::new(
+                "```rust\nfn main() {\n    println!(\"你好, LaterMD!\");\n}\n```\n",
+            );
+            let mut preview = PreviewState::new(&editor);
+            let mut cursor = OutlineCursor::default();
+            let mut live = LiveState::default();
+            let editor_id = egui::Id::new("live-copy-test");
+            let _ = live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            let browse = egui_markdown::code_block_geometry(
+                &ctx,
+                editor_id.with(("live-render", 0)).with(("code_block", 0)),
+            )
+            .expect("browse geom");
+            live.active = Some(0);
+            live.sync(&editor, None);
+            live.pending_caret = Some((0, 0));
+            let _ = live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            // 落地后再跑几帧(焦点授予/状态重载后的稳态),真机量的是稳态
+            for _ in 0..3 {
+                let _ = live_frame(
+                    &ctx,
+                    Vec::new(),
+                    &mut editor,
+                    &mut preview,
+                    &mut cursor,
+                    &mut live,
+                );
+            }
+            let edit = egui_markdown::code_block_geometry(&ctx, editor_id.with(("live-code", 0)))
+                .expect("edit geom");
+            assert!(
+                (edit.frame.height() - browse.frame.height()).abs() < 1.0,
+                "真字体+行距偏好下代码框高度漂移(ppp={ppp}):浏览 {:.3} vs 编辑 {:.3}",
+                browse.frame.height(),
+                edit.frame.height()
+            );
+            assert!(
+                (edit.body.top() - browse.body.top()).abs() < 1.0,
+                "真字体+行距偏好下正文 y 漂移(ppp={ppp}):浏览 {:?} vs 编辑 {:?}",
+                browse.body,
+                edit.body
             );
         }
     }
