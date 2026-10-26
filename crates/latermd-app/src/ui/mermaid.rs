@@ -484,19 +484,22 @@ fn paint_arrow(
     ));
 }
 
-// —— 源码视图与回落(共用嵌套 label 渲染)——
+// —— 源码视图与回落(共用高亮 galley 直铺)——
 
-/// 嵌套 `MarkdownLabel` 渲染 mermaid 源码围栏。嵌套 label **不传
-/// link_handler** → `is_block_code_widget` 恒 false → mermaid 围栏走
-/// vendored 普通代码块路径:语法高亮与复制按钮(`code_copy_buttons`)
-/// 原样复用,且天然不可能递归回本 widget。
+/// 把 mermaid 源码当普通代码高亮后**直铺 galley** 渲染,**不嵌套
+/// `MarkdownLabel`**(2026-10-26 外框上收后的形态:嵌套 label 会画出
+/// 第二层代码框)。源码体走 `egui_markdown::layout::highlight_code`
+/// —— 即 vendored 代码块正文的高亮管线本身;超宽横向滚动,与代码块
+/// 正文同管线同参。
+///
+/// 复制按钮不在这里挂:外框 [`block_widget`] 的头带统一用
+/// [`crate::ui::rich_widgets::code_header_buttons`] 挂一枚,源码视图与
+/// 图表视图共用(改它之前先看那一处 —— 探针 `copy_button_probe` 取的
+/// 是那枚,不是这里的)。
 ///
 /// 两个消费方:`source`(用户切到「源码」视图,无提示行,块可点进
 /// 编辑)与 `fallback`(解析/布局失败含流式围栏未闭合的回落,带提示
 /// 行,整块只读)。
-/// 源码体:高亮 galley 直接铺在块外框的内容区(2026-10-26 外框上收后
-/// 不再嵌套 MarkdownLabel —— 那会画出第二层代码框;超宽横向滚动,与
-/// 代码块正文同管线同参)。
 fn paint_source(
     ui: &mut egui::Ui,
     index: usize,
@@ -1012,7 +1015,10 @@ mod tests {
                 x1 - x0 >= 60.0 && y1 - y0 >= 20.0,
                 "{name}:代码块背景应成块(实际 {x1:.0}×{y1:.0})"
             );
-            // 复制按钮经嵌套 label 的 code_block_buttons 挂载(仍可用)。
+            // 复制按钮由外框 `block_widget` 头带的 `code_header_buttons`
+            // 统一挂(2026-10-26 起源码体不再嵌套 label),图表/源码两态
+            // 共用那一枚 —— 这里钉住「源码体改回 galley 直铺后没把复制
+            // 钮弄丢」。
             assert!(!ev.copy_buttons.is_empty(), "{name}:回落块应保留复制按钮");
         }
     }
@@ -1020,7 +1026,8 @@ mod tests {
     /// 代码块同款外框验收(2026-10-26,坤哥「样式弄成和代码块类似 +
     /// 功能按钮都弄到右侧 + 绘图背景与块底区分」):块底 = 代码底,绘图
     /// 区垫画纸底(extreme_bg,与代码底恒反差);头带三组功能钮(图表/
-    /// 源码切换、删除、复制)全部落在头带(顶部 24px)**右半**。
+    /// 源码切换、删除、复制)全部落在头带(顶部 [`HEADER_HEIGHT`] 28px,
+    /// 断言用 26px 容差)**右半**。
     #[test]
     fn mermaid_block_has_code_frame_with_right_aligned_header() {
         if cjk_fonts_missing() {

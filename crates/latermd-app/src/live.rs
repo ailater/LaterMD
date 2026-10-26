@@ -7230,7 +7230,9 @@ mod tests {
         assert_eq!(probe[0].nodes.len(), 2, "A/B 两节点");
         assert!(!probe[1].rendered, "sequenceDiagram 应回落源码");
         assert!(probe[1].nodes.is_empty());
-        // 回落块的复制按钮照常挂出(嵌套 label 的代码块增强仍可用)。
+        // 回落块的复制按钮照常挂出 —— 挂载点是外框 `block_widget` 头带
+        // 的 `code_header_buttons`(2026-10-26 起源码体不再嵌套 label),
+        // 图表/源码两态共用那一枚。
         assert!(
             !frame.button_rects.is_empty(),
             "回落块应保留复制按钮:{:?}",
