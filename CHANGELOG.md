@@ -9,10 +9,20 @@
 > 下载表本身由 dist 生成,只含五个矩阵目标;`universal2 dmg` 是 macos-dmg job 事后回传的,
 > 永远不在这张表里,需在 Release 页面手工补一行(见 [docs/distribution.md](docs/distribution.md) §3.3)。
 
-## Unreleased
+## v0.0.13 - 2026-10-27
+
+mermaid 块视觉统一与 Linux 中文字体覆盖批次:mermaid 图表获得与代码块同款的外框与操作按钮;Linux 下 Arch/Fedora 系机器中文不再显示为方块。相对 v0.0.12 共 7 个 PR(#347–#353)。
+
+### 新功能
 
 - **mermaid 块换代码块同款外框**(#348):代码底/描边/圆角/顶部头带与代码块同参,功能按钮全右置(图表/源码切换、删除 🗑、复制 ⧉);绘图区垫内容区底色「画纸」,与块代码底明确区分;源码态不再嵌套第二层代码框,删除钮进既有确认弹窗通道(仅可写列)
-- 代码块头部的删除按钮与表格工具条统一为同一垃圾桶字形(#345 后续):两处破坏性入口同款图标,确认弹窗与悬停文案同步改为「删除代码块围栏,转为普通文本」
+- README 写明 Linux 原生 Wayland 支持:Wayland 与 X11 会话均原生(winit 启动时自动选择,不经 XWayland),附 `WINIT_UNIX_BACKEND` 强制开关说明
+
+### 修复
+
+- **Linux CJK 字体候选表补 Arch/Fedora 路径**(#353):候选表原先只认 Debian/Ubuntu 的 noto 路径,Arch 系(`noto-fonts-cjk` 装于 `/usr/share/fonts/noto-cjk/`)与 Fedora/RHEL 系机器启动即报「未找到候选 CJK 字体,中文将显示为方块」。三发行版的 `NotoSansCJK-Regular.ttc` 同为上游发布集合、face 结构一致(SC=2 / Mono SC=7,Bold 平行),真机 `fc-query` 复核后沿用同序号——中文开箱可用从 Debian/Ubuntu 扩到主流发行版
+- mermaid 头带高度 24→28px,按钮不再贴顶边(#351)
+- 代码块头部的删除按钮与表格工具条统一为同一垃圾桶字形(#347):两处破坏性入口同款图标,确认弹窗与悬停文案同步改为「删除代码块围栏,转为普通文本」
 
 ## v0.0.12 - 2026-10-26
 
