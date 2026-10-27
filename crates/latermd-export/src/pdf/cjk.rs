@@ -15,8 +15,8 @@ use super::{PdfFont, PdfFonts};
 
 /// 一个系统 CJK 字体候选:文件路径 + `.ttc` 集合内的 face 序号。
 ///
-/// face 序号与 egui 界面侧同口径:Linux 两条由 `fc-query` 枚举得出,
-/// Windows/macOS 条目为资料建议值,待真机核验(见 docs/m0-report.md)。
+/// face 序号与 egui 界面侧同口径:Linux 各发行版的 Noto 路径由 `fc-query`
+/// 枚举得出,Windows/macOS 条目为资料建议值,待真机核验(见 docs/m0-report.md)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CjkFontCandidate {
     /// 绝对路径(三平台前缀互斥,存在性探测天然分流,无需 #[cfg] 分表)。
@@ -38,10 +38,13 @@ pub struct CjkFontCandidate {
     pub bold_path: Option<&'static str>,
 }
 
-/// 系统 CJK 候选表,按序探测:Noto Sans CJK → 文泉驿微米黑 → 微软雅黑/
+/// 系统 CJK 候选表,按序探测:Noto Sans CJK(Debian/Ubuntu、Arch 系、
+/// Fedora/RHEL 的 noto 包路径互不相同)→ 文泉驿微米黑兜底 → 微软雅黑/
 /// 黑体 → PingFang/Hiragino(Windows/macOS 路径在对应平台前缀外不可达)。
+/// Linux 各发行版的 .ttc 同为上游 noto-cjk 发布集合,face 结构一致
+/// (比例 SC=2 / 等宽 SC=7,Bold 平行);wqy 为单字型集合。
 pub const CJK_SYSTEM_CANDIDATES: &[CjkFontCandidate] = &[
-    // Linux(Deepin / 常见发行版的 noto 包):同一 .ttc 内含比例与等宽两套 SC 字型;
+    // Debian/Ubuntu:同一 .ttc 内含比例与等宽两套 SC 字型;
     // Bold.ttc 与 Regular.ttc face 结构平行(fc-query 实测 SC 同为 face 2)
     CjkFontCandidate {
         path: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -49,9 +52,31 @@ pub const CJK_SYSTEM_CANDIDATES: &[CjkFontCandidate] = &[
         monospace_index: 7,
         bold_path: Some("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
     },
-    // Linux 兜底:文泉驿微米黑,单字型集合,无粗体变体
+    // Arch 系(Arch/CachyOS/Manjaro,noto-fonts-cjk 包):同一上游集合,
+    // fc-query 实测 face 表与 Debian 版全同(2=SC / 7=Mono SC)
+    CjkFontCandidate {
+        path: "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        proportional_index: 2,
+        monospace_index: 7,
+        bold_path: Some("/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc"),
+    },
+    // Fedora/RHEL 系(google-noto-sans-cjk-ttc-fonts 包):同一上游集合
+    CjkFontCandidate {
+        path: "/usr/share/fonts/google-noto-sans-cjk-ttc-fonts/NotoSansCJK-Regular.ttc",
+        proportional_index: 2,
+        monospace_index: 7,
+        bold_path: Some("/usr/share/fonts/google-noto-sans-cjk-ttc-fonts/NotoSansCJK-Bold.ttc"),
+    },
+    // Linux 兜底:文泉驿微米黑,单字型集合,无粗体变体(Debian/Ubuntu 路径)
     CjkFontCandidate {
         path: "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        proportional_index: 0,
+        monospace_index: 0,
+        bold_path: None,
+    },
+    // 文泉驿兜底第二路径(Arch/Fedora 的 wqy-microhei 包)
+    CjkFontCandidate {
+        path: "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
         proportional_index: 0,
         monospace_index: 0,
         bold_path: None,
@@ -265,7 +290,7 @@ mod tests {
         fn is_absolute_on_target_platform(path: &str) -> bool {
             path.starts_with('/') || path.as_bytes().get(1) == Some(&b':')
         }
-        assert_eq!(CJK_SYSTEM_CANDIDATES.len(), 7);
+        assert_eq!(CJK_SYSTEM_CANDIDATES.len(), 10);
         let mut paths: Vec<&str> = CJK_SYSTEM_CANDIDATES.iter().map(|c| c.path).collect();
         paths.sort_unstable();
         paths.dedup();
