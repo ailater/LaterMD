@@ -9,7 +9,7 @@
 **跨平台、版本化、可对话、可演化的 Markdown 知识工作台** —— Markdown 是内容层,AI 是智能层,Git 是时间层。
 
 纯 Rust(egui + eframe),Windows / macOS / Linux 三平台原生界面,无 Web 栈。
-当前版本 **v0.0.11**(2026-10-25):三态视图(写作 / 源码 / 源码+对照)、搜索替换、AI 流式写作、Git 只读集成与主工作区 diff 审阅、双击 `.md` 文件关联、mermaid 图表预览与图表/源码切换、`latermd` 命令行直开(三平台)均已可用。
+当前版本 **v0.0.13**(2026-10-27):三态视图(写作 / 源码 / 源码+对照)、搜索替换、AI 流式写作、Git 只读集成与主工作区 diff 审阅、双击 `.md` 文件关联、mermaid 图表预览与图表/源码切换、`latermd` 命令行直开(三平台)均已可用。
 技术决策见 [docs/](docs/README.md),演进路线见 [docs/roadmap.md](docs/roadmap.md)。
 
 ## 界面截图
@@ -111,6 +111,8 @@ latermd ~/notes/*.md        # 多个文件各开一个标签
 | Linux (X11 / Wayland) | ✅ | Vulkan (wgpu) |
 
 **显式不支持 Windows 10(含 LTSC)与 macOS 13 及以下。**
+
+Linux **原生支持 Wayland 与 X11 两种会话**(winit 启动时自动选择;Wayland 会话下是原生客户端,不经 XWayland)。需要强制时设 `WINIT_UNIX_BACKEND=x11`(或 `wayland`)。
 
 驱动黑名单逃生口:`LATERMD_RENDERER=glow` 环境变量可切换渲染后端(仅诊断用)。
 
