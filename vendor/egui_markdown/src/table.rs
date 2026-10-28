@@ -64,10 +64,9 @@ pub fn render_table(
   inline_code_style: &InlineCodeStyle,
   table_style: &TableStyle,
   link_handler: Option<&dyn LinkHandler>,
-) {
+) -> TableGeometry {
   let mut options = TableRenderOptions::default();
-  let _ =
-    render_table_with_options(ui, id, data, font_id, color, inline_code_style, table_style, link_handler, &mut options);
+  render_table_with_options(ui, id, data, font_id, color, inline_code_style, table_style, link_handler, &mut options)
 }
 
 /// Render a table with the same measurement, scrolling, and chrome as [`render_table`].

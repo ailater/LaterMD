@@ -6696,6 +6696,100 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repro_download_heartbeat_document_table_following_text_geometry() {
+        let ctx = egui::Context::default();
+        let text = "# 四、需求详情\n\n## 4.4 后台脚本配置\n\n|字段|必填|说明|\n|---|---|---|\n|**脚本名称**|是|填写脚本名称|\n|**脚本链接**|是|填入脚本链接，系统自动记录脚本版本号与文件 MD5|\n|**适用客户端版本**|是|勾选该脚本适用的客户端版本，支持多选（如 客户端官网、客户端-网吧版、客户端-网吧极速版、客户端-市场版、客户端-合伙人版、客户端-宙斯上号器）|\n|**适用游戏ID**|否|手动填写，支持填写多个（用逗号分隔）；留空表示适用于全部游戏|\n|**适用订单号**|否|手动填写，支持填写多个（用逗号分隔）；留空表示适用于全部订单|\n|备注|否|选填|\n\n保存后配置立即生效，客户端下一次心跳即可获取最新的脚本下发信息。\n\n# 五、流程图\n\n客户端心跳脚本下发流程与后台脚本配置流程如下：\n";
+        let mut editor = EditorBuffer::new(text);
+        let mut preview = PreviewState::new(&editor);
+        let mut cursor = OutlineCursor::default();
+        let mut live = LiveState::default();
+        let frame = live_frame(
+            &ctx,
+            Vec::new(),
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let table = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("脚本名称"))
+            .expect("table text")
+            .1;
+        let following = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("保存后配置立即生效"))
+            .expect("following text")
+            .1;
+        let heading = frame
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("五、流程图"))
+            .expect("following heading")
+            .1;
+        assert!(following.top() >= table.bottom() - 1.0);
+        assert!(heading.top() >= following.bottom() - 1.0);
+        for _ in 0..3 {
+            let frame = live_frame(
+                &ctx,
+                Vec::new(),
+                &mut editor,
+                &mut preview,
+                &mut cursor,
+                &mut live,
+            );
+            let table = frame
+                .texts
+                .iter()
+                .find(|(text, _)| text.contains("脚本名称"))
+                .expect("table text")
+                .1;
+            let following = frame
+                .texts
+                .iter()
+                .find(|(text, _)| text.contains("保存后配置立即生效"))
+                .expect("following text")
+                .1;
+            let heading = frame
+                .texts
+                .iter()
+                .find(|(text, _)| text.contains("五、流程图"))
+                .expect("following heading")
+                .1;
+            assert!(following.top() >= table.bottom() - 1.0);
+            assert!(heading.top() >= following.bottom() - 1.0);
+        }
+        let scrolled = live_frame(
+            &ctx,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -320.0),
+                modifiers: Default::default(),
+                phase: egui::TouchPhase::Move,
+            }],
+            &mut editor,
+            &mut preview,
+            &mut cursor,
+            &mut live,
+        );
+        let following = scrolled
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("保存后配置立即生效"))
+            .expect("following text after scroll")
+            .1;
+        let heading = scrolled
+            .texts
+            .iter()
+            .find(|(text, _)| text.contains("五、流程图"))
+            .expect("following heading after scroll")
+            .1;
+        assert!(heading.top() >= following.bottom() - 1.0);
+    }
+
     /// 表格工具条仅在悬停时出现；静帧不占布局，悬停后四枚按钮贴近表格。
     #[test]
     fn live_table_toolbar_is_hover_only() {

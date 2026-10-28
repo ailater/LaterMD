@@ -1277,7 +1277,7 @@ impl<'a> MarkdownLabel<'a> {
             continue;
           }
           let before_y = before_rect.min.y;
-          table::render_table(
+          let table_geometry = table::render_table(
             ui,
             self.id.with(("table", i)),
             data,
@@ -1287,6 +1287,16 @@ impl<'a> MarkdownLabel<'a> {
             &style.table,
             self.link_handler,
           );
+          // Keep the parent layout cursor at least as far down as the table's
+          // measured content. This matters when a nested horizontal
+          // ScrollArea/TableBuilder reports a smaller cursor advance than the
+          // cell rectangles it painted; otherwise the following block can be
+          // laid out over the table.
+          let table_bottom = table_geometry.table.bottom();
+          let cursor_bottom = ui.cursor().top();
+          if table_bottom > cursor_bottom {
+            ui.allocate_space(egui::vec2(ui.available_width(), table_bottom - cursor_bottom));
+          }
           record_widget_block(ui, self.id, md.spans[i].clone(), before_rect, ui.min_rect().bottom());
           cache_block_height(ui, block_sz_id, block_key(i), before_y);
           i += 1;
