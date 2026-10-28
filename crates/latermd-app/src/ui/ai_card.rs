@@ -124,8 +124,8 @@ pub(crate) struct RichLinkHandler {
     card_ids: RefCell<Vec<egui::Id>>,
     /// 本帧画过的 `emoji://` inline widget 区块(屏幕坐标,含纹理缺失只留
     /// 占位的):手型抑制的命中判定 + 无头探针。`Rc` 共享:Live 一帧多块
-    /// (每块一个 handler)收集进同一份,帧末统一消费(与预览单标签一份
-    /// 同语义)。
+    /// (每块一个 handler)收集进同一份,帧末统一消费(一帧一份,与整篇单
+    /// 标签时代「全局一份」同语义)。
     emoji_rects: Rc<RefCell<Vec<egui::Rect>>>,
 }
 

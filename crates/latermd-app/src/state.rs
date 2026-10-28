@@ -1420,10 +1420,15 @@ impl State {
                 self.open_search_hit(&path, line_no);
             }
             Message::OutlineItemClicked(span) => {
-                // 大纲点击只驱动一处:编辑器/写作块跳光标。右栏预览退役
-                // (live-unify P5)后不再有第二处消费 —— 写作模式与禅定同走
-                // Live 浏览态的块级滚动(`live::ui` 的 `jump_to`),归约侧不再
-                // 挂跨帧的悬置滚动目标。
+                // 大纲点击只驱动一处:编辑器/写作块跳光标。整篇改写链与它
+                // 的悬置滚动目标随 P5 删除后不再有第二处消费 —— 写作模式与
+                // 禅定同走 Live 浏览态的块级滚动(`live::ui` 的 `jump_to`),
+                // 归约侧不再挂跨帧的悬置滚动目标。
+                //
+                // 注意口径(2026-10-28):右栏本身**没有退役** —— 三态视图
+                // (#250/#252)让它以「分栏档」回归,渲染的是同一个 `live::ui`
+                // (只读)。这里消失的是「整篇单标签那条链路及其跨帧悬置目
+                // 标」,不是右栏。
                 self.jump_cursor_to_heading(span);
             }
             Message::WikilinkClicked { target } => self.open_wikilink(&target),
