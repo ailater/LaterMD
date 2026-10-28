@@ -584,15 +584,23 @@ fn body_line_height(style: &MarkdownStyle, font_size: f32) -> f32 {
     (font_size * style.line_height_ratio).max(font_size * style.min_line_height_em + 0.75)
 }
 
-/// 块间前距:镜像 vendored **单标签流**的块间节奏(右栏预览即此口径)。
+/// 块间前距:镜像 vendored **单标签流**的块间节奏。
 ///
-/// 预览把整篇塞进一个 `MarkdownLabel`,块间空气由三种机制天然产生:文
-/// 本之间的空行是真实行盒、块级元件前后 `add_space(block_spacing)`
-/// (`before_block`/`after_block`)、标题前再叠一行
-/// `block_spacing + heading_space_above` 的透明 spacer。Live 是**逐块独
-/// 立标签**,标签会裁掉尾随空行、spacer 在段首被刻意抑制,块间只剩
+/// 口径来源:整篇塞进一个 `MarkdownLabel`(vendored 的整篇用法)时,块间
+/// 空气由三种机制天然产生:文本之间的空行是真实行盒、块级元件前后
+/// `add_space(block_spacing)`(`before_block`/`after_block`)、标题前再叠
+/// 一行 `block_spacing + heading_space_above` 的透明 spacer。Live 是**逐
+/// 块独立标签**,标签会裁掉尾随空行、spacer 在段首被刻意抑制,块间只剩
 /// egui 出厂 3px —— 全部挤在一起(2026-10-10 用户反馈「Live 太紧凑」)。
 /// 本函数把三种机制按边界类型补回:
+///
+/// > **参照物不是右栏(2026-10-28 订正)**:本段早期版本写「右栏预览即此
+/// > 口径」,那是 2026-10-10 的事实 —— 当时右栏是整篇单标签。三态视图
+/// > (#250/#252)之后右栏渲染的**就是 `live::ui` 的块级标签本身**,与左
+/// > 栏同一个 [`block_gap`],不存在「整篇单标签的那一栏」可对照。本函数
+/// > 现在对齐的是 **vendored `MarkdownLabel` 的整篇用法**(上游默认节
+/// > 奏),即 `block_gap_mirrors_the_single_label_rhythm` 那条测试里自建的
+/// > 基准标签。
 ///
 /// * 前一块是元件:`block_spacing`(对应 `after_block`,元件后无空行);
 /// * 前一块是文本:一个正文行盒高(对应真实空行);
@@ -611,9 +619,11 @@ fn block_gap(style: &MarkdownStyle, font_size: f32, prev: BlockKind, this: Block
     base + extra
 }
 
-/// Live 帧 emoji 占位区探针的 data 键(P1,与预览 `emoji_probe_id` 同款,
-/// 按编辑器 id 分标签):生产只写不读,无头测试读它断言「widget 在该段
-/// 生效」。
+/// Live 帧 emoji 占位区探针的 data 键(P1,按编辑器 id 分标签):生产只
+/// 写不读,无头测试读它断言「widget 在该段生效」。
+///
+/// 2026-10-28 订正:旧注释称「与预览 `emoji_probe_id` 同款」,那份预览侧
+/// 同名函数已随 P5 删除(`ui::preview` 整模块),本仓现在只有这一份。
 fn emoji_probe_id(editor_id: egui::Id) -> egui::Id {
     egui::Id::new("latermd-live-emoji-rects").with(editor_id)
 }
@@ -10919,9 +10929,12 @@ mod tests {
             gap_between("fn a(){}", "段落丙。")
         );
 
-        // 行距同源(2026-10-10 用户问「Live 和预览能一样吗」):两栏的
-        // 标签用同一 `FontId`(字号档 + 预览族)与同一全局 MarkdownStyle,
-        // 行盒高必须逐像素相等 —— 谁改了其中一栏的字体取值,这里变红。
+        // 行距同源(2026-10-10 用户问「Live 和预览能一样吗」):这里的
+        // 基准是**自建的 vendored 整篇单标签**(下面 `out2`),不是右栏 ——
+        // 三态视图(#250/#252)之后右栏渲染的就是 `live::ui` 块级标签,与
+        // 本测试的 Live 臂同一条路径,拿它当对照等于自己跟自己比。整篇
+        // 基准与 Live 块级标签用同一 `FontId`(字号档 + 预览族)与同一全局
+        // MarkdownStyle,行盒高必须逐像素相等 —— 谁改了字体取值,这里变红。
         let out2 = ctx.run_ui(egui::RawInput::default(), |ui| {
             egui_markdown::MarkdownLabel::new(egui::Id::new("gap-test-preview"), doc)
                 .font(egui::FontId::new(
@@ -10931,7 +10944,7 @@ mod tests {
                 .wrap()
                 .show(ui);
         });
-        // 预览整篇是单个 galley shape:按行遍历取目标段的行盒
+        // 整篇基准是单个 galley shape:按行遍历取目标段的行盒
         let preview_row = out2
             .shapes
             .iter()
@@ -10949,7 +10962,7 @@ mod tests {
                 _ => None,
             })
             .next()
-            .expect("预览单标签里有该段行");
+            .expect("整篇基准标签里有该段行");
         let live_row = rows
             .iter()
             .find(|r| r.2.trim() == "段落甲正文。")
@@ -10957,7 +10970,7 @@ mod tests {
             .expect("Live 里有该段行");
         assert!(
             (preview_row - live_row).abs() < 0.6,
-            "行距须同源:预览行盒 {preview_row}px vs Live 行盒 {live_row}px"
+            "行距须同源:整篇基准行盒 {preview_row}px vs Live 行盒 {live_row}px"
         );
         out2.drop_without_applying_deltas();
     }

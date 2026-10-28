@@ -1,10 +1,16 @@
-//! 富渲染共享件(右栏预览与 Live 写作渲染两条路径都用的部分)。
+//! 富渲染共享件(Live 写作渲染用的部分,右栏同路径复用)。
 //!
 //! 2026-10-14 从 `ui::preview`（已于 P5 删除） 搬出(live-unify-plan P0):右栏对照
 //! 预览要退役,但这些件 —— 代码块复制头、任务 checkbox、`==高亮==` 排版段、
 //! 相对图片 `file://` 改写、几枚主题色 —— 在 Live 写作渲染里同样要用,
 //! 不能跟着面板一起删。搬出来的收益是 `live.rs` 不再靠 `crate::ui::preview`
-//! 拿它们,两栏共用同一份实现而不是各画一套。
+//! 拿它们,共用同一份实现而不是各画一套。
+//!
+//! > **「两条路径」的说法已作废(2026-10-28 订正)**:本句定稿于三态视图
+//! > (#250/#252)之前,那时右栏是「整篇单标签」的另一条渲染链路。三态
+//! > 之后右栏渲染的**就是 `live::ui` 本身**(只读分栏档),全项目富渲染只有
+//! > `live::ui` 一条(AGENTS.md 铁律四)—— 本模块的件不再被两条路径共用,
+//! > 而是被同一条路径在左栏可写/右栏只读两种形态下共用。
 //!
 //! 本模块**不依赖** `crate::ui::preview`,也不依赖 `LiveState`:依赖 egui、
 //! vendored link 协议常量、`latermd_md` 与 tokens —— 依赖方向单向向下。
@@ -521,7 +527,13 @@ fn file_uri(base_dir: &Path, dest: &str) -> String {
 /// 各话,必须带上出身才不会串台。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum TaskProbeDomain {
-    /// 右栏预览(P4 已退役,仅测试路径保留)。
+    /// 整篇单标签形态下的全局坐标(载荷偏移相对整篇渲染文本)。
+    ///
+    /// 2026-10-28 订正:旧注释写「右栏预览(P4 已退役,仅测试路径保留)」,
+    /// 前半句已不成立 —— 三态视图(#250/#252)让右栏以「分栏档」回归,渲染
+    /// 的是 `live::ui` 的块级标签(坐标域同样是 [`Self::Live`]),按 P6 定稿
+    /// 口径一律不写「已退役」。**后半句仍成立**:本变体现在只被
+    /// `ui/mermaid.rs` 的测试用来构造「整篇渲染」的用例,生产侧零使用。
     #[cfg(test)]
     Preview,
     /// 编辑器 Live 富渲染块:块内坐标,消费时加记录时的块首字节偏移。
@@ -674,8 +686,8 @@ pub(crate) fn task_checkbox_probe(ctx: &egui::Context) -> Vec<egui::Rect> {
 /// 判定,块内拖选不算 click)且抬起点落在本帧某枚探针 rect 内 → 返回
 /// 该枚的(链接载荷, 坐标域)。与 Live 列 `clicked_for_edit` 同款读法
 /// (primary_clicked + interact_pos),不挂 egui widget、不依赖 vendored 的
-/// section/token 映射。坐标域随条目带回:预览只认 [`TaskProbeDomain::
-/// Preview`]、Live 只认 `Live(_)` 各自消费,同帧互不串台。
+/// section/token 映射。坐标域随条目带回:整篇基准只认 [`TaskProbeDomain::
+/// Preview`]、Live 只认 [`TaskProbeDomain::Live`] 各自消费,同帧互不串台。
 pub(crate) fn task_click_hit(ui: &egui::Ui) -> Option<(String, TaskProbeDomain)> {
     if !ui.input(|input| input.pointer.primary_clicked()) {
         return None;
