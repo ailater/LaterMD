@@ -1131,8 +1131,9 @@ mod tests {
     /// `<…>` 包裹保持包裹、多张图与周边文本逐字节保留;无相对图与未落盘
     /// 时零改写(清单为空 ≡ 文本原样,不产生分配)。
     ///
-    /// 这一组随 live-unify P5 从已删的 `ui::preview` 迁来:右栏退役后
-    /// 改写由 Live 接管,这四条判定用例随函数留在原地。
+    /// 这一组随 live-unify P5 从已删的 `ui::preview` 迁来:整篇改写链删除
+    /// 后改写由 Live 按块接管(对照预览现为三态分栏档的只读 Live),这四条
+    /// 判定用例随函数留在原地。
     #[test]
     fn relative_images_resolve_against_base_dir() {
         let base = Path::new("/home/u/docs");

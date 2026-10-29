@@ -545,8 +545,9 @@ impl Command {
             // (mac 侧 ⌘G 与系统「查找下一个」惯例的取舍见 decisions-pending #113)
             Self::GotoLine => egui::KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::G),
             // 插入目录(#66 M2):Ctrl/Cmd+Alt+C(C = Contents)。出厂表
-            // Ctrl/Cmd+Alt 层只有 W/D(打字机/专注;切预览栏的 R 已随对照
-            // 预览退役,live-unify-plan P4),C 在该层空闲(#9 口径的撞键
+            // Ctrl/Cmd+Alt 层的字母键现有 R/W/D/M(对照列开合/打字机/专注/
+            // minimap);R 在 P4 摘除 ToggleRightPreview 后由 ToggleCompare
+            // 复用,**不是空键**。C 不在其中,故空闲(#9 口径的撞键
             // 核查在 tests);含 Alt 的绑定按保守口径避开
             // 菜单标题助记集(F/E/O/V/X/A/S),C 不在其中(与 #122 同款审计)。
             // 与 Ctrl/Cmd+Shift+C(围栏代码块)同键不同修饰,egui 的
@@ -571,7 +572,7 @@ impl Command {
                 egui::KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, egui::Key::W)
             }
             // 专注模式(#64 M2):Ctrl/Cmd+Alt+D。出厂表 Ctrl/Cmd+Alt 层
-            // 只有 R(切预览栏)与 W(打字机),D 在该层空闲(#9 口径的
+            // 只有 R(对照列开合)与 W(打字机),D 在该层空闲(#9 口径的
             // 撞键核查在 tests);含 Alt 的绑定按保守口径避开菜单标题助记
             // 集(F/E/O/V/X/A/S),D 不在其中 —— 首选 F 被该审计否决
             // (menubar 标题审计),取舍见 decisions-pending #122。
@@ -579,7 +580,7 @@ impl Command {
                 egui::KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::ALT, egui::Key::D)
             }
             // Minimap 开关(#67 M2):Ctrl/Cmd+Alt+M。出厂表 Ctrl/Cmd+Alt 层
-            // 现有 R/W/D/C(切预览栏/打字机/专注/插入目录),M 在该层空闲
+            // 现有 R/W/D/C(对照列开合/打字机/专注/插入目录),M 在该层空闲
             // (#9 口径的撞键核查在 tests);含 Alt 的绑定按保守口径避开
             // 菜单标题助记集(F/E/O/V/X/A/S),M 不在其中(与 #121/#122/
             // #127 同款审计,menubar 的标题审计测试共同钉住)。

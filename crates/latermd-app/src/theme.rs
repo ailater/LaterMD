@@ -327,9 +327,9 @@ pub struct ThemeSettings {
     /// 编辑器与预览正文的**基准字号**(pt,#23):标题按比例放大,本字段
     /// 只定正文基准。有效范围 12..=24(闭区间,CJK 可读性下限),默认 15。
     /// 生效链路(F3):编辑器经 `apply` 的 `apply_font_size` 投影到
-    /// `TextStyle::Monospace` 档;写作渲染(Live 富渲染块,原右栏预览已
-    /// 退役)经 `crate::live::ui` 的显式
-    /// `FontId`(size 取自 [`editor_font_size`],标题按 `heading.scales`
+    /// `TextStyle::Monospace` 档;写作渲染(Live 富渲染块 —— 三态视图的
+    /// 对照列就是同一渲染的只读档,故只有这一条链路)经 `crate::live::ui`
+    /// 的显式 `FontId`(size 取自 [`editor_font_size`],标题按 `heading.scales`
     /// 比例放大,行高随字号重算)。
     pub editor_font_size: f32,
     /// 正文行距倍率(#23),有效范围 1.2..=2.0(闭区间),默认 1.5。
