@@ -2733,7 +2733,7 @@ mod tests {
                 .x;
             assert!(
                 width - nav >= 379.0,
-                "{width}: editor squeezed by {nav}(编辑器最小预算,右栏退役后是唯一邻居)"
+                "{width}: editor squeezed by {nav}(编辑器最小预算,非分栏档下 nav 是唯一邻居)"
             );
             assert_eq!(app.state.layout.left_width, Some(320.0));
             if width == 1600.0 {
@@ -2744,7 +2744,7 @@ mod tests {
 
     #[test]
     fn automatic_minimap_follows_document_and_window_size() {
-        // 900px 档:右栏对照预览退役(live-unify P4)后中央编辑区
+        // 900px 档:非分栏档下没有对照列,中央编辑区
         // ≈660px 已过 600 门槛,auto 判据翻真。
         for (width, lines, manual, expected) in [
             (900.0, 400, false, true),
@@ -9712,7 +9712,7 @@ mod tests {
         app.state.apply(Message::ZenToggled);
         assert!(
             !app.state.layout.left,
-            "逐项还原:left={}(右栏对照预览已随 live-unify P4 退役)",
+            "逐项还原:left={}(右栏开合归 render_mode 三态,退出禅定只还原左栏)",
             app.state.layout.left
         );
     }

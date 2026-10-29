@@ -198,8 +198,9 @@ impl SidebarTab {
 /// 不用 intra-doc 链接,否则 `cargo doc` 报 unresolved link)。
 ///
 /// **P5(live-unify)之前这里还产一份整篇渲染文本与四层偏移映射** —— 它们
-/// 只为右栏对照预览存在,而预览已退役:写作渲染在 Live 侧**按块**做同样的
-/// 五层改写(`LiveState::rich_block_with_base`,结果进块级 `rich_cache`),
+/// 只为**整篇单标签形态**的那一栏存在,而那份整篇产物已随 P5 删除(对照
+/// 预览本身留在三态的分栏档里,渲染的就是块级 Live,故按 P6 定稿口径不写
+/// 「已退役」):写作渲染在 Live 侧**按块**做同样的五层改写(`LiveState::rich_block_with_base`,结果进块级 `rich_cache`),
 /// 与之共享的是 `latermd_md` 的纯函数与 `ui::rich_widgets` 的绘制件,不是
 /// 这份整篇产物。删掉后每次修订号前进省四遍全文扫描 + 四份映射分配。
 pub struct PreviewState {
@@ -256,7 +257,9 @@ impl PreviewState {
     /// 以编辑器当前内容建立快照(文本 + 大纲)。
     ///
     /// P5 起**不再产出渲染文本**:整篇改写链(cached 四层 + 图片 URI)的
-    /// 唯一消费者是已退役的右栏预览,每次修订号前进都重算它们是纯浪费。
+    /// 唯一消费者是那份整篇单标签产物,已随 P5 一并删除(对照预览现为三态
+    /// 分栏档、渲染的是块级 Live,按 P6 定稿口径不写「已退役」),每次修订
+    /// 号前进都重算它们是纯浪费。
     /// Live 侧按块改写并缓存结果(`rich_cache`),稳态帧零解析;大纲仍在
     /// 这里一次性算出侧栏要用。
     ///
@@ -4950,8 +4953,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 「关闭左栏」按钮翻的只是 `layout.left` 这一个 bool(P4 起右栏对照
-    /// 预览退役,live-unify-plan;右栏开关整体不存在了)。
+    /// 「关闭左栏」按钮翻的只是 `layout.left` 这一个 bool(右栏开合改由
+    /// `render_mode` 的三态掌管 —— 对照预览 = 分栏档,不再有独立的右栏开关)。
     #[test]
     fn sidebar_toggle_flips_left_only() {
         let mut state = State::default();
@@ -6963,9 +6966,10 @@ mod tests {
         let dir = temp_path("writing-layout");
         std::fs::create_dir_all(&dir).unwrap();
         for right in [false, true] {
-            // 旧版本没有模式字段,升级默认写作;旧版 `right` 键(右栏对照
-            // 预览,P4 退役)按 serde(default) 结构体级口径**静默忽略** ——
-            // 升级不因多出来的键失败。
+            // 旧版本没有模式字段,升级默认写作;旧版 `right` 键(旧右栏面板
+            // 开合,P4 摘除;对照预览现由三态 `render_mode` 表达)按
+            // serde(default) 结构体级口径**静默忽略** —— 升级不因多出来的
+            // 键失败。
             std::fs::write(dir.join("layout.json"), format!(r#"{{"right":{right}}}"#)).unwrap();
             let mut state = State::default();
             state.restore_layout(LayoutSettings::load_from(&dir).unwrap());

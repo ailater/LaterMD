@@ -23,10 +23,11 @@ const SETTINGS_FILE: &str = "layout.json";
 
 /// 进入禅定前的面板快照(左栏开合);退出时还原(§7)。
 ///
-/// 规格 §7 原写三元组 `(left, right, editor_hidden)`;右栏对照预览退役
-/// (live-unify-plan P4)后只剩左栏一元,`editor_hidden` 在禅定下恒 `true`
-/// (**藏编辑器就是禅定的定义 itself**),把常量写进存档会在每次读它时都
-/// 骗人一次,不留假字段。
+/// 规格 §7 原写三元组 `(left, right, editor_hidden)`;右栏开合改由
+/// `render_mode` 的三态掌管(对照预览 = 分栏档的只读 Live 渲染,P6 定稿
+/// 口径不写「已退役」)后,只剩左栏一元需要快照;`editor_hidden` 在禅定
+/// 下恒 `true`(藏编辑器就是禅定的定义本身),把常量写进存档会在每次读
+/// 它时都骗人一次,不留假字段。
 ///
 /// **只快照面板开合而不是整个 `LayoutSettings`**:多记一个字段就多一条
 /// 「进/出漏抄某一项」的路。
@@ -238,9 +239,9 @@ mod tests {
     /// 必然不相等 —— 那是设计如此,不是 bug。
     /// 旧 layout.json 没有 maximized 字段(2026-09-29 新增):缺项必须回落
     /// false 且**不整表 Corrupt** —— 否则用户升级后 left 偏好被静默清掉,
-    /// 比丢 maximized 严重得多。旧版的 `right`/`right_width` 键(右栏对照
-    /// 预览,live-unify-plan P4 退役)按 `#[serde(default)]` 的结构体级口径
-    /// **静默忽略** —— 无需迁移,读进来即弃。
+    /// 比丢 maximized 严重得多。旧版的 `right`/`right_width` 键(旧右栏面板
+    /// 开合与宽度,P4 摘除;对照预览现由三态 `render_mode` 表达)按
+    /// `#[serde(default)]` 的结构体级口径**静默忽略** —— 无需迁移,读进来即弃。
     #[test]
     fn legacy_json_without_maximized_still_loads() {
         let dir = dir("legacy-no-max");
