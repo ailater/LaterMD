@@ -467,19 +467,10 @@ pub fn default_markdown_style() -> MarkdownStyle {
 /// 字形的行高需求,越界墨迹被相邻行/后续块背景遮挡(「显示不全」)。
 /// 本机无 CJK 候选(或表值解析失败)时原样返回,行为与修复前一致。
 pub fn effective_markdown_style(ctx: &egui::Context, mut style: MarkdownStyle) -> MarkdownStyle {
-    // 旧皮肤文件保留颜色和自定义值；只迁移原先过小的出厂代码样式与出厂
-    // 标题节奏(2026-10-30 起出厂 10px,旧档带着 4px 出厂值落盘的照
-    // code_font_size 先例一并迁;用户手改的其他值不动)。
-    if style.code_font_size == 10.0 {
-        style.code_font_size = 13.0;
-    }
-    if style.heading_space_above == 4.0 {
-        style.heading_space_above = 10.0;
-    }
-    if style.code_block.padding == [4.0, 6.0, 12.0, 6.0] {
-        style.code_block.padding = [12.0, 10.0, 12.0, 10.0];
-        style.code_block.corner_radius = tokens::RADIUS_MD;
-    }
+    // 皮肤是用户明确选择的完整视觉方案:保留其代码字号、代码块内距、
+    // 标题节奏等原始排版参数,不再把旧皮肤静默迁成默认皮肤的观感。
+    // 新安装皮肤由 default_markdown_style()/theme_presets::base() 提供
+    // 新基线;旧皮肤只在字体物理行高上做安全兜底。
     if let Some(floor) = crate::fonts::line_height_floor_em(ctx) {
         style.min_line_height_em = style.min_line_height_em.max(floor);
     }
@@ -2013,9 +2004,8 @@ mod tests {
             assert_eq!(installed.line_height_ratio, 1.7, "标题间距怎么变都不动行距");
         }
 
-        // 旧出厂节奏迁移:皮肤/overrides 带着旧出厂值 4.0 落盘时,生效
-        // 链路抬到新默认 10.0(与 code_font_size 10→13 同款无感升级);
-        // 0.0 等非出厂的显式值不迁(上一环已验)。
+        // 旧皮肤的 4.0 也保持原样:皮肤是用户选择的完整视觉方案,
+        // 不因 app 默认排版升级而静默改变观感。
         let mut old_factory_skin = breathing_skin.clone();
         old_factory_skin.heading_space_above = 4.0;
         ThemeSettings {
@@ -2027,8 +2017,8 @@ mod tests {
         .apply(&ctx, ThemeMode::Dark);
         assert_eq!(
             egui_markdown_style::global_style(&ctx).heading_space_above,
-            10.0,
-            "旧出厂 4.0 经生效链路迁到 10.0"
+            4.0,
+            "旧皮肤标题间距保持原样"
         );
     }
 
