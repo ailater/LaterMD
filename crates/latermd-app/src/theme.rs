@@ -648,6 +648,8 @@ pub struct ShellTokens {
     pub content: Color32,
     /// 主文字。
     pub text: Color32,
+    /// 强调文字(标题、表头、激活控件文字);与品牌 accent 分离。
+    pub strong: Color32,
     /// 次要文字(提示行、占位)。
     pub secondary: Color32,
     /// 悬停底(白底上)。
@@ -682,6 +684,7 @@ pub fn shell_tokens(dark: bool) -> ShellTokens {
             sidebar: Color32::from_rgb(0x1B, 0x1C, 0x1F),
             content: Color32::from_rgb(0x29, 0x2A, 0x2D),
             text: Color32::from_rgb(0xE8, 0xEA, 0xED),
+            strong: Color32::from_rgb(0xF4, 0xF5, 0xF7),
             secondary: Color32::from_rgb(0x9A, 0xA0, 0xA6),
             hover: Color32::from_rgb(0x35, 0x37, 0x3A),
             selected_bg: Color32::from_rgb(0x2B, 0x3F, 0x5E),
@@ -711,6 +714,7 @@ pub fn shell_tokens(dark: bool) -> ShellTokens {
             sidebar: Color32::from_rgb(0xED, 0xEF, 0xF2),
             content: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             text: Color32::from_rgb(0x1F, 0x23, 0x29),
+            strong: Color32::from_rgb(0x25, 0x29, 0x32),
             secondary: Color32::from_rgb(0x64, 0x6A, 0x73),
             hover: Color32::from_rgb(0xF2, 0xF3, 0xF5),
             selected_bg: Color32::from_rgb(0xE1, 0xEF, 0xFF),
@@ -734,6 +738,7 @@ fn macos_shell_tokens(dark: bool) -> ShellTokens {
             sidebar: rgb(36, 36, 38),
             content: rgb(30, 30, 32),
             text: rgb(245, 245, 247),
+            strong: rgb(250, 250, 252),
             secondary: rgb(163, 163, 170),
             hover: rgb(52, 52, 56),
             selected_bg: rgb(48, 61, 78),
@@ -749,6 +754,7 @@ fn macos_shell_tokens(dark: bool) -> ShellTokens {
             sidebar: rgb(240, 240, 242),
             content: Color32::WHITE,
             text: rgb(29, 29, 31),
+            strong: rgb(37, 37, 39),
             secondary: rgb(106, 106, 112),
             hover: rgb(229, 229, 233),
             selected_bg: rgb(220, 231, 244),
@@ -877,7 +883,7 @@ fn apply_shell_to(style: &mut egui::Style, c: ShellTokens) {
         // 分隔线色,与 hover 同量级,平面观感保留。
         (&mut v.widgets.inactive, c.text, c.border),
         (&mut v.widgets.hovered, c.text, c.hover),
-        (&mut v.widgets.active, c.accent, c.selected_bg),
+        (&mut v.widgets.active, c.strong, c.selected_bg),
         (&mut v.widgets.open, c.text, c.hover),
     ];
     for (widget, fg, bg) in widgets {
@@ -886,9 +892,6 @@ fn apply_shell_to(style: &mut egui::Style, c: ShellTokens) {
         widget.weak_bg_fill = bg;
         widget.corner_radius = radius;
         widget.bg_stroke = egui::Stroke::NONE;
-    }
-    if cfg!(target_os = "macos") {
-        // egui 的正文标题取 active 前景;操作强调由独立 accent token 承担。
     }
     // 输入框/按钮内的弱文字(占位符)用次要色
     style.visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
