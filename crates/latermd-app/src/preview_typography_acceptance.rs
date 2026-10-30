@@ -339,8 +339,8 @@ fn typography_doc_geometry_matches_shipped_style_in_both_visuals() {
         let scales = style.heading.scales;
         let spacer_h = style.block_spacing + style.heading_space_above;
         assert_eq!(
-            spacer_h, 12.0,
-            "出厂 spacer = block_spacing(8)+heading_space_above(4)"
+            spacer_h, 18.0,
+            "出厂 spacer = block_spacing(8)+heading_space_above(10,2026-10-30 提档)"
         );
         assert_eq!(scales[0], 2.0, "出厂 H1 分级 2.0(F4 vendored 新默认)");
 

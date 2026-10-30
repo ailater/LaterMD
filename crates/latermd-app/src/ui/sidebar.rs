@@ -1753,14 +1753,15 @@ fn body_space_width(ui: &egui::Ui) -> f32 {
 
 /// 目录行的展开三角:画在行首两个空格占位区的中点上,收起朝右、展开
 /// 朝下。尺寸基准是空格 advance(随正文字号缩放,不随平台字体走样),
-/// 颜色取弱前景(与行号槽同源);纯 `Shape::convex_polygon`,零字形依赖。
+/// 颜色取弱前景(与行号槽同源,2026-10-30 一同退到次要文字档);纯
+/// `Shape::convex_polygon`,零字形依赖。
 fn paint_tree_arrow(ui: &egui::Ui, row: &egui::Response, open: bool) {
     let space_w = body_space_width(ui);
     let center = egui::pos2(row.rect.left() + space_w, row.rect.center().y);
     let r = space_w * 0.62;
     ui.painter().add(egui::Shape::convex_polygon(
         arrow_vertices(center, r, open),
-        ui.visuals().widgets.noninteractive.fg_stroke.color,
+        ui.visuals().weak_text_color(),
         egui::Stroke::NONE,
     ));
 }

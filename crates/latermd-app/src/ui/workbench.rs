@@ -156,6 +156,8 @@ pub(crate) fn status_bar(ui: &mut egui::Ui, state: &State, position: Option<(usi
         state.ai.provider_label().to_owned()
     };
     let mut right = rect.right() - 4.0;
+    // 状态栏元信息字号(2026-10-30 设计审查:11px 在高分屏上存在感过弱)。
+    let meta_font = egui::FontId::proportional(12.0);
     for (index, (text, color)) in [
         (mcp.as_str(), mcp_color),
         (ai.as_str(), colors.secondary),
@@ -167,10 +169,8 @@ pub(crate) fn status_bar(ui: &mut egui::Ui, state: &State, position: Option<(usi
         if index > 0 && rect.width() < crate::ui::tokens::STATUSBAR_DROP_AUX_W {
             break;
         }
-        let text = crate::ui::tabs::elide_text(ui, text, &egui::FontId::proportional(11.0), 150.0);
-        let galley = ui
-            .painter()
-            .layout_no_wrap(text, egui::FontId::proportional(11.0), color);
+        let text = crate::ui::tabs::elide_text(ui, text, &meta_font, 150.0);
+        let galley = ui.painter().layout_no_wrap(text, meta_font.clone(), color);
         right -= galley.size().x;
         ui.painter().galley(
             egui::pos2(right, y - galley.mesh_bounds.center().y),
@@ -196,9 +196,9 @@ pub(crate) fn status_bar(ui: &mut egui::Ui, state: &State, position: Option<(usi
     // UTF-8 解码,而状态栏每帧都画(大文档上这是纯浪费)。
     details.push(format!("{} 字", tab.editor.len_chars()));
     for (index, text) in details.into_iter().enumerate() {
-        let galley =
-            ui.painter()
-                .layout_no_wrap(text, egui::FontId::proportional(11.0), colors.secondary);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(text, meta_font.clone(), colors.secondary);
         if x + galley.size().x > right {
             break;
         }
