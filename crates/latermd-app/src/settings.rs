@@ -407,6 +407,11 @@ pub fn dialog(
     // 也在场」成为本窗自身性质,明暗各走各的 token,不写死任何一档)
     let shell = crate::theme::shell(ui);
     let mac = cfg!(target_os = "macos");
+    let settings_secondary = if ui.visuals().dark_mode {
+        shell.secondary
+    } else {
+        egui::Color32::from_rgb(0x4B, 0x52, 0x5C)
+    };
     let frame = if mac {
         egui::Frame::window(ui.style())
             .fill(shell.content)
@@ -470,6 +475,9 @@ pub fn dialog(
         // 窗口内边距仍走 egui 出厂 window 档(与 quick_open 等其余浮窗同源)
         .frame(frame)
         .show(ui.ctx(), |ui| {
+            // 仅设置窗口内提高 weak 文本对比度;窗口关闭后不会污染全局
+            // shell token 或其他面板。
+            ui.visuals_mut().weak_text_color = Some(settings_secondary);
             if mac {
                 macos::style(ui);
                 egui::Panel::top("settings-heading")
