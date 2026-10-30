@@ -635,6 +635,21 @@ impl ThemeSettings {
     }
 }
 
+fn default_shell_strong() -> Color32 {
+    // 仅用于兼容 v0.0.13 之前已落盘的皮肤 RON;解析后会按该皮肤
+    // 自身的 text/content 推导真实值,不会把旧皮肤改成这一个固定灰色。
+    Color32::from_rgb(0x25, 0x29, 0x32)
+}
+
+fn derive_shell_strong(text: Color32, content: Color32) -> Color32 {
+    let mix = |a: u8, b: u8| (f32::from(a) * 0.92 + f32::from(b) * 0.08).round() as u8;
+    Color32::from_rgb(
+        mix(text.r(), content.r()),
+        mix(text.g(), content.g()),
+        mix(text.b(), content.b()),
+    )
+}
+
 /// 全应用语义颜色。正文、导航、工具栏和弹窗共享同一色板。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellTokens {
@@ -649,6 +664,9 @@ pub struct ShellTokens {
     /// 主文字。
     pub text: Color32,
     /// 强调文字(标题、表头、激活控件文字);与品牌 accent 分离。
+    /// `serde(default)` 保证 v0.0.13 之前的皮肤 RON 仍可加载;
+    /// `parse_skin` 随后按该皮肤的正文/内容色重算旧文件的默认值。
+    #[serde(default = "default_shell_strong")]
     pub strong: Color32,
     /// 次要文字(提示行、占位)。
     pub secondary: Color32,
@@ -1121,7 +1139,19 @@ fn parse_skin(
         matches!(key, ron::Value::String(key) if key == "markdown" || key == "shell")
     }));
     if wrapped {
-        ron::from_str::<SkinFile>(text).map(|file| (file.markdown, Some(file.shell)))
+        ron::from_str::<SkinFile>(text).map(|file| {
+            let mut shell = file.shell;
+            // 旧完整皮肤缺少 strong 字段时,serde 的兼容默认只是占位;
+            // 用该皮肤自身的 text/content 推导,确保青竹护眼等旧预设仍保留
+            // 自己的绿色护眼字色与新的标题层级优化。
+            if shell.light.strong == default_shell_strong() {
+                shell.light.strong = derive_shell_strong(shell.light.text, shell.light.content);
+            }
+            if shell.dark.strong == default_shell_strong() {
+                shell.dark.strong = derive_shell_strong(shell.dark.text, shell.dark.content);
+            }
+            (file.markdown, Some(shell))
+        })
     } else {
         ron::from_str::<MarkdownStyle>(text).map(|style| (style, None))
     }
@@ -1733,10 +1763,30 @@ mod tests {
         };
         let palette = crate::theme_presets::shell_palette("Nord").unwrap();
         let path = export_skin(&dir, "Nord copy", &style, palette).unwrap();
+        // v0.0.13 旧完整皮肤没有 ShellTokens::strong;它必须仍能被
+        // catalog 扫描,并按自身 text/content 颜色补出标题强调色。
+        let mut legacy_shell = palette;
+        legacy_shell.light.strong = default_shell_strong();
+        legacy_shell.dark.strong = default_shell_strong();
+        let legacy_full = ron::ser::to_string(&SkinFile {
+            markdown: style.clone(),
+            shell: legacy_shell,
+        })
+        .unwrap()
+        .replace("strong: ((37, 41, 50, 255)),", "");
+        std::fs::create_dir_all(dir.join("themes")).unwrap();
+        std::fs::write(dir.join("themes/Legacy full.ron"), legacy_full).unwrap();
         std::fs::rename(path, dir.join("themes/Custom.ron")).unwrap();
         let legacy = ron::ser::to_string(&style).unwrap();
         std::fs::write(dir.join("themes/Nord.ron"), &legacy).unwrap();
         let catalog = SkinCatalog::load_from(&dir);
+        let legacy_full = catalog.find("Legacy full").expect("旧完整皮肤仍应载入");
+        let nord_palette = crate::theme_presets::shell_palette("Nord").unwrap();
+        assert_eq!(
+            legacy_full.shell.unwrap().light.strong,
+            derive_shell_strong(nord_palette.light.text, nord_palette.light.content),
+            "旧皮肤缺 strong 时按自身色板补标题色"
+        );
         let mut settings = ThemeSettings::default();
         settings.select_skin(Some("Custom"), &catalog);
         assert_eq!(settings.shell_palette(), palette);
