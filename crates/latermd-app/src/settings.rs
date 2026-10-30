@@ -438,10 +438,13 @@ pub fn dialog(
             ui.painter()
                 .rect_filled(screen, egui::CornerRadius::ZERO, tint);
             let response = ui.allocate_rect(screen, egui::Sense::click());
-            let outside_dialog = response.interact_pointer_pos().is_none_or(|pos| {
-                !ctx.data(|d| {
+            // 首次打开/窗口刚移动时,上一帧可能还没有可靠的外框矩形。
+            // 未知矩形按「窗内」处理,宁可吞掉一次点击,也不能把设置窗口
+            // 因点击穿透误关;已有矩形时才判断点击是否在窗外。
+            let outside_dialog = response.interact_pointer_pos().is_some_and(|pos| {
+                ctx.data(|d| {
                     d.get_temp::<egui::Rect>(egui::Id::new("settings-dialog").with("outer-rect"))
-                        .is_some_and(|rect| rect.contains(pos))
+                        .is_some_and(|rect| !rect.contains(pos))
                 })
             });
             if response.clicked() && outside_dialog {
