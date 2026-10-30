@@ -85,10 +85,28 @@ impl SettingsTab {
     }
 }
 
+/// 设置窗 Area id(按会话派生,见 [`SettingsState::session`])。
+pub(crate) fn dialog_id(session: u64) -> egui::Id {
+    egui::Id::new("settings-dialog").with(session)
+}
+
+/// 设置蒙层 Area id(按会话派生,见 [`SettingsState::session`])。
+pub(crate) fn scrim_id(session: u64) -> egui::Id {
+    egui::Id::new("settings-scrim").with(session)
+}
+
 /// 设置对话框状态。
 pub struct SettingsState {
     /// 是否可见(工具栏齿轮/菜单入口翻开,窗口 X 关闭 —— 原地翻转)。
     pub open: bool,
+    /// 打开会话号(每次 `Message::SettingsOpened` 递增):设置窗与蒙层的
+    /// Area id 按它派生。egui 的浮层层序是**持久**的 —— 同一块 Area 的
+    /// 相对层级只在新 id 首次入栈时确立,之后每帧的置顶标记只做稳定
+    /// 排序、不改相对次序;固定 id 时「关闭前最后那次蒙层外侧点击」会把
+    /// 蒙层永久顶到窗口之上,重开面板就被压在灰色遮罩下面点不到
+    /// (2026-10-30 真机实测)。每会话新 id 让蒙层、窗口按绘制顺序重新
+    /// 入栈,窗口恒在蒙层之上。
+    pub session: u64,
     /// 当前分页。
     pub tab: SettingsTab,
     /// 正在捕获键位的命令;`Some` 时该行显示「按下新键位…」,归约侧
@@ -282,6 +300,7 @@ impl Default for SettingsState {
     fn default() -> Self {
         Self {
             open: false,
+            session: 0,
             tab: SettingsTab::Appearance,
             capture: None,
             notice: None,
@@ -429,8 +448,12 @@ pub fn dialog(
     // 区分(temp 数据跨帧存活、不落盘)。
     let ctx = ui.ctx().clone();
     let screen = ctx.viewport_rect();
+    // 蒙层与窗口的 id 按会话派生(见 [`SettingsState::session`]):egui
+    // 浮层层序持久,固定 id 会让上一次会话的「蒙层在外侧点击时置顶」
+    // 状态延续到下一次打开,把重开的面板压在遮罩下。
+    let session = settings.session;
     let mut scrim_click: Option<egui::Response> = None;
-    egui::Area::new(egui::Id::new("settings-scrim"))
+    egui::Area::new(scrim_id(session))
         .interactable(true)
         .fixed_pos(egui::Pos2::ZERO)
         .show(&ctx, |ui| {
@@ -448,7 +471,7 @@ pub fn dialog(
             // 因点击穿透误关;已有矩形时才判断点击是否在窗外。
             let outside_dialog = response.interact_pointer_pos().is_some_and(|pos| {
                 ctx.data(|d| {
-                    d.get_temp::<egui::Rect>(egui::Id::new("settings-dialog").with("outer-rect"))
+                    d.get_temp::<egui::Rect>(dialog_id(session).with("outer-rect"))
                         .is_some_and(|rect| !rect.contains(pos))
                 })
             });
@@ -460,7 +483,7 @@ pub fn dialog(
     // 标题一改拖动位置记忆就丢;显式 id 让窗口状态与文案解耦,测试也
     // 能按名取 Area 矩形。初始位置(pivot + default_pos)走 centered_dialog。
     let window = crate::ui::workbench::centered_dialog(ui, "设置")
-        .id(egui::Id::new("settings-dialog"))
+        .id(dialog_id(session))
         .default_size(crate::ui::tokens::SETTINGS_DEFAULT_SIZE)
         .min_size(if mac {
             egui::vec2(640.0, 420.0)
@@ -608,10 +631,7 @@ pub fn dialog(
     // (`Area::end` 回填的是全窗矩形,含标题栏与边框)。
     if let Some(window) = window {
         ctx.data_mut(|d| {
-            d.insert_temp(
-                egui::Id::new("settings-dialog").with("outer-rect"),
-                window.response.rect,
-            )
+            d.insert_temp(dialog_id(session).with("outer-rect"), window.response.rect)
         });
     }
     settings.open &= open;
@@ -1646,7 +1666,7 @@ mod tests {
                         // 同一把写锁,嵌在闭包里是重入死锁。
                         let rect = ui.ctx().viewport_rect();
                         ui.data_mut(|d| {
-                            d.insert_temp(egui::Id::new("settings-dialog").with("outer-rect"), rect)
+                            d.insert_temp(dialog_id(settings.session).with("outer-rect"), rect)
                         });
                     }
                     close.set(
@@ -1689,6 +1709,105 @@ mod tests {
         assert!(
             !run(&mut state, Some(corner), true),
             "窗矩形内的点击应被蒙层吞掉、不误关"
+        );
+    }
+
+    /// 关闭前的「蒙层外侧点击」会把蒙层 Area 在 egui 持久层序里顶到窗口
+    /// 之上;固定 id 时这层污染会带进下一次打开 —— 重开的面板被压在灰色
+    /// 遮罩下面,任何点击都先落在蒙层上,面板点不到(2026-10-30 真机实测,
+    /// egui 置顶标记的稳定排序不改同帧内相对次序,取证见
+    /// [`SettingsState::session`])。会话 id 让重开时蒙层、窗口按绘制顺序
+    /// 重新入栈:本测试走「打开→窗外点击关闭→重开」全链路后断言面板中心
+    /// 的最上层是设置窗自身。
+    #[test]
+    fn settings_reopen_stacks_window_above_scrim() {
+        use std::cell::Cell;
+
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+
+        let run = |ctx: &egui::Context, state: &mut State, click: Option<egui::Pos2>| {
+            let close = Cell::new(false);
+            let mut events = Vec::new();
+            if let Some(pos) = click {
+                let press = |pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                };
+                events.push(egui::Event::PointerMoved(pos));
+                events.push(press(true));
+                events.push(press(false));
+            }
+            let system_theme_ok = state.system_theme_ok;
+            let resolved = state.resolved_theme();
+            let State {
+                settings,
+                ai_key,
+                ai,
+                mcp,
+                bed,
+                keymap,
+                theme,
+                skins,
+                ..
+            } = state;
+            let mut outbox = Vec::new();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    close.set(
+                        dialog(
+                            ui,
+                            settings,
+                            theme,
+                            skins,
+                            system_theme_ok,
+                            resolved,
+                            keymap,
+                            ai,
+                            ai_key,
+                            mcp,
+                            bed,
+                            &mut outbox,
+                        )
+                        .is_some_and(|close| close.clicked()),
+                    );
+                },
+            );
+            output.drop_without_applying_deltas();
+            close.get()
+        };
+
+        // 会话 1:经归约打开(会话号递增,与生产同路径),热身两帧后点
+        // 窗外关闭 —— 这一步在旧实现下把蒙层顶到窗口之上。
+        state.apply(Message::SettingsOpened(SettingsTab::Appearance));
+        assert_eq!(state.settings.session, 1, "打开即新会话");
+        assert!(!run(&ctx, &mut state, None));
+        assert!(!run(&ctx, &mut state, None));
+        let corner = ctx.viewport_rect().right_bottom() - egui::vec2(4.0, 4.0);
+        assert!(run(&ctx, &mut state, Some(corner)), "窗外点击应请求关闭");
+        state.settings.open = false;
+
+        // 会话 2:重开。新 id 重新入栈,蒙层先画、窗口后画 → 窗口在上。
+        state.apply(Message::SettingsOpened(SettingsTab::Appearance));
+        assert_eq!(state.settings.session, 2, "重开是新会话");
+        assert!(!run(&ctx, &mut state, None));
+        assert!(!run(&ctx, &mut state, None));
+
+        let session = state.settings.session;
+        let window_rect = ctx
+            .memory(|memory| memory.area_rect(dialog_id(session)))
+            .expect("重开后设置窗 Area 在场");
+        let top_at_panel = ctx.layer_id_at(window_rect.center());
+        assert_eq!(
+            top_at_panel,
+            Some(egui::LayerId::new(egui::Order::Middle, dialog_id(session))),
+            "重开后面板中心的最上层应是设置窗,而非蒙层(压在遮罩下即点不住)"
         );
     }
 
@@ -2597,7 +2716,7 @@ mod tests {
                 last_shapes = output.shapes;
             }
             let window = ctx
-                .memory(|memory| memory.area_rect(egui::Id::new("settings-dialog")))
+                .memory(|memory| memory.area_rect(dialog_id(state.settings.session)))
                 .expect("五帧后设置窗 Area 状态在场");
             let primitives = ctx.tessellate(last_shapes, 1.0);
             let shell = crate::theme::shell_tokens(matches!(mode, ThemeMode::Dark));

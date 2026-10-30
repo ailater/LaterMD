@@ -1619,6 +1619,11 @@ impl State {
                 self.persist_keymap();
             }
             Message::SettingsOpened(tab) => {
+                // 会话号递增:设置窗/蒙层的 Area id 按它派生。egui 浮层
+                // 层序持久,固定 id 会把「上一次关闭前蒙层置顶」的状态带进
+                // 下一次打开,重开的面板被压在遮罩下(settings.rs
+                // SettingsState::session 的取证注释)。
+                self.settings.session = self.settings.session.wrapping_add(1);
                 self.settings.open = true;
                 self.settings.tab = tab;
             }
