@@ -591,7 +591,7 @@ impl LaterMdApp {
                 .size_range(tokens::PREVIEW_MIN_W..=preview_max)
                 .frame(
                     egui::Frame::default()
-                        .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
+                        .inner_margin(egui::Margin::symmetric(if workbench { 24 } else { 8 }, 8))
                         .fill(crate::theme::shell(ui).content)
                         // 左缘的常显分隔线走自绘(见 ⑥),故此处不描边:
                         // `Frame::stroke` 是四边描边,会把顶/右/底也描上。
@@ -664,7 +664,7 @@ impl LaterMdApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::default()
-                    .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
+                    .inner_margin(egui::Margin::symmetric(if workbench { 24 } else { 8 }, 8))
                     .fill(crate::theme::shell(ui).content)
                     .stroke(egui::Stroke::NONE),
             )
@@ -965,7 +965,7 @@ impl LaterMdApp {
                     // 背景必须跟着正文一起走,否则列会「透明」地压在编辑
                     // 区上。色值与 ④ 的 Panel Frame 同源。
                     egui::Frame::default()
-                        .inner_margin(egui::Margin::symmetric(if workbench { 16 } else { 8 }, 8))
+                        .inner_margin(egui::Margin::symmetric(if workbench { 24 } else { 8 }, 8))
                         .fill(crate::theme::shell(ui).content)
                         .stroke(egui::Stroke::NONE)
                         .show(&mut holder, |ui| {

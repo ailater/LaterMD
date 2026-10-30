@@ -286,6 +286,7 @@ fn palette(values: [u32; 5]) -> crate::theme::ShellTokens {
         content,
         sidebar,
         text,
+        strong: mix(text, content, 0.08),
         secondary,
         accent,
         hover: mix(sidebar, text, 0.08),
