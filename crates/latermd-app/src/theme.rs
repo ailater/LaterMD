@@ -449,6 +449,10 @@ pub fn default_markdown_style() -> MarkdownStyle {
     style.code_block.padding = [12.0, 10.0, 12.0, 10.0];
     style.code_block.corner_radius = tokens::RADIUS_MD;
     style.code_block.stroke_width = 1.0;
+    // 标题上方呼吸感(2026-10-30 设计审查):vendored 出厂 4px 偏贴,
+    // 提到 10px 让 H1/H2 与上一段明显拉开一档。vendored 默认不动,与
+    // 代码块内距同款 app 侧覆盖;十套预设经 theme_presets::base 同参。
+    style.heading_space_above = 10.0;
     style.table.stroke_width = 1.0;
     style.table.corner_radius = tokens::RADIUS_MD;
     style.table.header_fill = true;
@@ -463,9 +467,14 @@ pub fn default_markdown_style() -> MarkdownStyle {
 /// 字形的行高需求,越界墨迹被相邻行/后续块背景遮挡(「显示不全」)。
 /// 本机无 CJK 候选(或表值解析失败)时原样返回,行为与修复前一致。
 pub fn effective_markdown_style(ctx: &egui::Context, mut style: MarkdownStyle) -> MarkdownStyle {
-    // 旧皮肤文件保留颜色和自定义值；只迁移原先过小的出厂代码样式。
+    // 旧皮肤文件保留颜色和自定义值；只迁移原先过小的出厂代码样式与出厂
+    // 标题节奏(2026-10-30 起出厂 10px,旧档带着 4px 出厂值落盘的照
+    // code_font_size 先例一并迁;用户手改的其他值不动)。
     if style.code_font_size == 10.0 {
         style.code_font_size = 13.0;
+    }
+    if style.heading_space_above == 4.0 {
+        style.heading_space_above = 10.0;
     }
     if style.code_block.padding == [4.0, 6.0, 12.0, 6.0] {
         style.code_block.padding = [12.0, 10.0, 12.0, 10.0];
@@ -1886,17 +1895,18 @@ mod tests {
     /// `line_height_for` 按各自 span 字号求),标题间距管**块间**
     /// (spacer 行高 = `block_spacing + heading_space_above` 定值,不吃行距
     /// 倍率)。双向钉:动滑杆不动标题间距;换皮肤改标题间距不动行距。
-    /// 出厂默认(无皮肤无 overrides)时两者经同一条链路带 vendored 新
-    /// 默认落进 context(4.0 + 用户行距默认)。
+    /// 出厂默认(无皮肤无 overrides)时两者经同一条链路带 app 出厂值
+    /// 落进 context(heading_space_above 10.0 + 用户行距默认)。
     #[test]
     fn line_height_slider_and_heading_space_above_are_orthogonal() {
         let ctx = egui::Context::default();
-        // 出厂链路:F4 的 vendored 新默认(4.0)应穿透到生效样式
+        // 出厂链路:app 出厂默认(10.0,2026-10-30 自 vendored 4.0 提档)
+        // 应穿透到生效样式
         ThemeSettings::default().apply(&ctx, ThemeMode::Dark);
         let factory = egui_markdown_style::global_style(&ctx);
         assert_eq!(
-            factory.heading_space_above, 4.0,
-            "vendored 新默认穿透出厂链路"
+            factory.heading_space_above, 10.0,
+            "app 出厂默认穿透出厂链路"
         );
         assert_eq!(
             factory.line_height_ratio, LINE_HEIGHT_DEFAULT,
@@ -1930,8 +1940,9 @@ mod tests {
             );
         }
 
-        // 反向:标题间距随皮肤变(9.0→25.0),行距保持滑杆值不动
-        for heading_space in [0.0, 4.0, 9.0, 25.0, 40.0] {
+        // 反向:标题间距随皮肤变(9.0→25.0),行距保持滑杆值不动。
+        // 旧出厂值 4.0 不进本表 —— 它会被生效链路迁到 10.0,见下方迁移断言。
+        for heading_space in [0.0, 5.0, 9.0, 25.0, 40.0] {
             let mut style = breathing_skin.clone();
             style.heading_space_above = heading_space;
             ThemeSettings {
@@ -1948,6 +1959,24 @@ mod tests {
             );
             assert_eq!(installed.line_height_ratio, 1.7, "标题间距怎么变都不动行距");
         }
+
+        // 旧出厂节奏迁移:皮肤/overrides 带着旧出厂值 4.0 落盘时,生效
+        // 链路抬到新默认 10.0(与 code_font_size 10→13 同款无感升级);
+        // 0.0 等非出厂的显式值不迁(上一环已验)。
+        let mut old_factory_skin = breathing_skin.clone();
+        old_factory_skin.heading_space_above = 4.0;
+        ThemeSettings {
+            line_height: 1.5,
+            skin: Some("旧出厂皮肤".to_owned()),
+            skin_style: Some(old_factory_skin),
+            ..ThemeSettings::default()
+        }
+        .apply(&ctx, ThemeMode::Dark);
+        assert_eq!(
+            egui_markdown_style::global_style(&ctx).heading_space_above,
+            10.0,
+            "旧出厂 4.0 经生效链路迁到 10.0"
+        );
     }
 
     /// #23 F3:排版偏好与密度互不覆盖 —— 密度切换(重投影 spacing token)

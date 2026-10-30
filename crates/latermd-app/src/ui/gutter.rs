@@ -52,7 +52,9 @@ pub(crate) fn paint(
     let galley = &output.galley;
     let base = output.galley_pos;
     let clip = ui.clip_rect();
-    let plain = ui.visuals().widgets.noninteractive.fg_stroke.color;
+    // 行号是辅助信息,退到次要文字档(2026-10-30 设计审查:此前取
+    // noninteractive 前景 = 与正文同黑,喧宾夺主);光标行仍用 accent。
+    let plain = ui.visuals().weak_text_color();
     let hot = tokens::accent(ui);
     let font = egui::FontSelection::Style(egui::TextStyle::Monospace).resolve(ui.style());
     let digits_right = slot.right() - PAD_X;

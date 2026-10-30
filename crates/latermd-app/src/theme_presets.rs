@@ -66,15 +66,17 @@ pub fn install_to(dir: &std::path::Path) -> Vec<String> {
 /// 块级默认:代码块/表格圆角 4(与 `RADIUS_SM` 同档,shadcn rounded-sm);
 /// 表格边框 1px + 表头/隔行底色(#30,与出厂默认同口径,线色/底色渲染时
 /// 自动取 `widgets.noninteractive.bg_stroke` / `faint_bg_color`,明暗自适应)。
-/// 标题排版(#23 F4/F5,preview-typography §2 待办 A)与 vendored 出厂值
-/// 一致:`heading.scales` 用 vendored 新分级 [2.0,…,1.0](`MarkdownStyle::
-/// default()` 自带,不在此重复写死),`heading_space_above` 显式钉 4.0
-/// —— 内置预设只在**颜色**上不同,标题节奏是全局一致性属性,不按皮肤
-/// 微调;交叉断言见 `builtins_ship_heading_typography_matching_factory`。
+/// 标题排版(#23 F4/F5,preview-typography §2 待办 A):`heading.scales`
+/// 用 vendored 新分级 [2.0,…,1.0](`MarkdownStyle::default()` 自带,不在
+/// 此重复写死);`heading_space_above` 显式钉 [`crate::theme::
+/// default_markdown_style`] 的出厂值(10.0,2026-10-30 设计审查自 vendored
+/// 出厂 4.0 提档)—— 内置预设只在**颜色**上不同,标题节奏是全局一致性
+/// 属性,不按皮肤微调;交叉断言见
+/// `builtins_ship_heading_typography_matching_factory`。
 fn base() -> MarkdownStyle {
     let mut style = MarkdownStyle::default();
     style.code_font_size = 13.0;
-    style.heading_space_above = 4.0;
+    style.heading_space_above = crate::theme::default_markdown_style().heading_space_above;
     style.code_block = CodeBlockStyle {
         corner_radius: 4.0,
         ..style.code_block
@@ -338,22 +340,24 @@ mod tests {
     }
 
     /// #23 F4/F5:标题排版新字段随十套预设出厂 —— `heading_space_above`
-    /// 显式钉在 vendored 出厂值(4.0),`heading.scales` 走 vendored 新分级
-    /// [2.0,1.55,1.30,1.15,1.08,1.0]。两边都交叉对照
-    /// [`crate::theme::default_markdown_style`](未选皮肤时的出厂正文样式):
+    /// 显式钉在 app 出厂值([`crate::theme::default_markdown_style`] 的
+    /// 10.0,2026-10-30 设计审查自 vendored 出厂 4.0 提档;vendored 默认
+    /// 未动,单独断言防漂移),`heading.scales` 走 vendored 新分级
+    /// [2.0,1.55,1.30,1.15,1.08,1.0]。两边都交叉对照出厂正文样式:
     /// 十套皮肤与「无皮肤默认」在标题节奏上必须完全一致,否则切皮肤会
     /// 意外改变标题观感(preview-typography §2.2「注意 skinsPresets 也要
-    /// 同步」的防线)。vendored 默认将来再变时,此测试红 = 强制一次显式
-    /// 的三处同步(base()/default_markdown_style/vendored default)。
+    /// 同步」的防线)。出厂值将来再变时,此测试红 = 强制一次显式的
+    /// 三处同步(base()/default_markdown_style/本测试字面量)。
     #[test]
     fn builtins_ship_heading_typography_matching_factory() {
         let factory = crate::theme::default_markdown_style();
         let vendored = MarkdownStyle::default();
         assert_eq!(vendored.heading_space_above, 4.0);
+        assert_eq!(factory.heading_space_above, 10.0);
         assert_eq!(vendored.heading.scales, [2.0, 1.55, 1.30, 1.15, 1.08, 1.0]);
         for skin in builtins() {
             assert_eq!(
-                skin.style.heading_space_above, 4.0,
+                skin.style.heading_space_above, 10.0,
                 "{}: 标题上方呼吸间距与出厂默认一致",
                 skin.name
             );
@@ -389,7 +393,7 @@ mod tests {
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             assert!(
-                text.contains("heading_space_above: 4.0"),
+                text.contains("heading_space_above: 10.0"),
                 "{}: 铺盘 ron 应显式写有 heading_space_above(内容: {text})",
                 skin.name
             );
@@ -411,7 +415,7 @@ mod tests {
                 skin.name
             );
             assert_eq!(
-                skin.style.heading_space_above, 4.0,
+                skin.style.heading_space_above, 10.0,
                 "{}: 载入后新字段保持",
                 skin.name
             );
