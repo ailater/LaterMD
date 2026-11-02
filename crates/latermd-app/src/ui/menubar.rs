@@ -291,7 +291,12 @@ fn key_letter(key: egui::Key) -> Option<char> {
 
 /// 本帧「仅 Alt + 字母」按键(标题层助记的触发面)。严格匹配:`matches_logically`
 /// 会忽略事件多余的 Alt(egui 的宽松语义),而助记必须**只在**纯 Alt 时触发,
-/// 否则 Ctrl+Alt+R(切换预览栏)会同时炸开菜单 —— 这里用位相等收死。
+/// 否则 Ctrl+Alt+R(对照列开合)会同时炸开菜单 —— 这里用位相等收死。
+///
+/// > **订正(2026-11-02)**:旧句写「切换预览栏」,那是 P4 摘除
+/// > `ToggleRightPreview` 之前的叫法;同一键位现由 `Command::ToggleCompare`
+/// > 占用(显示名「对照列」,见 `command.rs` 的 label 表),三态下开的是
+/// > 分栏档的对照列,不是旧预览面板。
 fn alt_menu_letter(ctx: &egui::Context) -> Option<char> {
     if cfg!(target_os = "macos") {
         return None;
@@ -1007,7 +1012,7 @@ mod tests {
     /// **冲突审计(本模块核心红线)**:标题助记字母全局唯一,且逐一对照
     /// keymap 出厂表的全部 Alt 类绑定 —— 非 mac 上任何「modifiers 含 Alt」
     /// 的绑定,其主键都不得出现在标题字母集(当前占用者:Alt+T 主题
-    /// #45、Ctrl+Alt+R 预览栏);mac 的 ⌥⌘F(替换,带 ⌘)按编译目标豁免
+    /// #45、Ctrl+Alt+R 对照列开合);mac 的 ⌥⌘F(替换,带 ⌘)按编译目标豁免
     /// ——mac 不启用助记层(决策 #119),且严格位匹配下纯 Alt+F 与
     /// ⌥⌘F 本就不是同一组合。遍历断言,非恒真:给「格式」分了 F、或将来
     /// 新命令绑了 Alt+F,这里红。
@@ -1348,7 +1353,7 @@ mod tests {
         let frame = menu_frame(&ctx, vec![]);
         assert!(!frame.row_open, "Alt+T 不展开标签行");
 
-        // 严格匹配的对照:Ctrl+Alt+R(切换预览栏)带 Ctrl,不是纯 Alt
+        // 严格匹配的对照:Ctrl+Alt+R(对照列开合)带 Ctrl,不是纯 Alt
         let ctx = egui::Context::default();
         menu_frame(
             &ctx,

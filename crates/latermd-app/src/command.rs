@@ -29,7 +29,12 @@ pub enum CommandGroup {
     Edit,
     /// 格式(格式工具条的十五条动作 + 插入图片/Emoji 两个对话框类入口)。
     Format,
-    /// 视图(menubar「视图」的两条 + 预览栏/Live/禅定三个布局开关)。
+    /// 视图(menubar「视图」的两条 + 对照列/切换视图/禅定三个布局开关)。
+    ///
+    /// > **订正(2026-11-02)**:旧句写「预览栏」,那是 P4 摘除
+    /// > `ToggleRightPreview` 之前的名字;三态视图(#250/#252)后这条由
+    /// > [`Command::ToggleCompare`] 掌管,显示名「对照列」(`:405`),而
+    /// > [`Command::ToggleLivePreview`] 的显示名是「切换视图」。
     View,
     /// 标签(menubar 挂在「文件」尾部的三条;蒙层独立成组,容量余裕比菜单宽)。
     Tab,
@@ -194,7 +199,7 @@ pub enum Command {
     /// 专注模式(#64 M2):Live 模式淡化非活动块(活动块与光标邻块保持
     /// 全对比度;纯绘制层,淡化块仍可点击进入编辑)。源码模式不接线。
     /// Ctrl/Cmd+Alt+D(D = Dim,淡化非活动块):出厂表 Ctrl/Cmd+Alt 层
-    /// 只有 R/W(切预览栏/打字机),D 空闲;含 Alt 的绑定按保守口径避开
+    /// 只有 R/W(对照列/打字机),D 空闲;含 Alt 的绑定按保守口径避开
     /// 菜单标题助记集(F/E/O/V/X/A/S),D 不在其中(menubar 标题审计
     /// 测试钉住)—— 首选 F 因「文件」标题撞键被该审计否决,避让口径与
     /// 冲突审计见 decisions-pending #122。
@@ -202,7 +207,7 @@ pub enum Command {
     /// Minimap 缩略图开关(#67 M2):源码模式编辑区右缘缩略导航的显隐,
     /// 落 `theme.show_minimap`(#55 M2 既有配置,设置外观页复选框三方
     /// 一致)。Ctrl/Cmd+Alt+M(M = Minimap 词首):出厂表 Ctrl/Cmd+Alt
-    /// 层现有 C/W/D/R(目录/打字机/专注/预览栏)之外 M 空闲,且 M 不在
+    /// 层现有 C/W/D/R(目录/打字机/专注/对照列)之外 M 空闲,且 M 不在
     /// 菜单标题助记集(F/E/O/V/X/A/S)—— 避让口径与冲突审计见
     /// decisions-pending #129。
     ToggleMinimap,
