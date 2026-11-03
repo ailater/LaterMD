@@ -107,7 +107,10 @@ pub(crate) fn append_highlight_section(
 
 /// 相对图片地址的改写清单:每处
 /// 是一个 `latermd_md::Rewrite`(与 wikilink 展开层**同一结构**),字符串
-/// 改写与偏移映射(`map_source_offset`)共用同一份,两处不漂移。
+/// 改写与偏移映射(`latermd_md::OffsetMap::from_rewrites`)共用同一份,两处
+/// 不漂移。
+/// > 口径(2026-11-03 订正):旧句写的 `map_source_offset` 是预览侧的同款
+/// > 入口,随 live-unify P5 删除;现役同类见 `live.rs` 的块级改写链。
 pub(crate) fn image_rewrites(text: &str, base_dir: Option<&Path>) -> Vec<latermd_md::Rewrite> {
     // div-center 块优先:整块改写,块内其它两路扫描的命中全部让位 ——
     // 清单须升序且互不重叠(`OffsetMap::from_rewrites` 有 debug 断言),

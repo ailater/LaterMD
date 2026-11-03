@@ -597,7 +597,9 @@ fn write_probe(ui: &egui::Ui, index: usize, block: ProbeBlock) {
 }
 
 /// 探针快照:widget id(断言 id 稳定性用)+ 渲染态 + 节点几何。
-/// 仅测试构建存在消费(照 `ScrollProbe` 模式豁免 dead_code)。
+/// 仅测试构建存在消费(照 `live::LiveScrollProbe` 模式豁免 dead_code)。
+/// > 口径(2026-11-03 订正):旧句写的 `ScrollProbe` 是预览侧的探针,随
+/// > live-unify P5 删除;现役同类是 `crate::live::LiveScrollProbe`。
 #[derive(Clone)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct ProbeSnapshot {
