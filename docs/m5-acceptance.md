@@ -55,6 +55,8 @@ x-runs:`(683,700) (715,732) (749,762) (781,794) (815,824) (846,857) (878,889)`
 > **2026-10-15 live-unify P4 后记**:`PanelRight` 键删除(`ToggleRightPreview` 命令随独立右栏开关一并退役),现表 `TITLE_BUTTONS = [PanelLeft, Zen, Settings, Minimize, Maximize, Close]`(6 键;上方 x-runs 是 7 键时代的验收记录,不再对应现码)。
 >
 > **2026-10-15 三态视图再补记**:右栏随后以**三态视图的分栏档**形式回归(PR #250/#252),但**不是** `TitleButton::PanelRight` 的回归 —— 视图切换走标题栏三段开关(写作 / 源码 / 分栏)+ `ToggleLivePreview` 一条命令,标题栏右侧仍是上述 6 键。右栏渲染的是 Live 富渲染的只读实例,不是第二套渲染器。
+>
+> **【订正 2026-11-04,旧后记已被后续实现推翻,勿照读】**:上面两条后记里的「`PanelRight` 已删 / 标题栏 6 键」**在 2026-10-16 PR #255 之后即不再成立** —— 三态视图真机回归收编时把标题栏恢复为 **7 键**(恢复 `TitleButton::PanelRight`,绑定到新增的 `Command::ToggleCompare`,即对照列开合,而非旧 `ToggleRightPreview`)。现码见 `ui/titlebar.rs:46` `[TitleButton; 7]`(含 `PanelRight`)与 `tokens::TITLE_BUTTON_N = 7`,并由 `titlebar.rs:58` 的编译期断言钉死同步。**因此上方第 48/50/52 行的「7 组非背景像素群 / 7 条 x-runs / 7 键 `TITLE_BUTTONS`」重新对得上现码**,不是「7 键时代的过期记录」。保留上面两条原文不动(它们是 2026-10-15 当时的落档),但读者应以本条为准:标题栏**现役**是七键,`PanelRight` 在位且语义是「对照列开/关」。
 
 ### ⑤ 状态栏横跨 —— PASS(横跨与左端采样;右端无内容,见 #33)
 

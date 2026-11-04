@@ -211,8 +211,10 @@ ScrollArea::vertical()
 
 **新增 `Icon` 变体**（`ui/icons.rs`，全部线段/矩形自绘）：
 `Minimize` `Maximize` `Restore` `Close` `PanelLeft` `Zen`
-（无 `PanelRight` —— 右栏开合已并入三态视图的分栏档，独立开关与按钮随 live-unify P4 删除）
+（**`PanelRight` 见下订正** —— 它曾随 live-unify P4 删除，2026-10-16 PR #255 又随三态视图恢复）
 `Link` `CodeInline` `Quote` `CodeBlock` `Divider` `Table` `BulletList` `OrderedList` `TaskList`。
+
+> **【订正 2026-11-04】`Icon::PanelRight` 现役在位**（`ui/icons.rs:67`）。上表原写「无 `PanelRight` —— 右栏开合已并入三态视图的分栏档，独立开关与按钮随 live-unify P4 删除」，这是 2026-10-15 P4 当时的真事实；但三态视图真机回归收编时（PR #255）标题栏恢复七键，`Icon::PanelRight` 一并恢复为**对照列开/关**按钮的图标 —— 它不再代表旧的「关右栏」独立开关（`Command::ToggleRightPreview` 确已删），而是 `Command::ToggleCompare` 的图标（`command.rs:633`），语义由「翻转独立预览面板」变为「非分栏 ⇄ 分栏」。英文述保留不动，读者以本条为准。
 
 ### 6.2 新的业务逻辑层 `crates/latermd-app/src/compose.rs`（纯函数 + 单测）
 
