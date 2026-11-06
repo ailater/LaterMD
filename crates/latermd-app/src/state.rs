@@ -247,7 +247,10 @@ pub struct PreviewState {
     //
     // P5(live-unify)瘦身:`rendered` 与四层渲染映射(`offset_map` /
     // `highlight_map` / `emoji_map` / `task_map`)、`scroll_target` 已删。
-    // 它们只为右栏预览存在;写作渲染在 Live 侧**按块**做同样的五层改写
+    // 它们只为**整篇单标签形态**的那一栏存在(2026-11-06 订正主语:旧句
+    // 写「只为右栏预览存在」,而三态(#250/#252)后右栏是分栏档的只读
+    // `live::ui`,与 Live 侧共用按块改写 —— 这份整篇产物对两列都已不存在);
+    // 写作渲染在 Live 侧**按块**做同样的五层改写
     // (`LiveState::rich_block_with_base`),共享的是 `latermd_md` 的纯函数与
     // `ui::rich_widgets` 的绘制件,不是这份整篇产物。删后每次修订号前进
     // 省掉四遍全文扫描 + 四份映射分配;大纲只需要下面的 `outline`。

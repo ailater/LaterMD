@@ -723,8 +723,8 @@ impl LaterMdApp {
                     return;
                 }
                 let tab = state.tabs.current_mut();
-                // Live 分支(live-unify-plan P1)的两个渲染条件,与右栏预览
-                // 同源同口径:`base_dir` 锚定相对图片的 file:// 改写(未落盘
+                // Live 分支(live-unify-plan P1)的两个渲染条件,与分栏档
+                // 只读对照列(同文件 `:1532` 那个调用点)同源同口径:`base_dir` 锚定相对图片的 file:// 改写(未落盘
                 // 为 None),`heal` 仅 AI 流式写入本标签时开(残缺补闭合)。
                 // 都在 destructure 前取 —— document 不进下面的解构,借用随
                 // 即结束,不与 editor/preview 的 &mut 冲突。

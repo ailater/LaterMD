@@ -1,4 +1,10 @@
-//! AI 指令卡与富渲染链接 handler(右栏预览与 Live 写作渲染**同一套**)。
+//! AI 指令卡与富渲染链接 handler(富渲染**唯一一套**链接 handler)。
+//!
+//! > **订正(2026-11-06)**:旧首句写「右栏预览与 Live 写作渲染**同一
+//! > 套**」,那是 P2 定稿时的两栏表述。三态视图(#250/#252)之后分栏档的
+//! > 只读对照列渲染的就是 `live::ui`,与写作列属**同一条路径**的两种形态
+//! > (AGENTS.md 铁律四),故改称「唯一一套」以免被读成并列两条路径。下面
+//! > 的 D1 拆层来历块是 P2 当时的历史记录,按纪律保留原文不改。
 //!
 //! 2026-10-15 从 `ui::preview`（已于 P5 删除） 搬出并拆层(live-unify-plan P2/D1):
 //! 原 preview::AiLinkHandler(右栏 handler,已随之退役)是纯右栏能力,右栏退役后 AI 卡
@@ -88,9 +94,13 @@ pub(crate) enum AiCardStatus {
     Done,
 }
 
-/// 两栏共用的富渲染链接 handler(P2/D1 拆层后的唯一实现,预览与 Live
-/// 各自构造):基础层五类链接 + doclink + 菜单恒在;AI 卡与 `ai://` 由
-/// [`Self::with_ai`] 显式开启。
+/// 富渲染**唯一**的链接 handler 实现(P2/D1 拆层后的唯一实现;写作列与
+/// 分栏档只读对照列**各自构造**,两列都是 `live::ui`):基础层五类链接 +
+/// doclink + 菜单恒在;AI 卡与 `ai://` 由 [`Self::with_ai`] 显式开启。
+///
+/// > **「两栏 / 预览」订正(2026-11-06)**:旧句写「两栏共用 … 预览与 Live
+/// > 各自构造」。三态后「预览」这个实体已并入分栏档对照列(同源渲染),
+/// > 「两栏」实际指**写作列 + 只读对照列**。
 pub(crate) struct RichLinkHandler {
     clicked: Rc<RefCell<Vec<Message>>>,
     /// `ai://` 链接与指令卡的紫罗兰色(`with_ai` 时填)。
@@ -107,7 +117,8 @@ pub(crate) struct RichLinkHandler {
     /// 最近一次真实发起的 prompt(卡片状态匹配键,取自
     /// [`AiState::last_prompt`];`with_ai` 时填)。
     last_prompt: Option<String>,
-    /// checkbox 探针坐标域(两面板各说各话,消费侧按域过滤)。
+    /// checkbox 探针坐标域(写作列与只读对照列各说各话,消费侧按域过滤
+    /// —— 2026-11-06 订正:旧句「两面板」的「面板」是三态前的实体)。
     task_domain: TaskProbeDomain,
     /// 本帧已渲染的指令卡数:卡片序号 = 文档序,是 widget id 的稳定成分
     /// (AGENTS.md §6.7:绝不含内容长度 —— 编辑指令文本不改序号,id 不变)。
@@ -118,7 +129,7 @@ pub(crate) struct RichLinkHandler {
     /// 的 id 命名空间兜住,两块各序 0 不相撞。
     mermaid_count: Cell<usize>,
     /// 可写列的代码块删除入口(块序号 + CodeClose sink,`Some` 时 mermaid
-    /// 块头挂删除钮进既有确认弹窗通道;预览/估高臂为 None)。
+    /// 块头挂删除钮进既有确认弹窗通道;只读对照列/估高臂为 None)。
     code_close: Option<(usize, std::rc::Rc<std::cell::RefCell<Vec<usize>>>)>,
     /// 本帧各卡片的 widget id(渲染序);测试借它断言 id 稳定性。
     card_ids: RefCell<Vec<egui::Id>>,
@@ -130,8 +141,9 @@ pub(crate) struct RichLinkHandler {
 }
 
 impl RichLinkHandler {
-    /// 基础层:两栏同一套(wiki/hl/emoji/task/mermaid + doclink 内开 +
-    /// 右键/图片菜单)。AI 卡与 `ai://` 不在其中 —— 要就 [`Self::with_ai`]。
+    /// 基础层:同一套基础链接(wiki/hl/emoji/task/mermaid + doclink 内开 +
+    /// 右键/图片菜单),写作列与只读对照列共用。AI 卡与 `ai://` 不在其中
+    /// —— 要就 [`Self::with_ai`]。
     pub(crate) fn new(
         task_domain: TaskProbeDomain,
         dark_mode: bool,
@@ -154,11 +166,11 @@ impl RichLinkHandler {
         }
     }
 
-    /// D1 开关:AI 卡渲染与 `ai://` 拦截。预览恒开;Live 侧 P2 起显式
+    /// D1 开关:AI 卡渲染与 `ai://` 拦截。只读对照列恒开;Live 侧 P2 起显式
     /// 开启(decisions-pending 对 #51 M3 岔路②的显式反向决定,不是无声
     /// 漂移)。`color` 是 `ai://` 链接与指令卡的紫罗兰;流状态取自 `ai`
-    /// (全局面态:同时至多一个流,last_prompt 是状态匹配键 —— 与预览
-    /// 同口径)。
+    /// (全局面态:同时至多一个流,last_prompt 是状态匹配键 —— 与只读
+    /// 对照列同口径)。
     pub(crate) fn with_ai(mut self, color: egui::Color32, ai: &AiState) -> Self {
         self.color = Some(color);
         self.streaming = ai.is_streaming();
@@ -167,7 +179,7 @@ impl RichLinkHandler {
     }
 
     /// D2' 可写列代码块删除入口(mermaid 块头删除钮 → CodeClose 确认弹窗)。
-    /// 预览/估高臂不挂(只读面无删除)。
+    /// 只读对照列/估高臂不挂(只读面无删除)。
     pub(crate) fn with_code_close(
         mut self,
         block_index: usize,
