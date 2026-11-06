@@ -1697,9 +1697,14 @@ pub fn ui(
     // 拿它盲写会把 `**` 插到任意位置(曾是在 live 下点加粗的现行 bug)。
     *selection = None;
 
-    // 按下帧焦点快照(#63,与右栏预览共用同一暂存):checkbox 命中帧要把
-    // 它还给活动块 —— 点击 checkbox 的意图是切换勾选,不是转移焦点。预览
-    // 面板同帧先画时它已收过首份快照(帧号核对,后画者不覆盖)。
+    // 按下帧焦点快照(#63,与分栏档只读对照列共用同一暂存):checkbox 命中
+    // 帧要把它还给活动块 —— 点击 checkbox 的意图是切换勾选,不是转移焦点。
+    // 对照列同帧先画时它已收过首份快照(帧号核对,后画者不覆盖)。
+    //
+    // > **时序主语订正(2026-11-06)**:旧句的两处「右栏预览」「预览面板」
+    // > 是三态视图(#250/#252)之前的实体;三态之后先画的那一列是**分栏
+    // > 档的只读对照列**(渲染的就是本函数),「先画者先收、后画者不覆盖」
+    // > 这条规则不变,换的只是主语。
     crate::ui::rich_widgets::stash_focus_on_press(panel.ctx());
 
     // 打字机模式(#64 M1):每标签一份记忆(与源码模式分槽),帧首读、
@@ -1783,8 +1788,8 @@ pub fn ui(
     let mut sel_ai_anchor: Option<egui::Rect> = None;
     let mut sel_ai_response_id = egui::Id::NULL;
     let block_count = live.blocks.len();
-    // emoji 探针(P1,与预览同一收尾纪律):全块共享一份收集器,块循环内
-    // 逐 handler 记占位区,ScrollArea 之后统一消费。
+    // emoji 探针(P1,与分栏档只读对照列同一收尾纪律):全块共享一份收集
+    // 器,块循环内逐 handler 记占位区,ScrollArea 之后统一消费。
     let emoji_rects: std::rc::Rc<std::cell::RefCell<Vec<egui::Rect>>> = Default::default();
 
     // ScrollArea 状态键:ScrollArea 在 begin() 里以 `ui.make_persistent_id(
@@ -1819,8 +1824,9 @@ pub fn ui(
             .id_salt(editor_id.with("live-scroll"))
             .auto_shrink([false, false])
             .show(&mut content, |ui| {
-                // 块间节奏完全由 [`block_gap`] 前距决定(与右栏预览同口径,
-                // 2026-10-10):egui 出厂 item_spacing.y = 3px 会叠加在演算值
+                // 块间节奏完全由 [`block_gap`] 前距决定(与分栏档只读对照列
+                // 同口径,2026-10-10 —— 它与主写作列是同一个 [`block_gap`],
+                // 见该函数上方的 2026-10-28 参照物订正):egui 出厂 item_spacing.y = 3px 会叠加在演算值
                 // 上,归零让前距成为唯一间距源。
                 ui.spacing_mut().item_spacing.y = 0.0;
                 // #111 B 的滚动锚定落点:视口上方块的占位高变化会平移下方全
@@ -2769,7 +2775,7 @@ pub fn ui(
                             task_map,
                             image_map,
                         ) = live.rich_block_with_base(index, block_text, base_dir);
-                        // 字体与右栏预览同源(#23 F3):size = 用户字号偏好,
+                        // 字体与分栏档只读对照列同源(#23 F3):size = 用户字号偏好,
                         // 族 = 预览专用族(#43 M2 的行 metrics 对齐副本,无 CJK
                         // 回落 Proportional)。源码/Live 两种模式下排版偏好同观感。
                         // 两栏同一套富渲染链接 handler(P2/D1):wiki/hl/
@@ -2827,7 +2833,8 @@ pub fn ui(
                         ))
                         .wrap()
                         .overflow_wrap(egui_markdown::OverflowWrap::BreakAll)
-                        // 代码块复制头(#38)与右栏预览同一份:Live 模式的
+                        // 代码块复制头(#38)与分栏档只读对照列同一份
+                        // (`ui::rich_widgets::code_header_buttons`):Live 模式的
                         // 富渲染块也是「code 预览的地方」。
                         .scroll_code_blocks(true)
                         .shrink_code_blocks(true)
@@ -2844,15 +2851,17 @@ pub fn ui(
                             // 开启,残缺 fence / 未闭合 ** 在块片段上补闭合 —— 块级
                             // 契约由 latermd_md 的 block_level_heal_closes_streaming_
                             // fragments 钉住。完整块上 heal 恒等(Cow::Borrowed),
-                            // 开关切换不改变完整块渲染(与预览同一口径)。
+                            // 开关切换不改变完整块渲染(与分栏档对照列同一口径,
+                            // 两列走同一个 `heal` 参数推导,见 `ui::layout`)。
                             .heal(heal)
                             // 视口外代码块高亮延迟(#59/#60,vendor ①类配套):缓存
                             // miss 帧里起始于视口下缘之外的 flush 段不做 syntect
                             // 高亮,滚到可见前的同帧补齐 —— 大文档写作模式首切
-                            // 同享 20k 行 876→173ms 的收益(预览同参数)。
+                            // 同享 20k 行 876→173ms 的收益(与分栏档对照列同参数)。
                             .defer_offscreen_highlight(true)
                             // mermaid 块出图(#51 M3)+ 任务 checkbox(#63),
-                            // 与右栏预览同一渲染入口。
+                            // 与分栏档只读对照列同一渲染入口
+                            // (`ui::ai_card::RichLinkHandler`,两列各自构造)。
                             .link_handler(&rich_handler)
                             .show(ui);
                         // drain 前先取「本块拦截了链接点击」标志(wikilink/本地
@@ -3094,12 +3103,17 @@ pub fn ui(
                 }
             });
 
-    // emoji inline widget 的收尾(P1,与右栏预览同一收尾:①手型抑制 ——
-    // vendored 对悬停中的 inline widget 无条件置 PointingHand(label.rs
-    // `handle_hover`),`link_style` 管不到光标,只能在帧末把指针悬停 emoji
-    // 时的光标按回 Default;中央面板后画,后写者胜,预览侧同帧的同名写被
-    // 覆盖是预期);②把本帧占位区写进探针(每帧整帧覆盖,零 emoji 帧不留
-    // 上一帧的旧区块),无头测试读它断言 widget 生效段。
+    // emoji inline widget 的收尾(P1,与分栏档只读对照列同一收尾:①手型
+    // 抑制 —— vendored 对悬停中的 inline widget 无条件置 PointingHand
+    // (label.rs `handle_hover`),`link_style` 管不到光标,只能在帧末把指针
+    // 悬停 emoji 时的光标按回 Default;中央面板后画,后写者胜,对照列同帧
+    // 的同名写被覆盖是预期);②把本帧占位区写进探针(每帧整帧覆盖,零
+    // emoji 帧不留上一帧的旧区块),无头测试读它断言 widget 生效段。
+    //
+    // > **时序主语订正(2026-11-06)**:旧两处的「右栏预览」「预览侧」是
+    // > 三态视图(#250/#252)之前的实体;三态之后与中央面板争用同名探针的
+    // > 是**分栏档的只读对照列**,与本函数同一条渲染路径。「中央面板后画、
+    // > 后写者胜」这条时序不变。
     let emoji_rects = emoji_rects.borrow().clone();
     let hovering_emoji = panel
         .input(|input| input.pointer.latest_pos())
@@ -3214,8 +3228,8 @@ pub fn ui(
         }
     }
 
-    // 任务 checkbox 的帧末命中(#63,与右栏预览同一探针纪律):全部块
-    // 画完后读本帧探针,点击落在 Live 域某枚占位区内 → 切换消息(块内
+    // 任务 checkbox 的帧末命中(#63,与分栏档只读对照列同一探针纪律):
+    // 全部块画完后读本帧探针,点击落在 Live 域某枚占位区内 → 切换消息(块内
     // 载荷 + 记录时块首 = 源码偏移;过期偏移由归约侧 pulldown 重扫闸住),
     // 并归还按下帧持焦者 —— vendored 的 handler.click 对列表项 widget
     // 不可达(实测断零消息),这里是 Live 侧唯一切换入口。
@@ -10627,8 +10641,16 @@ mod tests {
 
     // —— ==高亮== Live 接入(#65 M2)——
 
-    /// 富渲染块改写:高亮层先跑、任务层后跑(与预览四层链的生产顺序一
-    /// 致),缓存命中直取;无目标字符的块恒等(零变化护栏)。
+    /// 富渲染块改写:高亮层先跑、任务层后跑(顺序与 [`LiveState::rich_block_with_base`]
+    /// 的五层链一致:wikilink → 高亮 → emoji → 任务 → 图片),缓存命中直取;
+    /// 无目标字符的块恒等(零变化护栏)。
+    ///
+    /// > **参照物订正(2026-11-06)**:旧句写「与**预览四层链**的生产顺序
+    /// > 一致」,那份整篇四层链产物(wikilink/高亮/emoji/任务四层映射)已在
+    /// > P5 删除(`ui::preview` 整模块、`PreviewState` 的四层映射字段),
+    /// > 按旧句去搜「预览四层链」在代码里零命中。顺序事实本身没变 —— 现役
+    /// > 顺序钉在本函数所在的五层链(比旧四层多一层图片)与同处的顺序纪律
+    /// > 注释上,故改指向现役入口。
     #[test]
     fn live_rich_block_stacks_highlight_and_task_layers() {
         let mut live = LiveState::default();
@@ -10655,9 +10677,10 @@ mod tests {
         );
     }
 
-    /// Live handler 收口:`hl://` 接管排版段(底色 = 与预览同一共享推导
-    /// 真源)、link_style 正文色无下划线、click 吞掉(不开浏览器);任务
-    /// checkbox 路径分毫不动。
+    /// Live handler 收口:`hl://` 接管排版段(底色 = 与分栏档只读对照列
+    /// 同一共享推导
+    /// 真源 [`crate::ui::rich_widgets::highlight_bg_color`])、link_style
+    /// 正文色无下划线、click 吞掉(不开浏览器);任务 checkbox 路径分毫不动。
     #[test]
     fn live_highlight_handler_contained() {
         let ctx = egui::Context::default();
@@ -10682,7 +10705,7 @@ mod tests {
             assert_eq!(
                 job.sections[0].format.background,
                 crate::ui::rich_widgets::highlight_bg_color(ui.visuals()),
-                "底色 = 与预览同一推导真源"
+                "底色 = 与对照列同一推导真源"
             );
             let style = handler.link_style("hl://").expect("hl:// 有样式");
             assert_eq!(style.color, Some(body), "正文色");
@@ -10710,8 +10733,8 @@ mod tests {
         output.drop_without_applying_deltas();
     }
 
-    /// 面板端到端:Live 富渲染块(非活动)里的 `==高亮==` 与右栏预览同一
-    /// 观感 —— 底色段落进 galley,且不开浏览器(`click` 吞掉后 vendored
+    /// 面板端到端:Live 富渲染块(非活动)里的 `==高亮==` 与分栏档只读
+    /// 对照列同一观感(两列都走本文件的渲染路径)—— 底色段落进 galley,且不开浏览器(`click` 吞掉后 vendored
     /// 不会把 `hl://` 交给 `OpenUrl`)。
     #[test]
     fn live_rich_block_renders_highlight_section() {
