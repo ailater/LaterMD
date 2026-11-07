@@ -203,6 +203,15 @@ pub enum Command {
     /// 菜单标题助记集(F/E/O/V/X/A/S),D 不在其中(menubar 标题审计
     /// 测试钉住)—— 首选 F 因「文件」标题撞键被该审计否决,避让口径与
     /// 冲突审计见 decisions-pending #122。
+    ///
+    /// > 【订正 2026-11-07】「Ctrl/Cmd+Alt 层只有 R/W」是本命令 2026-10-07
+    /// > 定稿当时的实况;插入目录 C(#66 M2)与 minimap M(#67 M2)先后进
+    /// > 入同一层,**现役全集是非 mac 口径的 C/D/M/R/W 五字母**(mac 另有
+    /// > ⌥⌘F 替换同在一层)。**本句的用途是「D 当时空闲、现在仍独占」的
+    /// > 取证**,不是该层的现役全集 —— 要看全集读 [`Command::default_shortcut`]
+    /// > 里 `Modifiers::ALT` 的各支。避让规则本身不受影响:D 仍独占。
+    /// > 注:本层的 R 宿主已由 `ToggleRightPreview`(P4 删)换成
+    /// > `Command::ToggleCompare`(#255),**键位从未空出**。
     FocusModeToggle,
     /// Minimap 缩略图开关(#67 M2):源码模式编辑区右缘缩略导航的显隐,
     /// 落 `theme.show_minimap`(#55 M2 既有配置,设置外观页复选框三方
@@ -210,6 +219,11 @@ pub enum Command {
     /// 层现有 C/W/D/R(目录/打字机/专注/对照列)之外 M 空闲,且 M 不在
     /// 菜单标题助记集(F/E/O/V/X/A/S)—— 避让口径与冲突审计见
     /// decisions-pending #129。
+    ///
+    /// > 【订正 2026-11-07】同上:这条「现有 C/W/D/R」列的是**本命令 2026-10-08
+    /// > 定稿当时**的邻字母(C 随 #66 M2 同期入层)。**现役全集是 C/D/M/R/W
+    /// > 五个字母** —— M(本命令自己)早已不在「之外」。全集以
+    /// > [`Command::default_shortcut`] 里 `Modifiers::ALT` 的各支为准。
     ToggleMinimap,
 }
 
@@ -449,7 +463,13 @@ impl Command {
     /// 选型定案再定。
     ///
     /// ToggleSidebar 取 Ctrl/Cmd+\\ 而非更常见的 Ctrl+B:Markdown 工作台的
-    /// Ctrl+B 要留给将来的加粗(与主流 Markdown 编辑器一致)。
+    /// Ctrl+B 要留给加粗(与主流 Markdown 编辑器一致)。
+    ///
+    /// > 【订正 2026-11-07】这句原本写「留给**将来的**加粗」—— 写它时
+    /// > `FormatBold` 尚未接线,故用将来时。现加粗早已落地(见下方
+    /// > `Self::FormatBold` 一支,出厂即 Cmd/Ctrl+B),「将来」二字已过期,
+    /// > 会让读者以为 Ctrl+B 仍未被占用而另作他用。**避让规则本身不变**
+    /// > —— Ctrl+B 仍归属加粗,只是时态改为现在时。
     pub fn default_shortcut(self) -> Option<egui::KeyboardShortcut> {
         let shortcut = match self {
             Self::New => egui::KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::N),

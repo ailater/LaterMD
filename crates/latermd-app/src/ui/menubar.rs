@@ -143,8 +143,16 @@ const SETTINGS_MNEMONIC: char = 'S';
 
 /// 「帮助」菜单(#71 M1)的标题助记字母(H = Help 词首;与 [`MENUS`]
 /// 的 F/E/O/V/X/A/S 及 `SETTINGS_MNEMONIC` 在 Alt 命名空间互不撞,keymap
-/// 出厂 Alt 系七条也没有 Alt+H —— 冲突审计见
+/// 出厂 Alt 系七条 T(主题)/R(对照列)/F(替换,仅 mac)/W(打字机)/D(专注)/
+/// C(插入目录)/M(minimap)也没有 Alt+H —— 冲突审计见
 /// `title_mnemonics_unique_and_clear_of_keymap_alt_bindings`)。
+///
+/// > 【订正 2026-11-07】本句写于 2026-10-09,「七条」指当时的 T/R/F/W/D/C/M,
+/// > 计数**至今成立**:其中 R 当时的宿主是 `ToggleRightPreview`(已随
+/// > live-unify P4 删除),但**键位未空出** —— 同一条 Cmd/Ctrl+Alt+R 立即由
+/// > `Command::ToggleCompare` 就地复用(#255),仍是七条。按 P6 定稿口径此处
+/// > 不写「退役」,只登记 R 的宿主已从旧命令换成 `ToggleCompare`。
+/// > (文档侧的同样区分见 docs/menu-coverage.md §5「共六条」那处订正。)
 const HELP_MNEMONIC: char = 'H';
 
 /// 「帮助」菜单条目「关于 LaterMD…」的条目助记(A = About 词首;帮助

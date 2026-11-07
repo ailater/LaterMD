@@ -165,9 +165,31 @@ ToggleMinimap(#67 M2)进「视图」第一段(专注之后、主题之前),同�
      同款共存,避开助记集 F/E/O/V/X/A/S,#122);
   6. `Ctrl/Cmd+Alt+M` = ToggleMinimap(#67 M2,M = Minimap 词首;Ctrl/
      Cmd+Alt 层 C/W/D 之外 M 空闲,避开助记集 F/E/O/V/X/A/S,#129)。
+  7. `Ctrl/Cmd+Alt+R` = **ToggleCompare**(三态视图的对照列开合,#255
+     补;键位原属已删的 `ToggleRightPreview`,由本命令就地复用 —— 见下
+     方 2026-11-07 订正)。
   六条互不冲突,且 `matches_logically` 对「显式无 Ctrl/Cmd」的 Alt+T
   要求事件确实没按 Ctrl/Cmd(`alt_t_fires_only_toggle_theme` 钉住),
   与 Ctrl/Cmd+Alt+R / Ctrl/Cmd+Alt+C 不相抢。
+
+  > **【订正 2026-11-07】「共六条」已不成立,现役仍为七条** —— 本行写于
+  > live-unify P6(2026-10-15),当时的事实是「原七条的 `Ctrl/Cmd+Alt+R`
+  > = `ToggleRightPreview` 已随该命令删除」,故由七改成六。**同一键位在次日
+  > (#255,2026-10-16,三态视图真机三回归收编)被 `Command::ToggleCompare`
+  > 就地复用** —— 它拿的正是「P4 退役后空出的旧键位」,理由明写「肌肉记忆
+  > 延续到同一块屏幕区域」。删除与复用相隔一天、方向相反,写「六条」的人只
+  > 看到删除那一半。
+  >
+  > **结论**:Alt 系现役 **T / R / F / W / D / C / M 七条**,与上一条标题助记
+  > 集里「Alt 系七条也无 Alt+H」的计数一致;上文编号列表第 1–6 项本身无误,
+  > 只需补第 7 项 `Ctrl/Cmd+Alt+R` = `ToggleCompare`(三态视图的对照列开合,
+  > 宿主由已删的 `ToggleRightPreview` 换成该命令,**键位从未空出**)。本句
+  > 「六条互不冲突」的事实不受影响 —— 七条同样互不冲突,审计测试
+  > `title_mnemonics_unique_and_clear_of_keymap_alt_bindings` 逐条遍历,
+  > 计数变化不影响其成立。
+  >
+  > 历史记录不改写:上一行的「六条」与其时的删除事实一并留档,以上述订正为
+  > 准。
 
 ## 6. 守门测试(矩阵的代码面)
 
