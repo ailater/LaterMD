@@ -229,10 +229,23 @@ pub fn ui_with_probe(
     // 高度恒定 30px,与按钮数、面板宽窄无关。
     //
     // 代价如实记:240px 极端窄列落在**最窄档**,一行 331px 仍放不下,
-    // 「更多」会滚出视野,九个低频动作只能经菜单栏「格式」触达。判为
-    // 可接受 —— 菜单栏本就收了全部 17 项(menu-coverage 44/44 守门),
-    // 可发现性不丢;而 33px 的稳定高度收益是每天都吃得到的。2026-10-10
-    // 起中宽档先按 `tier_plan` 收拢,滚动只剩极端窄列一种情形。
+    // 「更多」会滚出视野,九个低频动作里八个可经菜单栏「格式」触达,
+    // `Plain` 只能水平滚回工具条的「更多」。判为可接受 —— 菜单栏「格式」
+    // 收了 17 条命令(15 条 `Format*` + `ImageInsert` + `EmojiPicker`),
+    // 而 `every_command_has_a_menu_entry` 的 44/44 守的是 `Command::ALL`
+    // 全集,不是这 17 项;而 33px 的稳定高度收益是每天都吃得到的。
+    // 2026-10-10 起中宽档先按 `tier_plan` 收拢,滚动只剩极端窄列一种情形。
+    //
+    // > 【订正 2026-11-08】旧句写「九个低频动作只能经菜单栏「格式」触达」+
+    // > 「菜单栏本就收了全部 17 项(menu-coverage 44/44 守门),可发现性
+    // > 不丢」。两处集合混淆:①44/44 遍历的是 `Command::ALL`,守「每条
+    // > 命令恰好进一个菜单一次」,不作为「17 个格式动作全覆盖」的判据;
+    // > ②17 是 `FORMAT_MENU` 的**命令条目数**,其中 `EmojiPicker` 不是
+    // > `FormatAction`,而 `FormatAction::ALL` 的 17 个里 `Plain` 没有
+    // > Command(`command_of` 返回 `None`),菜单栏「格式」里没有它 ——
+    // > 故「九个都能经菜单栏触达」「可发现性不丢」对它不成立。此为该档位
+    // > 的既有边界,本轮只订正措辞,不改行为(补 `Plain` 的命令/菜单入口
+    // > 属新功能,不在本次范围)。
     egui::ScrollArea::horizontal()
         .id_salt("format-bar")
         .auto_shrink([false, true])
@@ -515,8 +528,15 @@ mod tests {
     use egui::{Event, PointerButton, RawInput, Rect};
     use std::cell::Cell;
 
-    /// 十七个动作各有一个 command:这是「键位与图标都挂在命令层」的守卫,
-    /// 也是 `Plain` 目前没有 Command 这一事实的唯一登记处。
+    /// `FormatAction::ALL` 里除 `Plain` 外的 16 个动作各有一个 command:
+    /// 这是「键位与图标都挂在命令层」的守卫,也是 `Plain` 目前没有
+    /// Command 这一事实的唯一登记处。
+    ///
+    /// > 【订正 2026-11-08】旧首句写「十七个动作各有一个 command」,与
+    /// > 紧接的次句「`Plain` 没有 Command」及本测试自身
+    /// > (`every_action_has_a_command_except_plain`)都自相矛盾。现按测试
+    /// > 实际断言写:遍历 `FormatAction::ALL` 的 17 个,16 个有、`Plain`
+    /// > 无。
     #[test]
     fn every_action_has_a_command_except_plain() {
         for action in FormatAction::ALL {
