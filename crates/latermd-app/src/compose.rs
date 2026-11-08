@@ -2,7 +2,15 @@
 //!
 //! 所有语义都在这里,`ui` 只负责画按钮、`logic` 只负责把结果写回缓冲:
 //! `apply` 不吃 egui、不吃 IO,输入字符串与**字符**偏移,输出新字符串与
-//! 新选区。十七条规则因此全都能落到单测上。
+//! 新选区。每个动作分支因此都能落到单测上。
+//!
+//! > 【订正 2026-11-08】旧句写「十七条规则因此全都能落到单测上」。当时
+//! > enum 与 `FormatAction::ALL` 都恰为 17 个,数字没错;后来新增
+//! > `DuplicateSelection` / `DuplicateLine` 两个变体(不上工具条、只走
+//! > 命令层),enum 变 19 而 `ALL` 仍是 17,这句没跟着改。现改为不写死
+//! > 数量的「每个动作分支」,免得下次加变体再过期。覆盖路径:
+//! > `degenerate_inputs_do_not_panic` 遍历 `ALL` 的 17 个,另两条各有
+//! > 独立测试(`duplicate_selection_...` / `duplicate_line_...`)。
 //!
 //! ## 偏移一律是字符
 //!
@@ -21,7 +29,14 @@ use std::ops::Range;
 
 use latermd_md::{inline_style_spans, InlineStyleKind, InlineStyleSpan};
 
-/// 格式动作。十七个,与工具条四组按钮一一对应。
+/// 格式动作:19 个变体。其中 `FormatAction::ALL` 的 17 个与工具条四组
+/// 按钮一一对应;`DuplicateSelection` / `DuplicateLine` 两个不上工具条
+/// (键盘动作,经「编辑」菜单与快捷键触达),但同样是 `apply` 的规则分支。
+///
+/// > 【订正 2026-11-08】旧句写「格式动作。十七个,与工具条四组按钮一一
+/// > 对应」。17 是 `ALL` 的长度,不是 enum 变体数(现为 19)。旧句定稿时
+/// > 两者恰相等,后加两个 Duplicate 变体后没回头改;「与工具条四组一一
+/// > 对应」这个判据只适用于 `ALL`,故保留该分句并显式点出被排除的两条。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FormatAction {
     /// `**粗体**`
@@ -150,8 +165,18 @@ impl FormatGroup {
     /// 块是**按段落语境**才用的低频动作,全部平铺时它们与行内组视觉权重
     /// 相同,等于把低频动作提到与高频同等显眼的位置。
     ///
-    /// **可发现性不丢**:`FORMAT_MENU`(menubar.rs)早已收了全部 17 个格式
-    /// 动作,菜单栏才是全量入口,工具条只是快捷面。
+    /// **可发现性不丢**:`FORMAT_MENU`(menubar.rs)收了 `ALL` 里 16 个有
+    /// Command 的动作(15 条 `Format*` + `ImageInsert`),菜单栏是命令层
+    /// 的全量入口,工具条只是快捷面。
+    ///
+    /// > 【订正 2026-11-08】旧句写「`FORMAT_MENU` 早已收了全部 17 个格式
+    /// > 动作」:两个 17 指的是**不同集合**。`FORMAT_MENU` 的 17 条命令是
+    /// > 「15 条 `Format*` + `ImageInsert` + `EmojiPicker`」,其中
+    /// > `EmojiPicker` 根本不是 `FormatAction`;而 `FormatAction::ALL` 的
+    /// > 17 个动作里 `Plain` 没有 Command(`command_of` 返回 `None`),只在
+    /// > 工具条上有按钮,进不了任何菜单。故「全部 17 个」两头都不成立,
+    /// > 改为逐条对齐后的 16 条。另两条 enum 变体 `DuplicateSelection` /
+    /// > `DuplicateLine` 经「编辑」菜单触达,本就不在 `ALL` 里。
     ///
     /// **为什么列表组也直出**(首版只留行内组,被守门测试当场打回):
     /// `Task` 是十七个动作里唯一的**多步交互** —— 点一次循环
