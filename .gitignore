@@ -26,3 +26,7 @@ target
 .codex/*
 /dist/*
 **/*.rs.bk
+generated-videos/*
+promo-work/*
+.video_agent/*
+.DS_Store
